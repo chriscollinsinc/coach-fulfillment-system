@@ -92,8 +92,6 @@ route('POST', /^\/api\/logout$/, ['admin','lead','sales','coach'], (req, res, m,
   send(res, 200, { ok: true }, { 'Set-Cookie': 'cfs=; Path=/; Max-Age=0' });
 });
 route('POST', /^\/api\/forgot-password$/, null, (req, res, m, body) => {
-  // Always respond the same way whether or not the email exists, so the endpoint
-  // can't be used to enumerate registered users.
   const u = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(body.email || '').toLowerCase().trim());
   if(u){
     const token = createPasswordReset(u.id);
@@ -340,6 +338,24 @@ route('PATCH', /^\/api\/users\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
 /* ----- audit ----- */
 route('GET', /^\/api\/audit$/, ['admin'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300').all());
+});
+
+/* TEMPORARY diagnostic — remove once the clients-table migration is designed against
+ * confirmed real production data. Token-gated the same way earlier temp endpoints were. */
+const DEBUG_TOKEN = process.env.DEBUG_TOKEN || '';
+route('GET', /^\/api\/_db-state-debug$/, null, (req, res) => {
+  if(!DEBUG_TOKEN || req.headers['x-debug-token'] !== DEBUG_TOKEN) return err(res, 403, 'forbidden');
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+  const counts = {};
+  for(const t of tables){
+    try{ counts[t] = db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c; }catch(e){ counts[t] = 'error: ' + e.message; }
+  }
+  let distinctContractClients = null, distinctVisitClients = null, contractsWithKeap = null, sampleContracts = null;
+  try{ distinctContractClients = db.prepare('SELECT COUNT(DISTINCT client_name) c FROM contracts').get().c; }catch(e){}
+  try{ distinctVisitClients = db.prepare('SELECT COUNT(DISTINCT client) c FROM visits').get().c; }catch(e){}
+  try{ contractsWithKeap = db.prepare('SELECT COUNT(*) c FROM contracts WHERE keap_subscription_id IS NOT NULL').get().c; }catch(e){}
+  try{ sampleContracts = db.prepare('SELECT id,client_name,program,status,keap_subscription_id,keap_company_id FROM contracts ORDER BY id LIMIT 10').all(); }catch(e){}
+  send(res, 200, { tables, counts, distinctContractClients, distinctVisitClients, contractsWithKeap, sampleContracts, phase1MigratedFlag: getMeta('phase1_migrated') });
 });
 
 /* ================= Keap webhook receiver ================= */
