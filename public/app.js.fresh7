@@ -689,11 +689,7 @@ function clientProfileView(data, notes){
   const pct = visitProgress.total ? Math.round(visitProgress.completed/visitProgress.total*100) : 0;
   const activeContract = contracts.find(c=>c.status==='active');
   let html = `<div class="panel">
-    <div class="controls">
-      <button class="btn tiny" onclick="go('clients')">← All clients</button>
-      <span style="flex:1"></span>
-      ${D.user.role==='admin' ? `<button class="btn tiny danger" onclick="deleteClientDlg(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Delete client</button>` : ''}
-    </div>
+    <button class="btn tiny" onclick="go('clients')">← All clients</button>
     <h2 style="margin-top:8px">${esc(client.name)}
       ${client.status==='active'?'<span class="pill p-done">active</span>':client.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}
     </h2>
@@ -750,19 +746,6 @@ async function saveAssignedCoach(clientId, coachId){
   await api('PATCH','/api/clients/'+clientId, { assigned_coach_id: coachId || null });
   toast('Coach assignment saved');
   await loadClientProfile(clientId);
-}
-function deleteClientDlg(clientId, clientName){
-  openDlg(`<h3>Delete ${esc(clientName)}?</h3>
-    <p class="small">This permanently deletes the client, its contracts, visits, and notes. This cannot be undone.</p>
-    <label>Type the client name to confirm</label><input id="delConfirm" placeholder="${esc(clientName)}">
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary danger" onclick="doDeleteClient(${clientId},'${esc(clientName).replace(/'/g,"\\'")}')">Delete permanently</button></div>`);
-}
-async function doDeleteClient(clientId, clientName){
-  if($('#delConfirm').value.trim() !== clientName){ alert('Name does not match — nothing was deleted.'); return; }
-  await api('DELETE','/api/clients/'+clientId);
-  closeDlg(); toast(clientName+' deleted');
-  go('clients');
 }
 function clientNoteCard(clientId, n){
   const title = `${fmt(n.note_date)} — ${esc(n.note_type)}`;
