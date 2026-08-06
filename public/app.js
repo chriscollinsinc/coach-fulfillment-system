@@ -25,29 +25,14 @@ function mondaysInMonth(y,m){ // m 0-based
 }
 function mondaysRange(fromIso,toIso){ const out=[]; let w=mondayOf(new Date(fromIso+'T12:00:00')); if(w<fromIso) w=addDays(w,7); while(w<=toIso){ out.push(w); w=addDays(w,7);} return out; }
 
-/* Guess a program cadence from a Keap subscription's billing_cycle + billing_frequency —
-   prefill only; the lead always confirms/edits before creating the contract. */
-function guessProgram(cycle, freq){
-  const c=(cycle||'').toUpperCase(); const f=+freq||1;
-  if(c==='MONTH'){
-    if(f>=6) return 'Bi-Annual';
-    if(f===3) return 'Quarterly';
-    if(f===2) return 'Semi-Monthly';
-    return 'Monthly';
-  }
-  if(c==='YEAR') return 'Bi-Annual';
-  return 'Quarterly';
-}
-
 /* ---------- app state ---------- */
-let D = null;   // server state {user, teams, coaches, blocks, visits, users?, pendingClientCount?}
+let D = null;   // server state {user, teams, coaches, blocks, visits, users?}
 let st = {
   view:'dashboard', boardTeam:null,
   boardY:+TODAY.slice(0,4), boardM:+TODAY.slice(5,7)-1,
   placing:null, detail:null,
   invFilter:'active', invSearch:'',
   due2027:false,
-  pendingList:null,
 };
 let occ = null; // occupancy map coach|week -> {type:'visit'|'block', ...}
 
@@ -88,15 +73,15 @@ function closeDlg(){ $('#dlg').close(); }
 /* ---------- shell ---------- */
 function render(){
   const app=$('#app');
-  if(!D){ app.innerHTML=loginView(); return; }
+  if(!D){
+    const resetToken = new URLSearchParams(location.search).get('reset');
+    app.innerHTML = resetToken ? resetView(resetToken) : loginView();
+    return;
+  }
   const views = {};
   const r = D.user.role;
   if(r!=='coach'){ views.dashboard='Dashboard'; }
-  if(r==='admin'||r==='lead'){
-    views.board='Schedule Board'; views.inventory='LID Inventory';
-    const n=D.pendingClientCount||0;
-    views.pending = 'Unassigned Clients' + (n?` (${n})`:'');
-  }
+  if(r==='admin'||r==='lead'){ views.board='Schedule Board'; views.inventory='LID Inventory'; }
   views.availability='Availability';
   if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
   if(r==='admin') views.admin='Admin';
@@ -114,7 +99,6 @@ function render(){
   if(st.view==='dashboard') m.innerHTML=dashboard();
   if(st.view==='board') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
-  if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
   if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); }
@@ -139,6 +123,7 @@ function loginView(){
     <label>Password</label><input type="password" id="lPw" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
     <div class="err" id="lErr"></div>
     <button class="btn primary" onclick="doLogin()">Sign in</button>
+    <div class="loginlinks"><a onclick="forgotDlg()">Forgot password?</a></div>
   </div></div>`;
 }
 async function doLogin(){
@@ -149,6 +134,42 @@ async function doLogin(){
     if(!r.ok){ $('#lErr').textContent=j.error||'Sign-in failed'; return; }
     await refresh();
   }catch(e){ $('#lErr').textContent='Could not reach the server'; }
+}
+function forgotDlg(){
+  openDlg(`<h3>Forgot password</h3>
+    <label>Email</label><input type="text" id="fpEmail" autocomplete="username">
+    <div class="err" id="fpMsg"></div>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="doForgot()">Send reset link</button></div>`);
+}
+async function doForgot(){
+  const email = $('#fpEmail').value;
+  try{
+    await fetch('/api/forgot-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+    $('#fpMsg').textContent = 'If that email is registered, a reset link is on its way.';
+  }catch(e){ $('#fpMsg').textContent = 'Could not reach the server'; }
+}
+function resetView(token){
+  return `<div class="loginwrap"><div class="loginbox">
+    <img src="https://chriscollinsinc.com/wp-content/uploads/2020/03/logo-1.png" onerror="this.style.display='none'" alt="">
+    <h1>Set a new password</h1>
+    <label>New password</label><input type="password" id="rPw1" autocomplete="new-password">
+    <div class="err" id="rErr"></div>
+    <button class="btn primary" onclick="doReset('${esc(token)}')">Set password</button>
+  </div></div>`;
+}
+async function doReset(token){
+  const password = $('#rPw1').value;
+  if(password.length < 8){ $('#rErr').textContent = 'Use at least 8 characters'; return; }
+  try{
+    const r = await fetch('/api/reset-password',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token,password})});
+    const j = await r.json();
+    if(!r.ok){ $('#rErr').textContent = j.error || 'Could not reset password'; return; }
+    history.replaceState(null,'','/');
+    toast('Password set — sign in below');
+    render();
+  }catch(e){ $('#rErr').textContent = 'Could not reach the server'; }
 }
 
 /* ---------- dashboard ---------- */
@@ -177,11 +198,6 @@ function dashboard(){
     <div class="card ${n('needs_scheduling')?'warn':'ok'}"><div class="k">${n('needs_scheduling')}</div><div class="l">Needs scheduling</div></div>
     <div class="card"><div class="k">${n('on_calendar')}</div><div class="l">On calendar</div></div>
   </div>`;
-  if((D.pendingClientCount||0) > 0 && ['admin','lead'].includes(D.user.role)){
-    html += `<div class="panel" style="border-left:4px solid var(--primary)">
-      <b>${D.pendingClientCount} new Keap subscription${D.pendingClientCount>1?'s':''}</b> waiting for a team assignment.
-      <button class="btn tiny primary" onclick="go('pending')">Review →</button></div>`;
-  }
   html+=`<div class="panel"><h2>Capacity vs. LIDs due — next 12 months</h2>`;
   for(const t of myTeams()){
     html+=`<h3>Team ${t}</h3><table><tr><th>Month</th><th class="num">Booked</th><th class="num">Open</th><th class="num">LIDs due</th><th>Load</th><th></th></tr>`;
@@ -363,7 +379,7 @@ function inventory(){
     if(canEdit()){
       act=`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button> `;
       if(!v.completed&&!v.cal_week&&v.team) act+=`<button class="btn tiny" onclick="st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()">Place</button> `;
-      if(!v.completed) act+=`<button class="btn tiny primary" onclick="completeV(${v.id})">Complete</button> `;
+      if(!v.completed) act+=`<button class="btn tiny" onclick="completeV(${v.id})">Complete</button> `;
       act+=`<button class="btn tiny danger" onclick="delVisit(${v.id})">✕</button>`;
     }
     html+=`<tr><td>${esc(v.client)}</td><td>${esc(v.team||'?')}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
@@ -413,56 +429,6 @@ async function delVisit(id){
   const v=D.visits.find(x=>x.id===id);
   if(!confirm(`Delete ${v.client} — ${v.cycle} ${v.program}?`)) return;
   await api('DELETE','/api/visits/'+id); await refresh(); toast('Deleted');
-}
-
-/* ---------- pending clients (new Keap subscriptions awaiting team assignment) ---------- */
-function pendingView(){
-  return `<div class="panel"><h2>Unassigned clients</h2>
-  <p class="small" style="margin-bottom:12px">New subscriptions from Keap land here first. Confirm the client name, program cadence,
-  and team, then create the contract — same as "New contract" today, just pre-filled from Keap.</p>
-  <div id="pendingOut">Loading…</div></div>`;
-}
-async function loadPending(){
-  try{
-    st.pendingList = await api('GET','/api/pending-clients');
-  }catch(e){ st.pendingList = []; }
-  const out=$('#pendingOut'); if(!out) return;
-  if(!st.pendingList.length){ out.innerHTML=`<p class="small">Nothing waiting — every Keap subscription has a team. 🎉</p>`; return; }
-  out.innerHTML = `<table><tr><th>Company</th><th>Contact</th><th>Keap plan</th><th class="num">Amount</th><th>Started</th><th style="width:260px"></th></tr>` +
-    st.pendingList.map(p=>`<tr>
-      <td><b>${esc(p.company_name||'(unknown company)')}</b></td>
-      <td class="small">${esc(p.contact_name||'—')}</td>
-      <td class="small">${esc(p.product_desc||'—')}</td>
-      <td class="num">${p.billing_amount?('$'+Number(p.billing_amount).toLocaleString()):'—'}</td>
-      <td class="mono small">${fmt(p.start_date)}</td>
-      <td><button class="btn tiny primary" onclick="assignPendingDlg(${p.id})">Assign to team</button>
-      <button class="btn tiny" onclick="ignorePending(${p.id})">Ignore</button></td>
-    </tr>`).join('') + `</table>`;
-}
-function assignPendingDlg(id){
-  const p = st.pendingList.find(x=>x.id===id);
-  const guess = guessProgram(p.billing_cycle, p.billing_frequency);
-  openDlg(`<h3>Assign ${esc(p.company_name||'client')} to a team</h3>
-    <p class="small">From Keap: ${esc(p.product_desc||'')}${p.billing_amount?` · $${Number(p.billing_amount).toLocaleString()}`:''}${p.billing_cycle?` · every ${p.billing_frequency||1} ${p.billing_cycle.toLowerCase()}(s)`:''}</p>
-    <label>Client / dealership name</label><input id="pName" value="${esc(p.company_name||p.contact_name||'')}">
-    <label>Program</label><select id="pProg" onchange="document.querySelector('#pN').value=(${JSON.stringify(CYCLE_LEN)})[this.value]||4">${progOpts(guess)}</select>
-    <label>Number of visits</label><input type="number" id="pN" value="${CYCLE_LEN[guess]||4}" min="1" max="24">
-    <label>First visit due</label><input type="date" id="pFirst" value="${p.start_date||TODAY}">
-    <label>Team</label><select id="pTeam">${teamOpts(D.user.team)}</select>
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary" onclick="saveAssignPending(${id})">Create contract</button></div>`);
-}
-async function saveAssignPending(id){
-  const b={client:$('#pName').value.trim(),program:$('#pProg').value,n:+$('#pN').value,first:$('#pFirst').value,team:$('#pTeam').value};
-  if(!b.client){alert('Client name required');return;}
-  await api('POST',`/api/pending-clients/${id}/assign`,b);
-  closeDlg(); await refresh(); await loadPending();
-  toast(`${b.client} assigned to Team ${b.team} — ${b.n} ${b.program} visits added`);
-}
-async function ignorePending(id){
-  if(!confirm("Ignore this subscription? It won't be added to the LID Inventory.")) return;
-  await api('POST',`/api/pending-clients/${id}/ignore`); await refresh(); await loadPending();
-  toast('Ignored');
 }
 
 /* ---------- availability ---------- */
