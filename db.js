@@ -41,21 +41,35 @@ CREATE TABLE IF NOT EXISTS password_resets(
   used INTEGER DEFAULT 0,
   created TEXT);
 
-/* ---- Keap live sync ---- */
-/* A contract = one Keap subscription that's been assigned to a team. Only
-   Keap-originated visit groups get one of these — legacy sheet-imported visits
-   and ad-hoc app-created visits are untouched and never linked to a contract. */
+/* ---- Phase 1: system-of-record entities ---- */
+/* Canonical client per dealership. Churned clients are never deleted — status changes. */
+CREATE TABLE IF NOT EXISTS clients(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,                 -- canonical display name
+  norm TEXT UNIQUE NOT NULL,          -- normalized match key
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','inactive','cancelled')),
+  billing_start TEXT,                 -- when they first started paying (earliest sold)
+  keap_id TEXT DEFAULT '',            -- Keap company id, for later reconciliation
+  notes TEXT DEFAULT '',
+  created TEXT);
+CREATE INDEX IF NOT EXISTS ic_norm ON clients(norm);
+CREATE INDEX IF NOT EXISTS ic_keap ON clients(keap_id);
+/* A contract = one Keap subscription. Generates a cycle of due visits. */
 CREATE TABLE IF NOT EXISTS contracts(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  client_name TEXT NOT NULL,
+  client_id INTEGER NOT NULL,
   program TEXT DEFAULT '',
-  team TEXT,
-  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','cancelled')),
-  keap_subscription_id TEXT UNIQUE,
-  keap_company_id TEXT,
+  visits INTEGER DEFAULT 0,           -- number of visits in the cycle
+  start_date TEXT,                    -- billing start (= when they started paying for this)
+  price REAL,                         -- amount paid; NULL until known (comes from Keap)
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','completed','cancelled')),
+  source TEXT DEFAULT 'app',          -- 'sheet' = reconstructed from import, 'app' = created in-app, 'keap' = live sync
   created TEXT);
-/* Queue of new Keap subscriptions awaiting a human to assign a team + confirm
-   the program/visit-cadence, before a contract + visit cycle is generated. */
+CREATE INDEX IF NOT EXISTS ict_client ON contracts(client_id);
+
+/* ---- Phase 2: live Keap sync ---- */
+/* Queue of new Keap subscriptions awaiting a human to assign a team + confirm the
+   program/visit-cadence, before a contract + visit cycle is generated. */
 CREATE TABLE IF NOT EXISTS pending_clients(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   keap_subscription_id TEXT UNIQUE,
@@ -63,27 +77,31 @@ CREATE TABLE IF NOT EXISTS pending_clients(
   keap_company_id TEXT,
   company_name TEXT DEFAULT '',
   contact_name TEXT DEFAULT '',
-  product_desc TEXT DEFAULT '',
+  product_desc TEXT DEFAULT '',       -- Keap subscription plan name, e.g. "SUB - Chris Collins Signature Coaching Program"
   billing_amount REAL,
   billing_cycle TEXT DEFAULT '',
   billing_frequency INTEGER,
   start_date TEXT,
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','assigned','ignored')),
+  resolved_client_id INTEGER,         -- set once assigned
   resolved_contract_id INTEGER,
   created TEXT);
 CREATE INDEX IF NOT EXISTS ipc_status ON pending_clients(status);
-/* Raw log of every webhook Keap sends us — cheap insurance while validating
+/* Raw log of every webhook Keap sends us — cheap insurance while we're validating
    the integration; safe to prune later. */
 CREATE TABLE IF NOT EXISTS keap_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT NOT NULL, event_key TEXT, object_id TEXT, raw TEXT);
+  ts TEXT NOT NULL, event_key TEXT, object_id TEXT, raw TEXT, handled TEXT DEFAULT '');
 `);
 
-/* Add contract_id link to visits (idempotent) — only Keap-created visits use it. */
-(function ensureColumn(){
-  const cols = db.prepare("PRAGMA table_info(visits)").all().map(r => r.name);
-  if(!cols.includes('contract_id')) db.exec('ALTER TABLE visits ADD COLUMN contract_id INTEGER');
-})();
+/* Add client_id / contract_id links to visits (idempotent). */
+function ensureColumn(table, col, decl){
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(r => r.name);
+  if(!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+}
+ensureColumn('visits', 'client_id', 'INTEGER');
+ensureColumn('visits', 'contract_id', 'INTEGER');
+ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS ict_keapsub ON contracts(keap_subscription_id)');
 
 /* ---------- helpers ---------- */
@@ -212,7 +230,104 @@ function bootstrapAdmin(){
   console.log('  (change it after logging in: Admin -> Users)');
   console.log('========================================================\n');
 }
+/* ---------- shared client helpers ---------- */
+const normName = s => (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+const minDate = (a,b) => !a ? b : !b ? a : (a < b ? a : b);
+
+/* Find a client by normalized name, or create one. Returns the client row id. */
+function resolveClient(name, opts = {}){
+  const nm = (name||'').trim();
+  const key = normName(nm);
+  if(!key) return null;
+  let row = db.prepare('SELECT * FROM clients WHERE norm=?').get(key);
+  if(!row){
+    const r = db.prepare('INSERT INTO clients(name,norm,status,billing_start,keap_id,created) VALUES(?,?,?,?,?,?)')
+      .run(nm, key, opts.status || 'active', opts.billing_start || null, opts.keap_id || '', new Date().toISOString());
+    return Number(r.lastInsertRowid);
+  }
+  // keep billing_start as the earliest known
+  if(opts.billing_start){
+    const bs = minDate(row.billing_start, opts.billing_start);
+    if(bs !== row.billing_start) db.prepare('UPDATE clients SET billing_start=? WHERE id=?').run(bs, row.id);
+  }
+  if(opts.keap_id && !row.keap_id) db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(opts.keap_id, row.id);
+  return row.id;
+}
+/* Find a client already linked to a Keap company id. */
+function findClientByKeapId(keapCompanyId){
+  if(!keapCompanyId) return null;
+  return db.prepare('SELECT * FROM clients WHERE keap_id=?').get(String(keapCompanyId));
+}
+
+/* ---------- Phase 1 one-time backfill ---------- */
+/* Turns the flat visit rows (string client, no persisted contract) into the
+   client + contract entities. Idempotent: guarded by a meta flag, and only
+   touches rows that aren't linked yet, so it's safe to re-run. */
+function migratePhase1(){
+  if(getMeta('phase1_migrated')) return;
+  const parseCycle = c => { const m = /^(\d+)\s*of\s*(\d+)/i.exec(c||''); return m ? { k:+m[1], n:+m[2] } : null; };
+
+  const tx = () => {
+    // 1 & 2 — clients from distinct visit strings, link visits.client_id
+    const visitsForClients = db.prepare('SELECT id, client, sold FROM visits WHERE client_id IS NULL').all();
+    for(const v of visitsForClients){
+      const cid = resolveClient(v.client, { billing_start: v.sold || null });
+      if(cid) db.prepare('UPDATE visits SET client_id=? WHERE id=?').run(cid, v.id);
+    }
+
+    // 3 — reconstruct contracts per client from the visit sequence.
+    // A new contract begins when the cycle resets to "1 of N" or the program changes.
+    const clients = db.prepare('SELECT id FROM clients').all();
+    const insContract = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,created)
+      VALUES(?,?,?,?,?,?,?,?)`);
+    const now = new Date().toISOString();
+    for(const cl of clients){
+      const vs = db.prepare('SELECT * FROM visits WHERE client_id=? AND contract_id IS NULL ORDER BY id').all(cl.id);
+      let run = [];
+      const flush = () => {
+        if(!run.length) return;
+        const first = run[0];
+        const pc = parseCycle(first.cycle);
+        const count = pc ? pc.n : run.length;
+        let start = null; for(const r of run) start = minDate(start, r.sold);
+        const anyOpen = run.some(r => !r.completed);
+        const cr = insContract.run(cl.id, first.program || '', count, start, null,
+          anyOpen ? 'active' : 'completed', 'sheet', now);
+        const contractId = Number(cr.lastInsertRowid);
+        const upd = db.prepare('UPDATE visits SET contract_id=? WHERE id=?');
+        for(const r of run) upd.run(contractId, r.id);
+        run = [];
+      };
+      let prevProg = null;
+      for(const v of vs){
+        const pc = parseCycle(v.cycle);
+        const resets = pc && pc.k === 1;
+        const progChanged = prevProg !== null && v.program !== prevProg;
+        if(run.length && (resets || progChanged)) flush();
+        run.push(v);
+        prevProg = v.program;
+      }
+      flush();
+
+      // 4 — client status heuristic (pre-Keap): active if any incomplete visit, else inactive.
+      const openCount = db.prepare('SELECT COUNT(*) c FROM visits WHERE client_id=? AND completed=0').get(cl.id).c;
+      db.prepare('UPDATE clients SET status=? WHERE id=?').run(openCount > 0 ? 'active' : 'inactive', cl.id);
+    }
+  };
+
+  db.exec('BEGIN');
+  try{ tx(); db.exec('COMMIT'); }
+  catch(e){ db.exec('ROLLBACK'); console.error('Phase 1 migration failed:', e); return; }
+
+  const nc = db.prepare('SELECT COUNT(*) c FROM clients').get().c;
+  const ncon = db.prepare('SELECT COUNT(*) c FROM contracts').get().c;
+  setMeta('phase1_migrated', new Date().toISOString());
+  log('system', 'migrate.phase1', { clients: nc, contracts: ncon });
+  console.log(`Phase 1 migration: ${nc} clients, ${ncon} contracts backfilled from ${db.prepare('SELECT COUNT(*) c FROM visits').get().c} visits.`);
+}
+
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
 seed();
+migratePhase1();
 
-module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, createPasswordReset, consumePasswordReset };
+module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset };

@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { db, hashPw, checkPw, getMeta, setMeta, log, createPasswordReset, consumePasswordReset } = require('./db.js');
+const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, findClientByKeapId, createPasswordReset, consumePasswordReset } = require('./db.js');
 const { sendMail } = require('./mail.js');
 
 const PORT = process.env.PORT || 3000;
@@ -80,6 +80,26 @@ function cellFree(coachId, week, ignoreVisit){
 const getVisit = id => db.prepare('SELECT * FROM visits WHERE id=?').get(+id);
 const getCoach = id => db.prepare('SELECT * FROM coaches WHERE id=?').get(id);
 
+/* ----- contracts & visits (shared so Keap-assigned contracts generate the same way) ----- */
+const INTERVAL = { 'Monthly':1, 'Semi-Monthly':2, 'Quarterly':3, 'Bi-Annual':6, 'LID (Purchase)':0, '6 Visits Monthly':1 };
+function createContractAndVisits({ clientName, program, n, first, team, source, keapSubscriptionId, price, keapCompanyId, actorEmail }){
+  const clientId = resolveClient(clientName, { billing_start: first, keap_id: keapCompanyId || '', fromKeap: source === 'keap' });
+  const cr = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,keap_subscription_id,created)
+    VALUES(?,?,?,?,?,?,?,?,?)`)
+    .run(clientId, program, n, first, price ?? null, 'active', source || 'app', keapSubscriptionId || null, new Date().toISOString());
+  const contractId = Number(cr.lastInsertRowid);
+  const iv = INTERVAL[program] ?? 3;
+  const ids = [];
+  for(let k = 0; k < n; k++){
+    const d = new Date(first + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
+    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(clientName.trim(), program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, source || 'app', new Date().toISOString().slice(0,10), clientId, contractId);
+    ids.push(Number(r.lastInsertRowid));
+  }
+  log(actorEmail || 'system', 'contract.create', { client: clientName, program, n, first, team, source });
+  return { clientId, contractId, ids };
+}
+
 /* ================= API ================= */
 route('POST', /^\/api\/login$/, null, (req, res, m, body) => {
   const u = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(body.email || '').toLowerCase().trim());
@@ -121,78 +141,21 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
     blocks: db.prepare('SELECT * FROM blocks').all(),
     visits: db.prepare('SELECT * FROM visits').all(),
   };
-  if(user.role === 'admin'){
-    out.users = db.prepare('SELECT id,email,name,role,team,coach_id,active FROM users ORDER BY role,name').all();
-  }
   if(user.role === 'admin' || user.role === 'lead'){
     out.pendingClientCount = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending'").get().c;
+  }
+  if(user.role === 'admin'){
+    out.users = db.prepare('SELECT id,email,name,role,team,coach_id,active FROM users ORDER BY role,name').all();
   }
   send(res, 200, out);
 });
 
-/* ----- Keap-synced contracts & visits ----- */
-const KEAP_INTERVAL = { 'Monthly':1, 'Semi-Monthly':2, 'Quarterly':3, 'Bi-Annual':6, 'LID (Purchase)':0, '6 Visits Monthly':1 };
-function createKeapContractAndVisits({ clientName, program, n, first, team, keapSubscriptionId, keapCompanyId, price, actorEmail }){
-  const cr = db.prepare(`INSERT INTO contracts(client_name,program,team,status,keap_subscription_id,keap_company_id,created)
-    VALUES(?,?,?,'active',?,?,?)`)
-    .run(clientName.trim(), program, team, keapSubscriptionId || null, keapCompanyId || null, new Date().toISOString());
-  const contractId = Number(cr.lastInsertRowid);
-  const iv = KEAP_INTERVAL[program] ?? 3;
-  const ids = [];
-  for(let k = 0; k < n; k++){
-    const d = new Date(first + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
-    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,contract_id)
-      VALUES(?,?,?,?,?,?,?,?)`).run(clientName.trim(), program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, 'keap', new Date().toISOString().slice(0,10), contractId);
-    ids.push(Number(r.lastInsertRowid));
-  }
-  log(actorEmail || 'system', 'contract.create', { client: clientName, program, n, first, team, source: 'keap' });
-  return { contractId, ids };
-}
-route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, user) => {
-  send(res, 200, db.prepare("SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all());
-});
-route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req, res, m, body, user) => {
-  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
-  if(!pc) return err(res, 404, 'not found');
-  if(pc.status !== 'pending') return err(res, 400, 'already handled');
-  const { client, program, n, first, team } = body;
-  if(!client || !first || !(n > 0) || !team) return err(res, 400, 'client, program visit count, first due date and team required');
-  if(!canEditTeam(user, team)) return err(res, 403, 'You can only assign to your own team');
-  const { contractId, ids } = createKeapContractAndVisits({
-    clientName: client, program, n, first, team,
-    keapSubscriptionId: pc.keap_subscription_id, keapCompanyId: pc.keap_company_id, price: pc.billing_amount,
-    actorEmail: user.email,
-  });
-  db.prepare("UPDATE pending_clients SET status='assigned', resolved_contract_id=? WHERE id=?").run(contractId, pc.id);
-  log(user.email, 'pendingclient.assign', { pendingId: pc.id, client, team, contractId });
-  send(res, 200, { ok: true, contractId, ids });
-});
-route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req, res, m, body, user) => {
-  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
-  if(!pc) return err(res, 404, 'not found');
-  db.prepare("UPDATE pending_clients SET status='ignored' WHERE id=?").run(pc.id);
-  log(user.email, 'pendingclient.ignore', { pendingId: pc.id, company: pc.company_name });
-  send(res, 200, { ok: true });
-});
-route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) => {
-  send(res, 200, db.prepare("SELECT * FROM contracts WHERE status='cancelled' ORDER BY id DESC LIMIT 50").all());
-});
-
 /* ----- contracts & visits ----- */
-const INTERVAL = { 'Monthly':1, 'Semi-Monthly':2, 'Quarterly':3, 'Bi-Annual':6, 'LID (Purchase)':0, '6 Visits Monthly':1 };
 route('POST', /^\/api\/contracts$/, ['admin','lead'], (req, res, m, body, user) => {
   const { client, program, n, first, team } = body;
   if(!client || !first || !(n > 0)) return err(res, 400, 'client, first due date and visit count required');
   if(!canEditTeam(user, team)) return err(res, 403, 'You can only add to your own team');
-  const iv = INTERVAL[program] ?? 3;
-  const ids = [];
-  for(let k = 0; k < n; k++){
-    const d = new Date(first + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
-    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold)
-      VALUES(?,?,?,?,?,?,?)`).run(client.trim(), program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team || user.team, 'app', new Date().toISOString().slice(0,10));
-    ids.push(Number(r.lastInsertRowid));
-  }
-  log(user.email, 'contract.create', { client, program, n, first, team });
+  const { ids } = createContractAndVisits({ clientName: client, program, n, first, team: team || user.team, source: 'app', actorEmail: user.email });
   send(res, 200, { ok: true, ids });
 });
 route('POST', /^\/api\/visits$/, ['admin','lead'], (req, res, m, body, user) => {
@@ -335,13 +298,49 @@ route('PATCH', /^\/api\/users\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
   send(res, 200, { ok: true });
 });
 
+/* ----- pending clients (Keap subscriptions awaiting team assignment) ----- */
+route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, user) => {
+  send(res, 200, db.prepare("SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all());
+});
+route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req, res, m, body, user) => {
+  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
+  if(!pc) return err(res, 404, 'not found');
+  if(pc.status !== 'pending') return err(res, 400, 'already handled');
+  const { client, program, n, first, team } = body;
+  if(!client || !first || !(n > 0) || !team) return err(res, 400, 'client, program visit count, first due date and team required');
+  if(!canEditTeam(user, team)) return err(res, 403, 'You can only assign to your own team');
+  const { clientId, contractId, ids } = createContractAndVisits({
+    clientName: client, program, n, first, team, source: 'keap',
+    keapSubscriptionId: pc.keap_subscription_id, price: pc.billing_amount, keapCompanyId: pc.keap_company_id,
+    actorEmail: user.email,
+  });
+  db.prepare("UPDATE pending_clients SET status='assigned', resolved_client_id=?, resolved_contract_id=? WHERE id=?")
+    .run(clientId, contractId, pc.id);
+  log(user.email, 'pendingclient.assign', { pendingId: pc.id, client, team, contractId });
+  send(res, 200, { ok: true, clientId, contractId, ids });
+});
+route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req, res, m, body, user) => {
+  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
+  if(!pc) return err(res, 404, 'not found');
+  db.prepare("UPDATE pending_clients SET status='ignored' WHERE id=?").run(pc.id);
+  log(user.email, 'pendingclient.ignore', { pendingId: pc.id, company: pc.company_name });
+  send(res, 200, { ok: true });
+});
+route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) => {
+  send(res, 200, db.prepare(`
+    SELECT c.id, c.program, c.status, cl.name AS client_name,
+      (SELECT v.team FROM visits v WHERE v.contract_id=c.id ORDER BY v.id LIMIT 1) AS team
+    FROM contracts c JOIN clients cl ON cl.id=c.client_id
+    WHERE c.status='cancelled' ORDER BY c.id DESC LIMIT 50`).all());
+});
+
 /* ----- audit ----- */
 route('GET', /^\/api\/audit$/, ['admin'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300').all());
 });
 
-/* TEMPORARY diagnostic — remove once the clients-table migration is designed against
- * confirmed real production data. Token-gated the same way earlier temp endpoints were. */
+/* TEMPORARY diagnostic — remove once the clients/contracts architecture restore has been
+ * verified live. Token-gated the same way earlier temp endpoints were. */
 const DEBUG_TOKEN = process.env.DEBUG_TOKEN || '';
 route('GET', /^\/api\/_db-state-debug$/, null, (req, res) => {
   if(!DEBUG_TOKEN || req.headers['x-debug-token'] !== DEBUG_TOKEN) return err(res, 403, 'forbidden');
@@ -350,14 +349,10 @@ route('GET', /^\/api\/_db-state-debug$/, null, (req, res) => {
   for(const t of tables){
     try{ counts[t] = db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c; }catch(e){ counts[t] = 'error: ' + e.message; }
   }
-  let distinctContractClients = null, distinctVisitClients = null, contractsWithKeap = null, sampleContracts = null;
-  try{ distinctContractClients = db.prepare('SELECT COUNT(DISTINCT client_name) c FROM contracts').get().c; }catch(e){}
-  try{ distinctVisitClients = db.prepare('SELECT COUNT(DISTINCT client) c FROM visits').get().c; }catch(e){}
+  let contractsWithKeap = null, clientsWithKeap = null;
   try{ contractsWithKeap = db.prepare('SELECT COUNT(*) c FROM contracts WHERE keap_subscription_id IS NOT NULL').get().c; }catch(e){}
-  try{ sampleContracts = db.prepare('SELECT id,client_name,program,status,keap_subscription_id,keap_company_id FROM contracts ORDER BY id LIMIT 10').all(); }catch(e){}
+  try{ clientsWithKeap = db.prepare("SELECT COUNT(*) c FROM clients WHERE keap_id IS NOT NULL AND keap_id != ''").get().c; }catch(e){}
 
-  // Schema + samples for the two tables we didn't expect to find populated (clients, contracts) —
-  // pulled generically via PRAGMA so this doesn't assume any particular column names.
   const schemas = {}, samples = {};
   for(const t of ['clients', 'contracts', 'visits']){
     if(!tables.includes(t)) continue;
@@ -365,11 +360,11 @@ route('GET', /^\/api\/_db-state-debug$/, null, (req, res) => {
     try{ samples[t] = db.prepare(`SELECT * FROM ${t} ORDER BY id DESC LIMIT 5`).all(); }catch(e){ samples[t] = 'error: ' + e.message; }
   }
 
-  send(res, 200, { tables, counts, distinctContractClients, distinctVisitClients, contractsWithKeap, sampleContracts, phase1MigratedFlag: getMeta('phase1_migrated'), schemas, samples });
+  send(res, 200, { tables, counts, contractsWithKeap, clientsWithKeap, phase1MigratedFlag: getMeta('phase1_migrated'), schemas, samples });
 });
 
 /* ================= Keap webhook receiver ================= */
-/* Keap Classic verification is handled entirely at the HTTP layer above (the
+/* Keap Classic verification is handled entirely at the HTTP layer below (the
  * X-Hook-Secret echo) per RESTHooks.org's Immediate Confirmation pattern —
  * nothing here needs to deal with verification anymore. This function only
  * ever sees real subscription events. */
@@ -390,10 +385,12 @@ async function handleKeapWebhook(req, res, rawBody){
     } else if((eventKey === 'subscription.edit' || eventKey === 'subscription.delete') && objectId){
       await onSubscriptionChange(objectId, eventKey);
     }
-    // other event keys are logged to keap_events but not acted on yet.
+    // other event keys (contact.*, order.*, invoice.*) are logged to keap_events but not
+    // acted on yet — safe to extend here later.
   }
   send(res, 200, { ok: true });
 }
+
 async function onSubscriptionAdd(subId){
   const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(String(subId));
   const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(String(subId));
@@ -418,6 +415,7 @@ async function onSubscriptionAdd(subId){
       new Date().toISOString());
   log('keap.webhook', 'pendingclient.queued', { subId, companyName, contactName });
 }
+
 async function onSubscriptionChange(subId, eventKey){
   const sub = await keapGet(`/v1/subscriptions/${subId}`);
   const s = sub.json || {};
@@ -425,6 +423,7 @@ async function onSubscriptionChange(subId, eventKey){
   const stillActive = eventKey === 'subscription.delete' ? false : !!s.active;
 
   if(!contract){
+    // Might be a subscription that's still in the pending queue (never assigned yet) — ignore/remove it if cancelled.
     if(!stillActive) db.prepare("UPDATE pending_clients SET status='ignored' WHERE keap_subscription_id=?").run(String(subId));
     return;
   }
@@ -433,8 +432,18 @@ async function onSubscriptionChange(subId, eventKey){
     db.prepare('UPDATE contracts SET status=? WHERE id=?').run(newStatus, contract.id);
     log('keap.webhook', 'contract.status', { contractId: contract.id, subId, status: newStatus });
   }
-  // We deliberately do NOT auto-delete future scheduled visits on churn — a lead
-  // reviews the Admin screen (now flagged via the contract's cancelled status) and
+  // Roll client status up from all their contracts.
+  const client = db.prepare('SELECT * FROM clients WHERE id=?').get(contract.client_id);
+  if(client){
+    const anyActive = db.prepare("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'").get(client.id).c > 0;
+    const newClientStatus = anyActive ? 'active' : 'cancelled';
+    if(client.status !== newClientStatus){
+      db.prepare('UPDATE clients SET status=? WHERE id=?').run(newClientStatus, client.id);
+      log('keap.webhook', 'client.status', { clientId: client.id, name: client.name, status: newClientStatus });
+    }
+  }
+  // Note: we deliberately do NOT auto-delete future scheduled visits on churn — a lead
+  // reviews the Inventory screen (now flagged via the client's cancelled status) and
   // removes/reassigns them by hand, so nothing gets silently wiped off the board.
 }
 
