@@ -370,12 +370,17 @@ async function handleKeapWebhook(req, res, rawBody){
     if(verifyKey){
       const hooks = await keapGet('/v1/hooks');
       const list = hooks.json || [];
-      // Match the specific hook for this event key first (there are 3 hooks
-      // sharing the same hookUrl — one per event key — so a bare URL match
-      // could verify the wrong one).
       const match = list.find(h => h.hookUrl && h.hookUrl.includes('/api/webhooks/keap') && h.eventKey === eventKey)
         || list.find(h => h.hookUrl && h.hookUrl.includes('/api/webhooks/keap'));
-      if(match) await keapPost(`/v1/hooks/${match.key}/verify`, { key: verifyKey });
+      let verifyResult = { attempted: false };
+      if(match){
+        const vr = await keapPost(`/v1/hooks/${match.key}/verify`, { key: verifyKey });
+        verifyResult = { attempted: true, matchKey: match.key, status: vr.status, ok: vr.ok, json: vr.json, error: vr.error, hooksGetOk: hooks.ok, hooksGetStatus: hooks.status };
+      } else {
+        verifyResult = { attempted: false, reason: 'no matching hook found', hooksGetOk: hooks.ok, hooksGetStatus: hooks.status, listLen: list.length };
+      }
+      db.prepare('INSERT INTO keap_events(ts,event_key,object_id,raw) VALUES(?,?,?,?)')
+        .run(new Date().toISOString(), '(verify-result)', String(match?.key || ''), JSON.stringify(verifyResult).slice(0, 4000));
       continue;
     }
     if(eventKey === 'subscription.add' && objectId){
