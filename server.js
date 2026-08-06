@@ -336,6 +336,15 @@ route('GET', /^\/api\/audit$/, ['admin'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300').all());
 });
 
+/* TEMPORARY diagnostic — remove once Keap webhook verification is confirmed working.
+ * Token-gated the same way the earlier _migrate-db/_reset-admin-pw endpoints were. */
+const DEBUG_TOKEN = process.env.DEBUG_TOKEN || '';
+route('GET', /^\/api\/_keap-events-debug$/, null, (req, res) => {
+  if(!DEBUG_TOKEN || req.headers['x-debug-token'] !== DEBUG_TOKEN) return err(res, 403, 'forbidden');
+  const rows = db.prepare('SELECT * FROM keap_events ORDER BY id DESC LIMIT 20').all();
+  send(res, 200, { count: rows.length, rows, keapTokenConfigured: !!KEAP_TOKEN });
+});
+
 /* ================= Keap webhook receiver ================= */
 /* Keap Classic sends a POST for each event; the payload can also be a verification
  * ping (contains a "key" to confirm) rather than a real event. We log everything raw
