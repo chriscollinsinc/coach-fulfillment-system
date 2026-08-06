@@ -408,6 +408,34 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // TEMPORARY — one-time DB restore endpoint. Token-gated via MIGRATE_TOKEN env var.
+  // Restores the persistent-disk database after the disk was freshly (re)provisioned
+  // and came up empty. Remove this block once the restore is confirmed working.
+  if(url.pathname === '/api/_migrate-db' && req.method === 'POST'){
+    if(req.headers['x-migrate-token'] !== process.env.MIGRATE_TOKEN || !process.env.MIGRATE_TOKEN){
+      res.writeHead(403); return res.end('forbidden');
+    }
+    let chunks = [];
+    req.on('data', d => { chunks.push(d); if(Buffer.concat(chunks).length > 20e6) req.destroy(); });
+    req.on('end', () => {
+      try{
+        const buf = Buffer.concat(chunks);
+        const dbPath = process.env.DB_PATH || path.join(__dirname, 'data', 'coach.db');
+        for(const suf of ['-wal', '-shm']){
+          try{ fs.unlinkSync(dbPath + suf); }catch(e){}
+        }
+        fs.writeFileSync(dbPath, buf);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok:true, bytes: buf.length }));
+        setTimeout(() => process.exit(0), 300);
+      }catch(e){
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok:false, error:String(e) }));
+      }
+    });
+    return;
+  }
+
 
   // API
   if(url.pathname.startsWith('/api/')){
