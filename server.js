@@ -76,7 +76,7 @@ const getCoach = id => db.prepare('SELECT * FROM coaches WHERE id=?').get(id);
 /* ----- contracts & visits (shared so Keap-assigned contracts generate the same way) ----- */
 const INTERVAL = { 'Monthly':1, 'Semi-Monthly':2, 'Quarterly':3, 'Bi-Annual':6, 'LID (Purchase)':0, '6 Visits Monthly':1 };
 function createContractAndVisits({ clientName, program, n, first, team, source, keapSubscriptionId, price, keapCompanyId, actorEmail }){
-  const clientId = resolveClient(clientName, { billing_start: first, keap_id: keapCompanyId || '' });
+  const clientId = resolveClient(clientName, { billing_start: first, keap_id: keapCompanyId || '', fromKeap: source === 'keap' });
   const cr = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,keap_subscription_id,created)
     VALUES(?,?,?,?,?,?,?,?,?)`)
     .run(clientId, program, n, first, price ?? null, 'active', source || 'app', keapSubscriptionId || null, new Date().toISOString());
@@ -405,6 +405,27 @@ const server = http.createServer((req, res) => {
     let chunks = [];
     req.on('data', d => { chunks.push(d); if(Buffer.concat(chunks).length > 2e6) req.destroy(); });
     req.on('end', () => { handleKeapWebhook(req, res, Buffer.concat(chunks).toString()).catch(e => { console.error(e); send(res, 200, { ok:true }); }); });
+    return;
+  }
+
+  /* TEMPORARY — one-time database migration endpoint. Remove this route (and the
+   * MIGRATE_TOKEN env var) once the real coach.db has been moved onto this disk;
+   * it's a raw file-overwrite, not something to leave live long-term. */
+  if(url.pathname === '/api/_migrate-db' && req.method === 'POST'){
+    const token = req.headers['x-migrate-token'];
+    if(!process.env.MIGRATE_TOKEN || token !== process.env.MIGRATE_TOKEN) return err(res, 403, 'forbidden');
+    const dbPath = process.env.DB_PATH || path.join(__dirname, 'data', 'coach.db');
+    let chunks = [];
+    req.on('data', d => { chunks.push(d); if(Buffer.concat(chunks).length > 20e6) req.destroy(); });
+    req.on('end', () => {
+      try{
+        fs.writeFileSync(dbPath, Buffer.concat(chunks));
+        // also clear the WAL/SHM sidecar files so the new file is read cleanly on restart
+        for(const ext of ['-wal','-shm']) { try{ fs.unlinkSync(dbPath+ext); }catch(e){} }
+        send(res, 200, { ok: true, bytes: Buffer.concat(chunks).length });
+        setTimeout(() => process.exit(0), 300); // restart so node:sqlite reopens the new file
+      }catch(e){ err(res, 500, String(e)); }
+    });
     return;
   }
 
