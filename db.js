@@ -1193,51 +1193,49 @@ function reconcilePendingClients(){
   if(cleared) console.log(`Unassigned Clients queue: auto-cleared ${cleared} entr${cleared===1?'y':'ies'} already matching a known client.`);
 }
 
-/* ---------- one-time: archive legacy M.A.G. duplicate clients ---------- */
+/* ---------- one-time: delete legacy M.A.G. duplicate clients ---------- */
 /* These 13 are pre-dating the "split M.A.G. by store to match Keap 1:1"
    decision — combined slash-names (or in one case a typo) left over from
    before that split. Checked against the live Keap export on 2026-08-06:
    11 are combined names for stores that already exist correctly and
    separately (created via the Coaching Assignments import), 1 is a plain
    typo of an already-correct client, and 2 have no Keap company at all
-   under any name. None represent a real client we're missing. Archived
-   (not deleted) — renamed with a clear prefix and status forced to
-   'inactive' so they stay out of active-client views but the history isn't
-   destroyed. Guarded by a meta flag; runs once, ever. */
-function archiveLegacyMagDuplicates(){
-  if(getMeta('mag_duplicates_archived')) return;
-  const today = new Date().toISOString().slice(0, 10);
+   under any name. None represent a real client — confirmed not real by
+   Mike directly, so these are hard-deleted (client + any contracts/visits/
+   notes attached), not just archived. Guarded by a meta flag; runs once. */
+function deleteLegacyMagDuplicates(){
+  if(getMeta('mag_duplicates_deleted')) return;
   const targets = [
-    { name: 'M.A.G. Audi Hampton', supersededBy: 'M.A.G. Audi of Hampton' },
-    { name: 'M.A.G. Audi, Mercedes-Benz and Hyundai of Hampton', supersededBy: 'M.A.G. Audi of Hampton, M.A.G. Mercedes-Benz of Hampton, and M.A.G. Hyundai Genesis of Hampton' },
-    { name: 'M.A.G. Classic CDJRF Lancaster / Goldsboro', supersededBy: 'M.A.G. Classic CDJRF Lancaster and M.A.G. Classic CDJRF of Goldsboro' },
-    { name: 'M.A.G. Classic CDJRF Lancaster / M.A.G. Infiniti of Charlotte', supersededBy: 'M.A.G. Classic CDJRF Lancaster and M.A.G. Infiniti of Charlotte' },
-    { name: 'M.A.G. Classic Hyundai / Toyota of North Wilkesboro', supersededBy: 'M.A.G. Classic Hyundai of North Wilkesboro and M.A.G. Classic Toyota Wilkesboro' },
-    { name: 'M.A.G. Classic Toyota / Hyundai Wilkesboro', supersededBy: 'M.A.G. Classic Toyota Wilkesboro and M.A.G. Classic Hyundai of North Wilkesboro' },
-    { name: 'M.A.G. Classic Toyota and Hyundai Wilkesboro', supersededBy: 'M.A.G. Classic Toyota Wilkesboro and M.A.G. Classic Hyundai of North Wilkesboro' },
-    { name: 'M.A.G. Classic Toyota of Henderson', supersededBy: 'M.A.G. Classic Toyota Henderson' },
-    { name: 'M.A.G. Infiniti of Charlotte / Greenville', supersededBy: 'M.A.G. Infiniti of Charlotte and M.A.G. Infiniti of Greenville' },
-    { name: 'M.A.G. Land Rober Volvo Shreveport', supersededBy: 'M.A.G. Land Rover Volvo Shreveport (typo of this name)' },
-    { name: 'M.A.G. Mercedes-Benz / Hyundai and Audi of Hampton', supersededBy: 'M.A.G. Mercedes-Benz of Hampton, M.A.G. Hyundai Genesis of Hampton, and M.A.G. Audi of Hampton' },
-    { name: 'M.A.G. - Subaru Atlanta', supersededBy: null },
-    { name: 'M.A.G. Crossroads Chevrolet', supersededBy: null },
+    'M.A.G. Audi Hampton',
+    'M.A.G. Audi, Mercedes-Benz and Hyundai of Hampton',
+    'M.A.G. Classic CDJRF Lancaster / Goldsboro',
+    'M.A.G. Classic CDJRF Lancaster / M.A.G. Infiniti of Charlotte',
+    'M.A.G. Classic Hyundai / Toyota of North Wilkesboro',
+    'M.A.G. Classic Toyota / Hyundai Wilkesboro',
+    'M.A.G. Classic Toyota and Hyundai Wilkesboro',
+    'M.A.G. Classic Toyota of Henderson',
+    'M.A.G. Infiniti of Charlotte / Greenville',
+    'M.A.G. Land Rober Volvo Shreveport',
+    'M.A.G. Mercedes-Benz / Hyundai and Audi of Hampton',
+    'M.A.G. - Subaru Atlanta',
+    'M.A.G. Crossroads Chevrolet',
   ];
-  let archived = 0;
-  for(const t of targets){
-    const row = db.prepare('SELECT id, name FROM clients WHERE norm=?').get(normName(t.name));
+  let deleted = 0;
+  const names = [];
+  for(const name of targets){
+    const row = db.prepare('SELECT id, name FROM clients WHERE norm=?').get(normName(name));
     if(!row) continue;
-    const newName = `[Archived — duplicate] ${row.name}`;
-    db.prepare("UPDATE clients SET name=?, status='inactive' WHERE id=?").run(newName, row.id);
-    const note = t.supersededBy
-      ? `Archived 2026-08-06 — legacy pre-split duplicate. No matching Keap company under this name; superseded by ${t.supersededBy}, which is already a correct, separate client.`
-      : `Archived 2026-08-06 — no matching Keap company under this name in the current export. Not a real active client; kept for history rather than deleted.`;
-    db.prepare('INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,created) VALUES(?,?,?,?,?,?,?)')
-      .run(row.id, today, 'LID', 'system', 'System', note, new Date().toISOString());
-    archived++;
+    db.prepare('DELETE FROM client_notes WHERE client_id=?').run(row.id);
+    db.prepare('DELETE FROM visits WHERE client_id=?').run(row.id);
+    db.prepare('DELETE FROM contracts WHERE client_id=?').run(row.id);
+    db.prepare('DELETE FROM client_month_snapshots WHERE client_id=?').run(row.id);
+    db.prepare('DELETE FROM clients WHERE id=?').run(row.id);
+    names.push(row.name);
+    deleted++;
   }
-  setMeta('mag_duplicates_archived', new Date().toISOString());
-  log('system', 'migrate.archive_mag_duplicates', { archived });
-  console.log(`Archived ${archived} legacy M.A.G. duplicate client(s).`);
+  setMeta('mag_duplicates_deleted', new Date().toISOString());
+  log('system', 'migrate.delete_mag_duplicates', { deleted, names });
+  console.log(`Deleted ${deleted} legacy M.A.G. duplicate client(s) — not real, confirmed with Mike.`);
 }
 
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
@@ -1245,7 +1243,7 @@ seed();
 migratePhase1();
 migrateCoachingAssignments();
 reconcilePendingClients();
-archiveLegacyMagDuplicates();
+deleteLegacyMagDuplicates();
 ensureCurrentMonthSnapshot();
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot };
