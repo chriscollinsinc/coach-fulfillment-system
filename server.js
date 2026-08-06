@@ -355,7 +355,17 @@ route('GET', /^\/api\/_db-state-debug$/, null, (req, res) => {
   try{ distinctVisitClients = db.prepare('SELECT COUNT(DISTINCT client) c FROM visits').get().c; }catch(e){}
   try{ contractsWithKeap = db.prepare('SELECT COUNT(*) c FROM contracts WHERE keap_subscription_id IS NOT NULL').get().c; }catch(e){}
   try{ sampleContracts = db.prepare('SELECT id,client_name,program,status,keap_subscription_id,keap_company_id FROM contracts ORDER BY id LIMIT 10').all(); }catch(e){}
-  send(res, 200, { tables, counts, distinctContractClients, distinctVisitClients, contractsWithKeap, sampleContracts, phase1MigratedFlag: getMeta('phase1_migrated') });
+
+  // Schema + samples for the two tables we didn't expect to find populated (clients, contracts) —
+  // pulled generically via PRAGMA so this doesn't assume any particular column names.
+  const schemas = {}, samples = {};
+  for(const t of ['clients', 'contracts', 'visits']){
+    if(!tables.includes(t)) continue;
+    try{ schemas[t] = db.prepare(`PRAGMA table_info(${t})`).all().map(c => ({ name: c.name, type: c.type, notnull: c.notnull, pk: c.pk })); }catch(e){ schemas[t] = 'error: ' + e.message; }
+    try{ samples[t] = db.prepare(`SELECT * FROM ${t} ORDER BY id DESC LIMIT 5`).all(); }catch(e){ samples[t] = 'error: ' + e.message; }
+  }
+
+  send(res, 200, { tables, counts, distinctContractClients, distinctVisitClients, contractsWithKeap, sampleContracts, phase1MigratedFlag: getMeta('phase1_migrated'), schemas, samples });
 });
 
 /* ================= Keap webhook receiver ================= */
