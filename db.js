@@ -400,9 +400,780 @@ function ensureCurrentMonthSnapshot(){
   setMeta(flagKey, new Date().toISOString());
 }
 
+/* ---------- one-time: Coaching Assignments sheet import ---------- */
+/* Sourced from the "Coaching Assignments" tab of the Coach Master File —
+   118 existing clients matched by name to their coach, plus 51 net-new
+   "Coaching Only" clients (remote coaching, no LID visits ever generated —
+   visits stays 0 on their contract) that the sheet has but the app didn't.
+   Guarded by a meta flag so it only ever runs once; safe to leave in place. */
+const COACH_ASSIGN_DATA = {
+  "assign": [
+    {
+      "client_norm": "franklin s spring creek ford",
+      "coach_id": "bryan_bryan_hubert"
+    },
+    {
+      "client_norm": "speck ford of prosser",
+      "coach_id": "bryan_bryan_hubert"
+    },
+    {
+      "client_norm": "d arcy buick gmc",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "goldstein cdjr",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "honda superstore of joliet",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "nissan of new rochelle",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "speck buick gmc of tri cities",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "speck cdjr",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "c speck motors inc",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "speck chevrolet of prosser",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "speck hyundai of tri cities",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "suski chevrolet buick",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "tom hesser chevrolet bmw",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "tom hesser nissan",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "volvo cars lisle",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "honda superstore of lisle",
+      "coach_id": "hogi_jean_giurguis"
+    },
+    {
+      "client_norm": "automaxx cdjr",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "turan foley chev cad buick",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "walla walla toyota",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "bill luke cdjr",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "blasius kia",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "bristol honda",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "university auto center",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "lum s auto center",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "lum s gmc",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "m a g classic nissan newport news",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "harnish chevrolet buick gmc of puyallup",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "harnish volkswagen of puyallup",
+      "coach_id": "hogi_jerrad_avery"
+    },
+    {
+      "client_norm": "bowman chevrolet",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "coleman le mars chevrolet",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "toyota of ann arbor",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g classic toyota wilkesboro",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g infiniti of charlotte",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "twin state ford inc",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "gallatin ford",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "coleman nissan streetsboro",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "gallatin cdjr",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g audi of hampton",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g classic cdjrf lancaster",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g classic ford lincoln of shelby",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "tinney chevrolet gmc",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "lamoille valley ford",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g classic cdjr of south charlotte",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g classic ford lincoln of columbia",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g classic volkswagen gastonia",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g ford of harvey",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "m a g porsche charlotte northlake",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "north star kia",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "page honda bloomfield",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "cowboy chevrolet gmc",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "patriot chevrolet of warminster",
+      "coach_id": "cliff_cliff_honeycutt"
+    },
+    {
+      "client_norm": "bowman chevrolet of clinton",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "coleman nissan of warsaw",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "finnin kia",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "johnson city acura",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g classic cdjrf of goldsboro",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g classic ford of smithfield",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g classic kia smithfield",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "tyson motor cdjr",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g classic toyota hampton",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g classic nissan sanford",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g infiniti of greenville",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g mazda of greenville",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g jaguar columbia",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g stateline cdjr maserati alfa romeo",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "sterling acura of austin",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g bentley vinfast ineos",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g honda of harvey",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g bmw mercedes benz of bowling green",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g classic nissan williamsburg",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "m a g classic toyota henderson",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "d arcy hyundai",
+      "coach_id": "hogi_chris_hogland"
+    },
+    {
+      "client_norm": "subaru of pueblo",
+      "coach_id": "hogi_chris_hogland"
+    },
+    {
+      "client_norm": "leo payne honda",
+      "coach_id": "hogi_chris_hogland"
+    },
+    {
+      "client_norm": "planet honda of golden co",
+      "coach_id": "hogi_chris_hogland"
+    },
+    {
+      "client_norm": "planet hyundai",
+      "coach_id": "hogi_chris_hogland"
+    },
+    {
+      "client_norm": "randy wise chevrolet",
+      "coach_id": "hogi_chris_hogland"
+    },
+    {
+      "client_norm": "culver city chevrolet",
+      "coach_id": "bryan_dylan_roberts"
+    },
+    {
+      "client_norm": "harnish chevrolet of everett",
+      "coach_id": "bryan_dylan_roberts"
+    },
+    {
+      "client_norm": "gary rome kia",
+      "coach_id": "bryan_dylan_roberts"
+    },
+    {
+      "client_norm": "puente hills cdjr",
+      "coach_id": "bryan_dylan_roberts"
+    },
+    {
+      "client_norm": "north bend chevrolet",
+      "coach_id": "bryan_dylan_roberts"
+    },
+    {
+      "client_norm": "scott honda of west chester",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "m a g hyundai genesis of hampton",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "central chevrolet inc",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "mandal buick gmc",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "k a g keating toyota",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "k a g northwest hyundai",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "scott honda of vineland",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "devoe cadillac",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "karl flammer ford",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "mandal cdjr",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "scott kia of springfield",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "selking international trucks",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "strong volkswagen",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "scott kia of limerick",
+      "coach_id": "hogi_hunter_blake"
+    },
+    {
+      "client_norm": "livingston motor company",
+      "coach_id": "bryan_james_baumer"
+    },
+    {
+      "client_norm": "paragon acura",
+      "coach_id": "bryan_james_baumer"
+    },
+    {
+      "client_norm": "jenkins hyundai of ocala",
+      "coach_id": "bryan_james_baumer"
+    },
+    {
+      "client_norm": "gary rome hyundai",
+      "coach_id": "bryan_james_baumer"
+    },
+    {
+      "client_norm": "dralle chevrolet and buick",
+      "coach_id": "bryan_james_baumer"
+    },
+    {
+      "client_norm": "easterns nissan of white marsh",
+      "coach_id": "bryan_james_baumer"
+    },
+    {
+      "client_norm": "prince chevrolet albany",
+      "coach_id": "bryan_james_baumer"
+    },
+    {
+      "client_norm": "yokem toyota",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "hedrick s chevrolet",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "metro toyota",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "lasco ford",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "m a g land rover volvo shreveport",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "m a g toyota of kenner",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "brickell honda of dt chicago",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "honda libertyville",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "price family volvo marin",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "brickell vw of dt chicago",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "price family mercedes benz of fairfield",
+      "coach_id": "bryan_vicki_johns"
+    },
+    {
+      "client_norm": "riverside chevrolet gmc of rome",
+      "coach_id": "bryan_bryan_hubert"
+    },
+    {
+      "client_norm": "riverside cadillac gmc of cartersville",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "riverside nissan of rome",
+      "coach_id": "cliff_josh_stuban"
+    },
+    {
+      "client_norm": "riverside toyota",
+      "coach_id": "bryan_dylan_roberts"
+    }
+  ],
+  "newClients": [
+    {
+      "name": "Roseville Chevrolet",
+      "coach_id": "bryan_bryan_hubert",
+      "price": 1995.0
+    },
+    {
+      "name": "Price Family Ford Sacramento",
+      "coach_id": "bryan_bryan_hubert",
+      "price": 1750.0
+    },
+    {
+      "name": "Cambridge Centre Honda",
+      "coach_id": "hogi_jean_giurguis",
+      "price": 1460.73
+    },
+    {
+      "name": "Wesley Chapel Toyota",
+      "coach_id": "hogi_jean_giurguis",
+      "price": 1500.0
+    },
+    {
+      "name": "Sherwood Honda",
+      "coach_id": "hogi_jean_giurguis",
+      "price": 1457.88
+    },
+    {
+      "name": "BMW of Lafayette",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 1495
+    },
+    {
+      "name": "Koehne Chevrolet Buick GMC, Inc",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 1500.0
+    },
+    {
+      "name": "Mercedes Benz of Lafayette",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 1495.0
+    },
+    {
+      "name": "M.A.G. Classic Hyundai of North Wilkesboro",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 3500.0
+    },
+    {
+      "name": "M.A.G. Beckley Chevrolet",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 3500.0
+    },
+    {
+      "name": "M.A.G. Mercedes-Benz of Hampton",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 3500.0
+    },
+    {
+      "name": "Page Toyota",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 1500.0
+    },
+    {
+      "name": "Patriot Chevrolet of Limerick",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 1500.0
+    },
+    {
+      "name": "Sam Boswell Honda",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 1500.0
+    },
+    {
+      "name": "BMW of Barrington",
+      "coach_id": "cliff_cliff_honeycutt",
+      "price": 1495.0
+    },
+    {
+      "name": "Rogers Toyota Lewiston",
+      "coach_id": "cliff_josh_stuban",
+      "price": 1495.0
+    },
+    {
+      "name": "Brickell Buick GMC",
+      "coach_id": "hogi_chris_hogland",
+      "price": 1495
+    },
+    {
+      "name": "Brickell Mazda",
+      "coach_id": "hogi_chris_hogland",
+      "price": 1495.0
+    },
+    {
+      "name": "Brickell Honda",
+      "coach_id": "hogi_chris_hogland",
+      "price": 1495.0
+    },
+    {
+      "name": "Federico CDJR",
+      "coach_id": "hogi_chris_hogland",
+      "price": 2000.0
+    },
+    {
+      "name": "Federico Kia",
+      "coach_id": "hogi_chris_hogland",
+      "price": 2000.0
+    },
+    {
+      "name": "Watsonville CDJR",
+      "coach_id": "hogi_chris_hogland",
+      "price": 1500.0
+    },
+    {
+      "name": "Price Family Modesto Toyota",
+      "coach_id": "bryan_dylan_roberts",
+      "price": 1750.0
+    },
+    {
+      "name": "Cox Chevrolet",
+      "coach_id": "hogi_hunter_blake",
+      "price": 800.0
+    },
+    {
+      "name": "Brickell Bentley of Central NJ",
+      "coach_id": "hogi_hunter_blake",
+      "price": 500.0
+    },
+    {
+      "name": "MotorWerks Cadillac",
+      "coach_id": "hogi_hunter_blake",
+      "price": 1495.0
+    },
+    {
+      "name": "MotorWerks Infiniti",
+      "coach_id": "hogi_hunter_blake",
+      "price": 1495.0
+    },
+    {
+      "name": "Motorwerks Porsche of Barrington",
+      "coach_id": "hogi_hunter_blake",
+      "price": 1495.0
+    },
+    {
+      "name": "Steven Nissan",
+      "coach_id": "bryan_james_baumer",
+      "price": 1500.0
+    },
+    {
+      "name": "Northampton Volkswagen",
+      "coach_id": "bryan_james_baumer",
+      "price": 1500.0
+    },
+    {
+      "name": "Steven Toyota",
+      "coach_id": "bryan_james_baumer",
+      "price": 1500.0
+    },
+    {
+      "name": "Steven Kia",
+      "coach_id": "bryan_james_baumer",
+      "price": 1500.0
+    },
+    {
+      "name": "Bill Jacobs BMW/MINI",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495
+    },
+    {
+      "name": "Bill Jacobs Land Rover of Hinsdale",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Price Family Toyota Walnut Creek",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1750.0
+    },
+    {
+      "name": "Bill Jacobs Volkswagen",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Riverton Elko Chevrolet Buick GMC Cadillac",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Price Family JLR of Marin Luxury Cars",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1750.0
+    },
+    {
+      "name": "Price The Luxury Collection Walnut Creek",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1750.0
+    },
+    {
+      "name": "Holmes Honda Bossier City",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1395.0
+    },
+    {
+      "name": "Holmes Honda - Shreveport",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1395.0
+    },
+    {
+      "name": "Acura of Highland Park",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Motorwerks Honda",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Brickell Bentley Jacksonville",
+      "coach_id": "bryan_vicki_johns",
+      "price": 500.0
+    },
+    {
+      "name": "Brickell Infiniti Stuart",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Country Nissan",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1500.0
+    },
+    {
+      "name": "Mercedes Benz of Midlothian",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Brickell Ocean Cadillac",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Riverton Chevrolet",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    },
+    {
+      "name": "Patriot Buick GMC of Boyertown",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1500.0
+    },
+    {
+      "name": "Motorwerks Mercedez Benz",
+      "coach_id": "bryan_vicki_johns",
+      "price": 1495.0
+    }
+  ]
+};
+function migrateCoachingAssignments(){
+  if(getMeta('coaching_assignments_migrated')) return;
+  let assigned = 0, skippedAlreadySet = 0, created = 0;
+  const tx = () => {
+    for(const a of COACH_ASSIGN_DATA.assign){
+      const row = db.prepare('SELECT id, assigned_coach_id FROM clients WHERE norm=?').get(a.client_norm);
+      if(!row) continue; // name not found — leave for manual follow-up, don't guess
+      if(row.assigned_coach_id){ skippedAlreadySet++; continue; }
+      db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(a.coach_id, row.id);
+      assigned++;
+    }
+    for(const nc of COACH_ASSIGN_DATA.newClients){
+      const clientId = resolveClient(nc.name, {});
+      const row = db.prepare('SELECT assigned_coach_id FROM clients WHERE id=?').get(clientId);
+      if(!row.assigned_coach_id) db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(nc.coach_id, clientId);
+      const already = db.prepare("SELECT id FROM contracts WHERE client_id=? AND program='Coaching Only'").get(clientId);
+      if(!already){
+        db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,created)
+          VALUES(?,?,0,NULL,?,'active','sheet',?)`).run(clientId, 'Coaching Only', nc.price ?? null, new Date().toISOString());
+        created++;
+      }
+    }
+  };
+  db.exec('BEGIN');
+  try{ tx(); db.exec('COMMIT'); }
+  catch(e){ db.exec('ROLLBACK'); console.error('Coaching assignments migration failed:', e); return; }
+  setMeta('coaching_assignments_migrated', new Date().toISOString());
+  log('system', 'migrate.coaching_assignments', { assigned, created, skippedAlreadySet });
+  console.log(`Coaching Assignments import: ${assigned} clients assigned a coach, ${created} new Coaching-Only clients created.`);
+}
+
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
 seed();
 migratePhase1();
+migrateCoachingAssignments();
 ensureCurrentMonthSnapshot();
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot };
