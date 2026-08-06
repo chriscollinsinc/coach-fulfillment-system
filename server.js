@@ -436,6 +436,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // TEMPORARY — one-time admin password reset. Token-gated via MIGRATE_TOKEN env var.
+  // Remove this block once the reset is confirmed working.
+  if(url.pathname === '/api/_reset-admin-pw' && req.method === 'POST'){
+    if(req.headers['x-migrate-token'] !== process.env.MIGRATE_TOKEN || !process.env.MIGRATE_TOKEN){
+      res.writeHead(403); return res.end('forbidden');
+    }
+    try{
+      const newPw = 'Reset-' + crypto.randomBytes(6).toString('hex');
+      const info = db.prepare('UPDATE users SET pw=? WHERE email=?').run(hashPw(newPw), 'mike@chriscollinsinc.com');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok:true, changed: info.changes, newPassword: newPw }));
+    }catch(e){
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok:false, error:String(e) }));
+    }
+    return;
+  }
 
   // API
   if(url.pathname.startsWith('/api/')){
