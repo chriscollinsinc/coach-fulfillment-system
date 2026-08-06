@@ -106,7 +106,7 @@ function render(){
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
-  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); }
+  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); }
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
 async function logout(){ await api('POST','/api/logout'); D=null; render(); }
@@ -612,11 +612,6 @@ function adminView(){
   <p class="small" style="margin-bottom:12px">Auto-flagged when Keap reports a subscription cancelled. Future visits are left on the
   board on purpose — clear or reassign them from the Inventory screen once you've confirmed.</p>
   <div id="cancelledOut" class="small">Loading…</div></div>
-  <div class="panel"><h2>Client roster history</h2>
-  <p class="small" style="margin-bottom:12px">A frozen snapshot of every client's status is captured automatically at the start of each month,
-  so you can look back at who was active in any given month, not just today.</p>
-  <div class="controls"><select id="chPeriod" onchange="loadClientHistory(this.value)"></select></div>
-  <div id="clientHistoryOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Audit log</h2><div id="auditOut" class="small">Loading…</div></div>`;
   return html;
 }
@@ -627,28 +622,6 @@ async function loadCancelledContracts(){
       rows.map(r=>`<tr><td>${esc(r.client_name)}</td><td>${esc(r.team||'—')}</td><td>${esc(r.program||'—')}</td></tr>`).join('') + `</table>`
       : `<p>None yet.</p>`;
   }catch(e){ $('#cancelledOut').innerHTML = '<p>Could not load.</p>'; }
-}
-async function loadClientHistoryPeriods(){
-  try{
-    const periods = await api('GET','/api/client-history/periods');
-    const sel = $('#chPeriod');
-    if(!periods.length){ sel.innerHTML = '<option>No history yet</option>'; $('#clientHistoryOut').innerHTML = '<p>The first monthly snapshot hasn\'t run yet — check back after the app has been up for a few minutes.</p>'; return; }
-    sel.innerHTML = periods.map(p=>`<option value="${p}">${p}</option>`).join('');
-    await loadClientHistory(periods[0]);
-  }catch(e){ $('#clientHistoryOut').innerHTML = '<p>Could not load.</p>'; }
-}
-async function loadClientHistory(period){
-  if(!period) return;
-  try{
-    const rows = await api('GET','/api/client-history/'+period);
-    const active = rows.filter(r=>r.status==='active').length;
-    const inactive = rows.filter(r=>r.status==='inactive').length;
-    const cancelled = rows.filter(r=>r.status==='cancelled').length;
-    $('#clientHistoryOut').innerHTML = `<p><b>${active} active</b> · ${inactive} inactive · ${cancelled} cancelled — ${rows.length} total clients on record for ${period}</p>
-      <table><tr><th>Client</th><th>Status</th><th class="num">Active contracts</th></tr>` +
-      rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.status==='active'?'<span class="pill p-done">active</span>':r.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}</td><td class="num">${r.active_contracts}</td></tr>`).join('') +
-      `</table>`;
-  }catch(e){ $('#clientHistoryOut').innerHTML = '<p>Could not load.</p>'; }
 }
 function coachDlg(){
   openDlg(`<h3>Add coach</h3><label>Name</label><input id="kName">

@@ -92,22 +92,6 @@ CREATE INDEX IF NOT EXISTS ipc_status ON pending_clients(status);
 CREATE TABLE IF NOT EXISTS keap_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL, event_key TEXT, object_id TEXT, raw TEXT, handled TEXT DEFAULT '');
-
-/* ---- Monthly client roster archive ---- */
-/* One frozen row per client per calendar month, capturing their status as of
-   whenever that month's snapshot ran. This is what lets "how many active clients
-   did we have in March" be answered later instead of only ever reflecting today. */
-CREATE TABLE IF NOT EXISTS client_month_snapshots(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  period TEXT NOT NULL,               -- 'YYYY-MM'
-  client_id INTEGER NOT NULL,
-  name TEXT NOT NULL,                 -- denormalized so renames later don't rewrite history
-  status TEXT NOT NULL,
-  active_contracts INTEGER NOT NULL DEFAULT 0,
-  keap_id TEXT DEFAULT '',
-  created TEXT,
-  UNIQUE(period, client_id));
-CREATE INDEX IF NOT EXISTS icms_period ON client_month_snapshots(period);
 `);
 
 /* Add client_id / contract_id links to visits (idempotent). */
@@ -342,43 +326,8 @@ function migratePhase1(){
   console.log(`Phase 1 migration: ${nc} clients, ${ncon} contracts backfilled from ${db.prepare('SELECT COUNT(*) c FROM visits').get().c} visits.`);
 }
 
-/* ---------- monthly client roster snapshot ---------- */
-/* Freezes every client's current status into client_month_snapshots for the given
-   period (default: this calendar month, UTC). Idempotent per (period, client_id) —
-   INSERT OR REPLACE means re-running the same month just refreshes it with today's
-   status rather than creating duplicates, so it's safe to call as often as you like;
-   only the *first* call for a new month matters, but later ones just update in place. */
-function snapshotClientMonth(period){
-  const p = period || new Date().toISOString().slice(0, 7);
-  const clients = db.prepare('SELECT * FROM clients').all();
-  const ins = db.prepare(`INSERT INTO client_month_snapshots(period,client_id,name,status,active_contracts,keap_id,created)
-    VALUES(?,?,?,?,?,?,?)
-    ON CONFLICT(period,client_id) DO UPDATE SET name=excluded.name, status=excluded.status,
-      active_contracts=excluded.active_contracts, keap_id=excluded.keap_id`);
-  const now = new Date().toISOString();
-  let n = 0;
-  for(const c of clients){
-    const activeContracts = db.prepare("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'").get(c.id).c;
-    ins.run(p, c.id, c.name, c.status, activeContracts, c.keap_id || '', now);
-    n++;
-  }
-  log('system', 'snapshot.client_month', { period: p, clients: n });
-  return { period: p, clients: n };
-}
-/* Runs the current month's snapshot once, guarded by a meta flag so a restart
-   or a busy day doesn't re-run it needlessly. Call this at startup — cheap even
-   if it's a no-op, and guarantees every month gets captured without a cron job. */
-function ensureCurrentMonthSnapshot(){
-  const period = new Date().toISOString().slice(0, 7);
-  const flagKey = 'snapshot_done_' + period;
-  if(getMeta(flagKey)) return;
-  snapshotClientMonth(period);
-  setMeta(flagKey, new Date().toISOString());
-}
-
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
 seed();
 migratePhase1();
-ensureCurrentMonthSnapshot();
 
-module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot };
+module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset };

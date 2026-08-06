@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot } = require('./db.js');
+const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, findClientByKeapId, createPasswordReset, consumePasswordReset } = require('./db.js');
 const { sendMail } = require('./mail.js');
 
 const PORT = process.env.PORT || 3000;
@@ -339,21 +339,6 @@ route('GET', /^\/api\/audit$/, ['admin'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300').all());
 });
 
-/* ----- client roster history (monthly archive) ----- */
-route('GET', /^\/api\/client-history\/periods$/, ['admin','lead'], (req, res) => {
-  const rows = db.prepare('SELECT DISTINCT period FROM client_month_snapshots ORDER BY period DESC').all();
-  send(res, 200, rows.map(r => r.period));
-});
-route('GET', /^\/api\/client-history\/(\d{4}-\d{2})$/, ['admin','lead'], (req, res, m) => {
-  const rows = db.prepare('SELECT * FROM client_month_snapshots WHERE period=? ORDER BY name').all(m[1]);
-  send(res, 200, rows);
-});
-route('POST', /^\/api\/client-history\/snapshot-now$/, ['admin'], (req, res, m, body, user) => {
-  const result = snapshotClientMonth();
-  log(user.email, 'client_history.manual_snapshot', result);
-  send(res, 200, { ok: true, ...result });
-});
-
 /* ================= Keap webhook receiver ================= */
 /* Keap Classic verification is handled entirely at the HTTP layer below (the
  * X-Hook-Secret echo) per RESTHooks.org's Immediate Confirmation pattern —
@@ -500,8 +485,3 @@ const server = http.createServer((req, res) => {
   res.end(fs.readFileSync(file));
 });
 server.listen(PORT, () => console.log(`Coach Fulfillment System running → http://localhost:${PORT}`));
-
-// Re-check daily (in addition to the check db.js already runs at startup) so a new
-// calendar month gets captured automatically even if the server just runs for weeks
-// without a redeploy. Cheap no-op every day except the first day of a new month.
-setInterval(() => { try{ ensureCurrentMonthSnapshot(); }catch(e){ console.error('monthly snapshot check failed:', e); } }, 24 * 60 * 60 * 1000);
