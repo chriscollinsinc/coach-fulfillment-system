@@ -86,6 +86,7 @@ function render(){
     const n=D.pendingClientCount||0;
     views.pending = 'Unassigned Clients' + (n?` (${n})`:'');
   }
+  views.clients='Clients';
   views.availability='Availability';
   if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
   if(r==='admin') views.admin='Admin';
@@ -104,6 +105,8 @@ function render(){
   if(st.view==='board') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
+  if(st.view==='clients'){ m.innerHTML=clientsView(); loadClients(); }
+  if(st.view==='clientprofile'){ m.innerHTML='<div class="panel">Loading…</div>'; loadClientProfile(st.clientId); }
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
   if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); }
@@ -562,6 +565,108 @@ async function saveAssignPending(id){
 async function ignorePending(id){
   if(!confirm("Ignore this subscription? It won't be added to the LID Inventory.")) return;
   await api('POST',`/api/pending-clients/${id}/ignore`,{}); await refresh(); toast('Ignored');
+}
+
+/* ---------- clients (profiles) ---------- */
+function clientsView(){
+  return `<div class="panel"><h2>Clients</h2>
+  <p class="small" style="margin-bottom:12px">Every dealership we've coached — with who's assigned, Keap-imported details, and a running notes history.</p>
+  <div class="controls"><input placeholder="Search client…" id="cliSearch" value="${esc(st.cliSearch||'')}" oninput="st.cliSearch=this.value;renderClientTable()" style="width:260px"></div>
+  <div id="clientsOut">Loading…</div></div>`;
+}
+async function loadClients(){
+  try{ st.clientsList = await api('GET','/api/clients'); renderClientTable(); }
+  catch(e){ $('#clientsOut').innerHTML = '<p class="small">Could not load.</p>'; }
+}
+function renderClientTable(){
+  const box = $('#clientsOut'); if(!box) return;
+  const q = norm(st.cliSearch||'');
+  let rows = st.clientsList||[];
+  if(q) rows = rows.filter(c=>norm(c.name).includes(q));
+  box.innerHTML = `<table><tr><th>Client</th><th>Status</th><th class="num">Active contracts</th><th>Assigned coach</th><th></th></tr>` +
+    rows.map(c=>`<tr><td><b>${esc(c.name)}</b></td>
+      <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}</td>
+      <td class="num">${c.active_contracts}</td><td>${esc(c.assigned_coach_name||'—')}</td>
+      <td><button class="btn tiny" onclick="openClientProfile(${c.id})">View profile →</button></td></tr>`).join('') +
+    `</table>` + (rows.length ? '' : `<p class="small">No clients match.</p>`);
+}
+function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
+async function loadClientProfile(id){
+  try{
+    const data = await api('GET','/api/clients/'+id);
+    st.clientProfile = data;
+    const notes = await api('GET','/api/clients/'+id+'/notes');
+    st.clientNotes = notes;
+    $('#main').innerHTML = clientProfileView(data, notes);
+  }catch(e){ $('#main').innerHTML = '<div class="panel"><p class="small">Could not load this client.</p></div>'; }
+}
+function clientProfileView(data, notes){
+  const { client, assignedCoach, contracts, visits, visitProgress } = data;
+  const pct = visitProgress.total ? Math.round(visitProgress.completed/visitProgress.total*100) : 0;
+  const activeContract = contracts.find(c=>c.status==='active');
+  let html = `<div class="panel">
+    <button class="btn tiny" onclick="go('clients')">← All clients</button>
+    <h2 style="margin-top:8px">${esc(client.name)}
+      ${client.status==='active'?'<span class="pill p-done">active</span>':client.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}
+    </h2>
+    <div class="cards" style="margin-top:12px">
+      <div class="card"><div class="k">${visitProgress.completed}/${visitProgress.total}</div><div class="l">Visits completed — ${visitProgress.year}</div></div>
+      <div class="card"><div class="k">${contracts.filter(c=>c.status==='active').length}</div><div class="l">Active contracts</div></div>
+      <div class="card"><div class="k">${fmt(client.billing_start)}</div><div class="l">First paid</div></div>
+    </div>
+    <div class="bar" style="margin-top:10px;max-width:400px"><div style="width:${pct}%;background:var(--primary)"></div><div style="width:${100-pct}%;background:var(--open)"></div></div>
+  </div>`;
+
+  html += `<div class="panel"><h2>Assignment &amp; Keap details</h2>`;
+  if(canEdit()){
+    html += `<label>Assigned coach</label>
+      <select id="cliCoach" onchange="saveAssignedCoach(${client.id},this.value)">
+        <option value="">— unassigned —</option>
+        ${D.coaches.map(c=>`<option value="${c.id}" ${assignedCoach&&assignedCoach.id===c.id?'selected':''}>${esc(c.name)} (${c.team})</option>`).join('')}
+      </select>`;
+  } else {
+    html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
+  }
+  html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th></tr>` +
+    contracts.map(c=>`<tr><td>${esc(c.program||'—')}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
+      <td class="num">${c.price?'$'+c.price:'—'}</td>
+      <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">completed</span>'}</td>
+      <td class="small">${esc(c.source||'—')}</td></tr>`).join('') +
+    `</table>
+    <p class="small" style="margin-top:8px">Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span>${activeContract&&activeContract.keap_subscription_id?` · Active subscription ID: <span class="mono">${esc(activeContract.keap_subscription_id)}</span>`:''}</p>
+  </div>`;
+
+  html += `<div class="panel"><h2>Visit history</h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th></tr>` +
+    visits.slice().reverse().map(v=>`<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
+      <td>${v.completed?'<span class="pill p-done">completed</span>':v.cal_week?'<span class="pill p-cal">on calendar</span>':'<span class="pill p-due">needs scheduling</span>'}</td></tr>`).join('') +
+    `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
+
+  html += `<div class="panel"><h2>Notes</h2>
+    <p class="small" style="margin-bottom:10px">Any coach, lead, or admin can add a note here — this is meant to replace jotting notes in Keap going forward.</p>
+    <textarea id="cliNoteBody" rows="3" style="width:100%;box-sizing:border-box" placeholder="Add a note about this client…"></textarea>
+    <div class="dlgrow" style="margin-top:6px"><button class="btn primary" onclick="saveClientNote(${client.id})">Add note</button></div>
+    <div style="margin-top:14px">${notes.length ? notes.map(n=>`
+      <div class="duecard"><div class="meta">${esc(n.author_name||n.author_email)} · ${n.created.slice(0,16).replace('T',' ')}</div>
+      <div style="margin-top:4px;white-space:pre-wrap">${esc(n.body)}</div></div>`).join('') : '<p class="small">No notes yet.</p>'}</div>
+  </div>`;
+
+  html += `<div class="panel"><h2>Coming soon</h2>
+    <p class="small">Zoom coaching call recordings/transcripts — coming soon once Zoom API access is set up.</p>
+    <p class="small">Top Dog Underground daily tracking data — coming soon once that integration is available.</p>
+  </div>`;
+  return html;
+}
+async function saveAssignedCoach(clientId, coachId){
+  await api('PATCH','/api/clients/'+clientId, { assigned_coach_id: coachId || null });
+  toast('Coach assignment saved');
+  await loadClientProfile(clientId);
+}
+async function saveClientNote(clientId){
+  const body = $('#cliNoteBody').value.trim();
+  if(!body){ alert('Note cannot be empty'); return; }
+  await api('POST','/api/clients/'+clientId+'/notes', { body });
+  toast('Note added');
+  await loadClientProfile(clientId);
 }
 
 /* ---------- my schedule (coach) ---------- */

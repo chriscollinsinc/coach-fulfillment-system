@@ -354,6 +354,62 @@ route('POST', /^\/api\/client-history\/snapshot-now$/, ['admin'], (req, res, m, 
   send(res, 200, { ok: true, ...result });
 });
 
+/* ----- client profiles ----- */
+route('GET', /^\/api\/clients$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
+  const rows = db.prepare(`
+    SELECT cl.*,
+      (SELECT COUNT(*) FROM contracts co WHERE co.client_id=cl.id AND co.status='active') AS active_contracts,
+      co.name AS assigned_coach_name
+    FROM clients cl
+    LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
+    ORDER BY cl.status='active' DESC, cl.name`).all();
+  send(res, 200, rows);
+});
+route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  const contracts = db.prepare('SELECT * FROM contracts WHERE client_id=? ORDER BY created DESC').all(cl.id);
+  const visits = db.prepare('SELECT * FROM visits WHERE client_id=? ORDER BY due').all(cl.id);
+  const year = new Date().getUTCFullYear();
+  const visitsThisYear = visits.filter(v => v.due && +v.due.slice(0,4) === year);
+  const completedThisYear = visitsThisYear.filter(v => v.completed).length;
+  const assignedCoach = cl.assigned_coach_id ? getCoach(cl.assigned_coach_id) : null;
+  send(res, 200, {
+    client: cl,
+    assignedCoach,
+    contracts, visits,
+    visitProgress: { year, total: visitsThisYear.length, completed: completedThisYear },
+  });
+});
+route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  if(body.assigned_coach_id !== undefined){
+    const coachId = body.assigned_coach_id || null;
+    if(coachId && !getCoach(coachId)) return err(res, 400, 'unknown coach');
+    db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(coachId, cl.id);
+    log(user.email, 'client.assign_coach', { clientId: cl.id, name: cl.name, coachId });
+  }
+  if(body.name !== undefined && String(body.name).trim()){
+    db.prepare('UPDATE clients SET name=? WHERE id=?').run(String(body.name).trim(), cl.id);
+    log(user.email, 'client.rename', { clientId: cl.id, name: body.name });
+  }
+  send(res, 200, { ok: true });
+});
+route('GET', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  send(res, 200, db.prepare('SELECT * FROM client_notes WHERE client_id=? ORDER BY id DESC').all(+m[1]));
+});
+route('POST', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  const text = String(body.body || '').trim();
+  if(!text) return err(res, 400, 'note text required');
+  const r = db.prepare('INSERT INTO client_notes(client_id,author_email,author_name,body,created) VALUES(?,?,?,?,?)')
+    .run(cl.id, user.email, user.name, text, new Date().toISOString());
+  log(user.email, 'client.note_add', { clientId: cl.id, name: cl.name });
+  send(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
+});
+
 /* ================= Keap webhook receiver ================= */
 /* Keap Classic verification is handled entirely at the HTTP layer below (the
  * X-Hook-Secret echo) per RESTHooks.org's Immediate Confirmation pattern —

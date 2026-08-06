@@ -119,6 +119,21 @@ ensureColumn('visits', 'client_id', 'INTEGER');
 ensureColumn('visits', 'contract_id', 'INTEGER');
 ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS ict_keapsub ON contracts(keap_subscription_id)');
+ensureColumn('clients', 'assigned_coach_id', 'TEXT');
+
+/* ---------- client profiles: coach notes ---------- */
+/* A running notes history per client, visible/addable by any coach, lead, or
+   admin — the idea is this replaces jotting notes in Keap going forward. */
+db.exec(`
+CREATE TABLE IF NOT EXISTS client_notes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL,
+  author_email TEXT NOT NULL,
+  author_name TEXT DEFAULT '',
+  body TEXT NOT NULL,
+  created TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS icn_client ON client_notes(client_id);
+`);
 
 /* ---------- helpers ---------- */
 function hashPw(pw){
