@@ -371,6 +371,14 @@ route('GET', /^\/api\/clients$/, ['admin','lead','sales','coach'], (req, res, m,
     FROM clients cl
     LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
     ORDER BY cl.status='active' DESC, cl.name`).all();
+  const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active'").all();
+  const byClient = {};
+  for(const c of activeContracts) (byClient[c.client_id] ||= []).push(c);
+  for(const r of rows){
+    const cs = byClient[r.id] || [];
+    r.programs = [...new Set(cs.map(c => c.program).filter(Boolean))].join(', ');
+    r.revenue = cs.reduce((sum, c) => sum + (Number(c.price) || 0), 0);
+  }
   send(res, 200, rows);
 });
 route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, res, m) => {

@@ -621,9 +621,18 @@ async function ignorePending(id){
 }
 
 /* ---------- clients (profiles) ---------- */
+const CLIENT_COLS = [
+  { key:'name', label:'Client', type:'string' },
+  { key:'status', label:'Status', type:'string' },
+  { key:'programs', label:'Product type', type:'string' },
+  { key:'revenue', label:'Revenue', type:'num' },
+  { key:'active_contracts', label:'Active contracts', type:'num' },
+  { key:'assigned_coach_name', label:'Assigned coach', type:'string' },
+];
 function clientsView(){
+  if(!st.cliSort) st.cliSort = { key:'name', dir:'asc' };
   return `<div class="panel"><h2>Clients</h2>
-  <p class="small" style="margin-bottom:12px">Every dealership we've coached — with who's assigned, Keap-imported details, and a running notes history.</p>
+  <p class="small" style="margin-bottom:12px">Every dealership we've coached — with who's assigned, Keap-imported details, and a running notes history. Click a column header to sort.</p>
   <div class="controls"><input placeholder="Search client…" id="cliSearch" value="${esc(st.cliSearch||'')}" oninput="st.cliSearch=this.value;renderClientTable()" style="width:260px"></div>
   <div id="clientsOut">Loading…</div></div>`;
 }
@@ -631,16 +640,38 @@ async function loadClients(){
   try{ st.clientsList = await api('GET','/api/clients'); renderClientTable(); }
   catch(e){ $('#clientsOut').innerHTML = '<p class="small">Could not load.</p>'; }
 }
+function sortClients(key){
+  if(st.cliSort.key===key) st.cliSort.dir = st.cliSort.dir==='asc'?'desc':'asc';
+  else st.cliSort = { key, dir:'asc' };
+  renderClientTable();
+}
+function fmtMoney(n){ return (n||n===0) ? '$'+Number(n).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'; }
 function renderClientTable(){
   const box = $('#clientsOut'); if(!box) return;
   const q = norm(st.cliSearch||'');
-  let rows = st.clientsList||[];
+  let rows = (st.clientsList||[]).slice();
   if(q) rows = rows.filter(c=>norm(c.name).includes(q));
-  box.innerHTML = `<table><tr><th>Client</th><th>Status</th><th class="num">Active contracts</th><th>Assigned coach</th><th></th></tr>` +
+  const { key, dir } = st.cliSort;
+  const col = CLIENT_COLS.find(c=>c.key===key);
+  rows.sort((a,b)=>{
+    let av=a[key], bv=b[key];
+    if(col.type==='num'){ av=+av||0; bv=+bv||0; return dir==='asc'?av-bv:bv-av; }
+    av=(av||'').toString().toLowerCase(); bv=(bv||'').toString().toLowerCase();
+    return dir==='asc'?av.localeCompare(bv):bv.localeCompare(av);
+  });
+  const totalRevenue = rows.reduce((s,c)=>s+(Number(c.revenue)||0),0);
+  const arrow = k => st.cliSort.key===k ? (st.cliSort.dir==='asc'?' ▲':' ▼') : '';
+  const th = c => `<th class="${c.type==='num'?'num':''}" style="cursor:pointer;user-select:none" onclick="sortClients('${c.key}')">${c.label}<span class="small">${arrow(c.key)}</span></th>`;
+  box.innerHTML = `<table><tr>${CLIENT_COLS.map(th).join('')}<th></th></tr>` +
     rows.map(c=>`<tr><td><b>${esc(c.name)}</b></td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}</td>
+      <td>${esc(c.programs||'—')}</td>
+      <td class="num">${fmtMoney(c.revenue)}</td>
       <td class="num">${c.active_contracts}</td><td>${esc(c.assigned_coach_name||'—')}</td>
       <td><button class="btn tiny" onclick="openClientProfile(${c.id})">View profile →</button></td></tr>`).join('') +
+    `<tr style="font-weight:600;border-top:2px solid var(--border,#ccc)">
+      <td colspan="3">Total — ${rows.length} client${rows.length===1?'':'s'}</td>
+      <td class="num">${fmtMoney(totalRevenue)}</td><td></td><td></td><td></td></tr>` +
     `</table>` + (rows.length ? '' : `<p class="small">No clients match.</p>`);
 }
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
