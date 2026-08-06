@@ -17,19 +17,25 @@ const KEAP_TOKEN = process.env.KEAP_TOKEN || '';
 const KEAP_BASE = process.env.KEAP_BASE || 'https://api.infusionsoft.com/crm/rest';
 async function keapGet(p){
   if(!KEAP_TOKEN) return { ok:false, status:0, json:null };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('timeout after 10s')), 10000);
   try{
-    const r = await fetch(KEAP_BASE + p, { headers: { Authorization: 'Bearer ' + KEAP_TOKEN, Accept: 'application/json' } });
+    const r = await fetch(KEAP_BASE + p, { headers: { Authorization: 'Bearer ' + KEAP_TOKEN, Accept: 'application/json' }, signal: ctrl.signal });
     const t = await r.text(); let j = null; try{ j = JSON.parse(t); }catch(e){}
     return { ok: r.ok, status: r.status, json: j };
-  }catch(e){ return { ok:false, status:0, json:null, error:String(e) }; }
+  }catch(e){ return { ok:false, status:0, json:null, error:String(e && e.message || e) }; }
+  finally{ clearTimeout(timer); }
 }
 async function keapPost(p, body){
   if(!KEAP_TOKEN) return { ok:false, status:0, json:null };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('timeout after 10s')), 10000);
   try{
-    const r = await fetch(KEAP_BASE + p, { method:'POST', headers: { Authorization: 'Bearer ' + KEAP_TOKEN, 'Content-Type':'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
+    const r = await fetch(KEAP_BASE + p, { method:'POST', headers: { Authorization: 'Bearer ' + KEAP_TOKEN, 'Content-Type':'application/json', Accept: 'application/json' }, body: JSON.stringify(body), signal: ctrl.signal });
     const t = await r.text(); let j = null; try{ j = JSON.parse(t); }catch(e){}
     return { ok: r.ok, status: r.status, json: j };
-  }catch(e){ return { ok:false, status:0, json:null, error:String(e) }; }
+  }catch(e){ return { ok:false, status:0, json:null, error:String(e && e.message || e) }; }
+  finally{ clearTimeout(timer); }
 }
 
 /* ---------- auth ---------- */
