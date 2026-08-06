@@ -81,7 +81,11 @@ function render(){
   const views = {};
   const r = D.user.role;
   if(r!=='coach'){ views.dashboard='Dashboard'; }
-  if(r==='admin'||r==='lead'){ views.board='Schedule Board'; views.inventory='LID Inventory'; }
+  if(r==='admin'||r==='lead'){
+    views.board='Schedule Board'; views.inventory='LID Inventory';
+    const n=D.pendingClientCount||0;
+    views.pending = 'Unassigned Clients' + (n?` (${n})`:'');
+  }
   views.availability='Availability';
   if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
   if(r==='admin') views.admin='Admin';
@@ -99,9 +103,10 @@ function render(){
   if(st.view==='dashboard') m.innerHTML=dashboard();
   if(st.view==='board') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
+  if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
-  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); }
+  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); }
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
 async function logout(){ await api('POST','/api/logout'); D=null; render(); }
@@ -198,6 +203,11 @@ function dashboard(){
     <div class="card ${n('needs_scheduling')?'warn':'ok'}"><div class="k">${n('needs_scheduling')}</div><div class="l">Needs scheduling</div></div>
     <div class="card"><div class="k">${n('on_calendar')}</div><div class="l">On calendar</div></div>
   </div>`;
+  if((D.pendingClientCount||0) > 0 && ['admin','lead'].includes(D.user.role)){
+    html += `<div class="panel" style="border-left:4px solid var(--primary)">
+      <b>${D.pendingClientCount} new Keap subscription${D.pendingClientCount>1?'s':''}</b> waiting for a team assignment.
+      <button class="btn tiny primary" onclick="go('pending')">Review →</button></div>`;
+  }
   html+=`<div class="panel"><h2>Capacity vs. LIDs due — next 12 months</h2>`;
   for(const t of myTeams()){
     html+=`<h3>Team ${t}</h3><table><tr><th>Month</th><th class="num">Booked</th><th class="num">Open</th><th class="num">LIDs due</th><th>Load</th><th></th></tr>`;
@@ -499,6 +509,61 @@ function runAvail(){
   $('#capOut').innerHTML=cb;
 }
 
+/* ---------- pending clients (new Keap subscriptions awaiting team assignment) ---------- */
+function guessProgram(cycle, freq){
+  const c=(cycle||'').toUpperCase(); const f=+freq||1;
+  if(c==='MONTH'){
+    if(f>=6) return 'Bi-Annual';
+    if(f===3) return 'Quarterly';
+    if(f===2) return 'Semi-Monthly';
+    return 'Monthly';
+  }
+  if(c==='YEAR') return 'Bi-Annual';
+  return 'Quarterly';
+}
+function pendingView(){
+  return `<div class="panel"><h2>Unassigned clients</h2>
+  <p class="small" style="margin-bottom:12px">New subscriptions from Keap land here first. Confirm the client name, program cadence,
+  and team, then create the contract — same as adding a contract today, just pre-filled from Keap.</p>
+  <div id="pendingOut">Loading…</div></div>`;
+}
+async function loadPending(){
+  try{
+    const rows = await api('GET','/api/pending-clients');
+    st.pendingList = rows;
+    $('#pendingOut').innerHTML = rows.length ? `<table><tr><th>Company</th><th>Contact</th><th class="num">Amount</th><th>Billing</th><th>Started</th><th></th></tr>` +
+      rows.map(r=>`<tr><td><b>${esc(r.company_name||'(unknown)')}</b></td><td class="small">${esc(r.contact_name||'—')}</td>
+        <td class="num">${r.billing_amount?'$'+r.billing_amount:'—'}</td><td class="small">${esc(r.billing_cycle||'—')} ×${r.billing_frequency||1}</td>
+        <td class="small">${esc(r.start_date||'—')}</td>
+        <td><button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
+        <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button></td></tr>`).join('') + `</table>`
+      : `<p class="small">Nothing waiting — you're all caught up.</p>`;
+  }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
+}
+function assignPendingDlg(id){
+  const r = (st.pendingList||[]).find(x=>x.id===id); if(!r) return;
+  const guessed = guessProgram(r.billing_cycle, r.billing_frequency);
+  openDlg(`<h3>Assign — ${esc(r.company_name||'(unknown)')}</h3>
+    <label>Client name</label><input id="pClient" value="${esc(r.company_name||r.contact_name||'')}">
+    <label>Program</label><select id="pProg">${PROGRAMS.map(p=>`<option ${p===guessed?'selected':''}>${p}</option>`).join('')}</select>
+    <label>Number of visits</label><input id="pN" type="number" value="${CYCLE_LEN[guessed]||4}">
+    <label>First visit due</label><input id="pFirst" type="date" value="${r.start_date||TODAY}">
+    <label>Team</label><select id="pTeam">${teamOpts()}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveAssignPending(${id})">Create contract</button></div>`);
+}
+async function saveAssignPending(id){
+  const client=$('#pClient').value.trim(); if(!client){alert('Client name required');return;}
+  const program=$('#pProg').value, n=+$('#pN').value, first=$('#pFirst').value, team=$('#pTeam').value;
+  if(!first||!(n>0)||!team){alert('Program visit count, first due date and team are required');return;}
+  await api('POST',`/api/pending-clients/${id}/assign`,{client,program,n,first,team});
+  closeDlg(); await refresh(); toast(client+' added — contract created');
+}
+async function ignorePending(id){
+  if(!confirm("Ignore this subscription? It won't be added to the LID Inventory.")) return;
+  await api('POST',`/api/pending-clients/${id}/ignore`,{}); await refresh(); toast('Ignored');
+}
+
 /* ---------- my schedule (coach) ---------- */
 function mySchedule(){
   const cid=D.user.coach_id;
@@ -543,8 +608,20 @@ function adminView(){
       ${u.id!==D.user.id?`<button class="btn tiny danger" onclick="toggleUser(${u.id},${u.active?0:1})">${u.active?'Disable':'Enable'}</button>`:''}</td></tr>`;
   });
   html+=`</table></div>
+  <div class="panel"><h2>Recently cancelled via Keap</h2>
+  <p class="small" style="margin-bottom:12px">Auto-flagged when Keap reports a subscription cancelled. Future visits are left on the
+  board on purpose — clear or reassign them from the Inventory screen once you've confirmed.</p>
+  <div id="cancelledOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Audit log</h2><div id="auditOut" class="small">Loading…</div></div>`;
   return html;
+}
+async function loadCancelledContracts(){
+  try{
+    const rows = await api('GET','/api/keap/cancelled-contracts');
+    $('#cancelledOut').innerHTML = rows.length ? `<table><tr><th>Client</th><th>Team</th><th>Program</th></tr>` +
+      rows.map(r=>`<tr><td>${esc(r.client_name)}</td><td>${esc(r.team||'—')}</td><td>${esc(r.program||'—')}</td></tr>`).join('') + `</table>`
+      : `<p>None yet.</p>`;
+  }catch(e){ $('#cancelledOut').innerHTML = '<p>Could not load.</p>'; }
 }
 function coachDlg(){
   openDlg(`<h3>Add coach</h3><label>Name</label><input id="kName">

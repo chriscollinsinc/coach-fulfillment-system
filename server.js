@@ -12,6 +12,26 @@ const SECRET = getMeta('secret');
 const PUB = path.join(__dirname, 'public');
 const MIME = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css', '.json':'application/json', '.png':'image/png', '.svg':'image/svg+xml', '.ico':'image/x-icon' };
 
+/* ---------- Keap REST helper (server-side, for webhook enrichment + hook verify) ---------- */
+const KEAP_TOKEN = process.env.KEAP_TOKEN || '';
+const KEAP_BASE = process.env.KEAP_BASE || 'https://api.infusionsoft.com/crm/rest';
+async function keapGet(p){
+  if(!KEAP_TOKEN) return { ok:false, status:0, json:null };
+  try{
+    const r = await fetch(KEAP_BASE + p, { headers: { Authorization: 'Bearer ' + KEAP_TOKEN, Accept: 'application/json' } });
+    const t = await r.text(); let j = null; try{ j = JSON.parse(t); }catch(e){}
+    return { ok: r.ok, status: r.status, json: j };
+  }catch(e){ return { ok:false, status:0, json:null, error:String(e) }; }
+}
+async function keapPost(p, body){
+  if(!KEAP_TOKEN) return { ok:false, status:0, json:null };
+  try{
+    const r = await fetch(KEAP_BASE + p, { method:'POST', headers: { Authorization: 'Bearer ' + KEAP_TOKEN, 'Content-Type':'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
+    const t = await r.text(); let j = null; try{ j = JSON.parse(t); }catch(e){}
+    return { ok: r.ok, status: r.status, json: j };
+  }catch(e){ return { ok:false, status:0, json:null, error:String(e) }; }
+}
+
 /* ---------- auth ---------- */
 const sign = v => v + '.' + crypto.createHmac('sha256', SECRET).update(v).digest('hex').slice(0, 32);
 const unsign = t => { if(!t) return null; const i = t.lastIndexOf('.'); if(i < 0) return null;
@@ -100,7 +120,58 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
   if(user.role === 'admin'){
     out.users = db.prepare('SELECT id,email,name,role,team,coach_id,active FROM users ORDER BY role,name').all();
   }
+  if(user.role === 'admin' || user.role === 'lead'){
+    out.pendingClientCount = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending'").get().c;
+  }
   send(res, 200, out);
+});
+
+/* ----- Keap-synced contracts & visits ----- */
+const KEAP_INTERVAL = { 'Monthly':1, 'Semi-Monthly':2, 'Quarterly':3, 'Bi-Annual':6, 'LID (Purchase)':0, '6 Visits Monthly':1 };
+function createKeapContractAndVisits({ clientName, program, n, first, team, keapSubscriptionId, keapCompanyId, price, actorEmail }){
+  const cr = db.prepare(`INSERT INTO contracts(client_name,program,team,status,keap_subscription_id,keap_company_id,created)
+    VALUES(?,?,?,'active',?,?,?)`)
+    .run(clientName.trim(), program, team, keapSubscriptionId || null, keapCompanyId || null, new Date().toISOString());
+  const contractId = Number(cr.lastInsertRowid);
+  const iv = KEAP_INTERVAL[program] ?? 3;
+  const ids = [];
+  for(let k = 0; k < n; k++){
+    const d = new Date(first + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
+    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,contract_id)
+      VALUES(?,?,?,?,?,?,?,?)`).run(clientName.trim(), program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, 'keap', new Date().toISOString().slice(0,10), contractId);
+    ids.push(Number(r.lastInsertRowid));
+  }
+  log(actorEmail || 'system', 'contract.create', { client: clientName, program, n, first, team, source: 'keap' });
+  return { contractId, ids };
+}
+route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, user) => {
+  send(res, 200, db.prepare("SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all());
+});
+route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req, res, m, body, user) => {
+  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
+  if(!pc) return err(res, 404, 'not found');
+  if(pc.status !== 'pending') return err(res, 400, 'already handled');
+  const { client, program, n, first, team } = body;
+  if(!client || !first || !(n > 0) || !team) return err(res, 400, 'client, program visit count, first due date and team required');
+  if(!canEditTeam(user, team)) return err(res, 403, 'You can only assign to your own team');
+  const { contractId, ids } = createKeapContractAndVisits({
+    clientName: client, program, n, first, team,
+    keapSubscriptionId: pc.keap_subscription_id, keapCompanyId: pc.keap_company_id, price: pc.billing_amount,
+    actorEmail: user.email,
+  });
+  db.prepare("UPDATE pending_clients SET status='assigned', resolved_contract_id=? WHERE id=?").run(contractId, pc.id);
+  log(user.email, 'pendingclient.assign', { pendingId: pc.id, client, team, contractId });
+  send(res, 200, { ok: true, contractId, ids });
+});
+route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req, res, m, body, user) => {
+  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
+  if(!pc) return err(res, 404, 'not found');
+  db.prepare("UPDATE pending_clients SET status='ignored' WHERE id=?").run(pc.id);
+  log(user.email, 'pendingclient.ignore', { pendingId: pc.id, company: pc.company_name });
+  send(res, 200, { ok: true });
+});
+route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) => {
+  send(res, 200, db.prepare("SELECT * FROM contracts WHERE status='cancelled' ORDER BY id DESC LIMIT 50").all());
 });
 
 /* ----- contracts & visits ----- */
@@ -265,9 +336,95 @@ route('GET', /^\/api\/audit$/, ['admin'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300').all());
 });
 
+/* ================= Keap webhook receiver ================= */
+/* Keap Classic sends a POST for each event; the payload can also be a verification
+ * ping (contains a "key" to confirm) rather than a real event. We log everything raw
+ * first (cheap insurance while validating the integration), then try to handle it.
+ * No cookie auth here — Keap calls this directly. We only ever use the payload to
+ * look up/mutate our own records, never to run arbitrary commands. */
+async function handleKeapWebhook(req, res, rawBody){
+  let events;
+  try{ events = JSON.parse(rawBody || '[]'); }catch(e){ events = []; }
+  if(!Array.isArray(events)) events = [events];
+
+  for(const evt of events){
+    const eventKey = evt.event_key || evt.eventKey || '';
+    const verifyKey = evt.key || evt.verify_key || null;
+    const objectId = (evt.object_keys && evt.object_keys[0]) || (evt.objectKeys && evt.objectKeys[0]) || evt.object_key || evt.id || evt.subscription_id || null;
+
+    db.prepare('INSERT INTO keap_events(ts,event_key,object_id,raw) VALUES(?,?,?,?)')
+      .run(new Date().toISOString(), eventKey || '(verify)', String(objectId || ''), JSON.stringify(evt).slice(0, 4000));
+
+    if(verifyKey && !eventKey){
+      const hooks = await keapGet('/v1/hooks');
+      const hookId = (hooks.json || []).find(h => h.hookUrl && h.hookUrl.includes('/api/webhooks/keap'))?.key;
+      if(hookId) await keapPost(`/v1/hooks/${hookId}/verify`, { key: verifyKey });
+      continue;
+    }
+    if(eventKey === 'subscription.add' && objectId){
+      await onSubscriptionAdd(objectId);
+    } else if((eventKey === 'subscription.edit' || eventKey === 'subscription.delete') && objectId){
+      await onSubscriptionChange(objectId, eventKey);
+    }
+    // other event keys are logged to keap_events but not acted on yet.
+  }
+  send(res, 200, { ok: true });
+}
+async function onSubscriptionAdd(subId){
+  const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(String(subId));
+  const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(String(subId));
+  if(already || existingContract) return; // already queued or already assigned
+
+  const sub = await keapGet(`/v1/subscriptions/${subId}`);
+  const s = sub.json || {};
+  let companyName = '', contactName = '';
+  if(s.contact_id){
+    const c = await keapGet(`/v1/contacts/${s.contact_id}?optional_properties=company`);
+    const cj = c.json || {};
+    companyName = cj.company?.company_name || '';
+    contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
+  }
+  db.prepare(`INSERT INTO pending_clients
+    (keap_subscription_id,keap_contact_id,keap_company_id,company_name,contact_name,product_desc,billing_amount,billing_cycle,billing_frequency,start_date,status,created)
+    VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?)
+    ON CONFLICT(keap_subscription_id) DO NOTHING`)
+    .run(String(subId), s.contact_id ? String(s.contact_id) : null, s.contact_id_company || '', companyName, contactName,
+      s.subscription_plan_id ? String(s.subscription_plan_id) : (s.product_id ? String(s.product_id) : ''),
+      Number(s.billing_amount) || null, s.billing_cycle || '', s.billing_frequency || null, s.start_date || null,
+      new Date().toISOString());
+  log('keap.webhook', 'pendingclient.queued', { subId, companyName, contactName });
+}
+async function onSubscriptionChange(subId, eventKey){
+  const sub = await keapGet(`/v1/subscriptions/${subId}`);
+  const s = sub.json || {};
+  const contract = db.prepare('SELECT * FROM contracts WHERE keap_subscription_id=?').get(String(subId));
+  const stillActive = eventKey === 'subscription.delete' ? false : !!s.active;
+
+  if(!contract){
+    if(!stillActive) db.prepare("UPDATE pending_clients SET status='ignored' WHERE keap_subscription_id=?").run(String(subId));
+    return;
+  }
+  const newStatus = stillActive ? 'active' : 'cancelled';
+  if(contract.status !== newStatus){
+    db.prepare('UPDATE contracts SET status=? WHERE id=?').run(newStatus, contract.id);
+    log('keap.webhook', 'contract.status', { contractId: contract.id, subId, status: newStatus });
+  }
+  // We deliberately do NOT auto-delete future scheduled visits on churn — a lead
+  // reviews the Admin screen (now flagged via the contract's cancelled status) and
+  // removes/reassigns them by hand, so nothing gets silently wiped off the board.
+}
+
 /* ================= server ================= */
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+
+  if(url.pathname === '/api/webhooks/keap' && req.method === 'POST'){
+    let chunks = [];
+    req.on('data', d => { chunks.push(d); if(Buffer.concat(chunks).length > 2e6) req.destroy(); });
+    req.on('end', () => { handleKeapWebhook(req, res, Buffer.concat(chunks).toString()).catch(e => { console.error(e); send(res, 200, { ok:true }); }); });
+    return;
+  }
+
   // API
   if(url.pathname.startsWith('/api/')){
     let chunks = [];

@@ -40,7 +40,51 @@ CREATE TABLE IF NOT EXISTS password_resets(
   expires TEXT NOT NULL,
   used INTEGER DEFAULT 0,
   created TEXT);
+
+/* ---- Keap live sync ---- */
+/* A contract = one Keap subscription that's been assigned to a team. Only
+   Keap-originated visit groups get one of these — legacy sheet-imported visits
+   and ad-hoc app-created visits are untouched and never linked to a contract. */
+CREATE TABLE IF NOT EXISTS contracts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_name TEXT NOT NULL,
+  program TEXT DEFAULT '',
+  team TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','cancelled')),
+  keap_subscription_id TEXT UNIQUE,
+  keap_company_id TEXT,
+  created TEXT);
+/* Queue of new Keap subscriptions awaiting a human to assign a team + confirm
+   the program/visit-cadence, before a contract + visit cycle is generated. */
+CREATE TABLE IF NOT EXISTS pending_clients(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  keap_subscription_id TEXT UNIQUE,
+  keap_contact_id TEXT,
+  keap_company_id TEXT,
+  company_name TEXT DEFAULT '',
+  contact_name TEXT DEFAULT '',
+  product_desc TEXT DEFAULT '',
+  billing_amount REAL,
+  billing_cycle TEXT DEFAULT '',
+  billing_frequency INTEGER,
+  start_date TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','assigned','ignored')),
+  resolved_contract_id INTEGER,
+  created TEXT);
+CREATE INDEX IF NOT EXISTS ipc_status ON pending_clients(status);
+/* Raw log of every webhook Keap sends us — cheap insurance while validating
+   the integration; safe to prune later. */
+CREATE TABLE IF NOT EXISTS keap_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL, event_key TEXT, object_id TEXT, raw TEXT);
 `);
+
+/* Add contract_id link to visits (idempotent) — only Keap-created visits use it. */
+(function ensureColumn(){
+  const cols = db.prepare("PRAGMA table_info(visits)").all().map(r => r.name);
+  if(!cols.includes('contract_id')) db.exec('ALTER TABLE visits ADD COLUMN contract_id INTEGER');
+})();
+db.exec('CREATE INDEX IF NOT EXISTS ict_keapsub ON contracts(keap_subscription_id)');
 
 /* ---------- helpers ---------- */
 function hashPw(pw){
