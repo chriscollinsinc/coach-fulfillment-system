@@ -460,7 +460,7 @@ async function saveAssignPending(id){
   toast(`${b.client} assigned to Team ${b.team} — ${b.n} ${b.program} visits added`);
 }
 async function ignorePending(id){
-  if(!confirm('Ignore this subscription? It won\\'t be added to the LID Inventory.')) return;
+  if(!confirm("Ignore this subscription? It won't be added to the LID Inventory.")) return;
   await api('POST',`/api/pending-clients/${id}/ignore`); await refresh(); await loadPending();
   toast('Ignored');
 }
