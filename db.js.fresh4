@@ -1,0 +1,384 @@
+/* Database: schema + first-run seed from seed_data.json (Coach Master File extract). */
+'use strict';
+const { DatabaseSync } = require('node:sqlite');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'coach.db');
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const db = new DatabaseSync(DB_PATH);
+
+db.exec(`
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS users(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT UNIQUE NOT NULL, name TEXT NOT NULL, pw TEXT NOT NULL,
+  role TEXT NOT NULL CHECK(role IN ('admin','lead','sales','coach')),
+  team TEXT, coach_id TEXT, active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS coaches(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, team TEXT NOT NULL, active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS blocks(
+  coach_id TEXT NOT NULL, week TEXT NOT NULL, kind TEXT NOT NULL, label TEXT DEFAULT '',
+  PRIMARY KEY(coach_id, week));
+CREATE TABLE IF NOT EXISTS visits(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client TEXT NOT NULL, program TEXT DEFAULT '', cycle TEXT DEFAULT '',
+  due TEXT, completed INTEGER DEFAULT 0, completed_on TEXT,
+  team TEXT, coach_hist TEXT DEFAULT '', salesperson TEXT DEFAULT '',
+  sold TEXT, source TEXT DEFAULT 'app',
+  cal_coach TEXT, cal_week TEXT, sched_hist TEXT);
+CREATE INDEX IF NOT EXISTS iv_cal ON visits(cal_coach, cal_week);
+CREATE INDEX IF NOT EXISTS iv_due ON visits(due);
+CREATE TABLE IF NOT EXISTS audit(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL, user TEXT NOT NULL, action TEXT NOT NULL, detail TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS password_resets(
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  expires TEXT NOT NULL,
+  used INTEGER DEFAULT 0,
+  created TEXT);
+
+/* ---- Phase 1: system-of-record entities ---- */
+/* Canonical client per dealership. Churned clients are never deleted — status changes. */
+CREATE TABLE IF NOT EXISTS clients(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,                 -- canonical display name
+  norm TEXT UNIQUE NOT NULL,          -- normalized match key
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','inactive','cancelled')),
+  billing_start TEXT,                 -- when they first started paying (earliest sold)
+  keap_id TEXT DEFAULT '',            -- Keap company id, for later reconciliation
+  notes TEXT DEFAULT '',
+  created TEXT);
+CREATE INDEX IF NOT EXISTS ic_norm ON clients(norm);
+CREATE INDEX IF NOT EXISTS ic_keap ON clients(keap_id);
+/* A contract = one Keap subscription. Generates a cycle of due visits. */
+CREATE TABLE IF NOT EXISTS contracts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL,
+  program TEXT DEFAULT '',
+  visits INTEGER DEFAULT 0,           -- number of visits in the cycle
+  start_date TEXT,                    -- billing start (= when they started paying for this)
+  price REAL,                         -- amount paid; NULL until known (comes from Keap)
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','completed','cancelled')),
+  source TEXT DEFAULT 'app',          -- 'sheet' = reconstructed from import, 'app' = created in-app, 'keap' = live sync
+  created TEXT);
+CREATE INDEX IF NOT EXISTS ict_client ON contracts(client_id);
+
+/* ---- Phase 2: live Keap sync ---- */
+/* Queue of new Keap subscriptions awaiting a human to assign a team + confirm the
+   program/visit-cadence, before a contract + visit cycle is generated. */
+CREATE TABLE IF NOT EXISTS pending_clients(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  keap_subscription_id TEXT UNIQUE,
+  keap_contact_id TEXT,
+  keap_company_id TEXT,
+  company_name TEXT DEFAULT '',
+  contact_name TEXT DEFAULT '',
+  product_desc TEXT DEFAULT '',       -- Keap subscription plan name, e.g. "SUB - Chris Collins Signature Coaching Program"
+  billing_amount REAL,
+  billing_cycle TEXT DEFAULT '',
+  billing_frequency INTEGER,
+  start_date TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','assigned','ignored')),
+  resolved_client_id INTEGER,         -- set once assigned
+  resolved_contract_id INTEGER,
+  created TEXT);
+CREATE INDEX IF NOT EXISTS ipc_status ON pending_clients(status);
+/* Raw log of every webhook Keap sends us — cheap insurance while we're validating
+   the integration; safe to prune later. */
+CREATE TABLE IF NOT EXISTS keap_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL, event_key TEXT, object_id TEXT, raw TEXT, handled TEXT DEFAULT '');
+
+/* ---- Monthly client roster archive ---- */
+/* One frozen row per client per calendar month, capturing their status as of
+   whenever that month's snapshot ran. This is what lets "how many active clients
+   did we have in March" be answered later instead of only ever reflecting today. */
+CREATE TABLE IF NOT EXISTS client_month_snapshots(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  period TEXT NOT NULL,               -- 'YYYY-MM'
+  client_id INTEGER NOT NULL,
+  name TEXT NOT NULL,                 -- denormalized so renames later don't rewrite history
+  status TEXT NOT NULL,
+  active_contracts INTEGER NOT NULL DEFAULT 0,
+  keap_id TEXT DEFAULT '',
+  created TEXT,
+  UNIQUE(period, client_id));
+CREATE INDEX IF NOT EXISTS icms_period ON client_month_snapshots(period);
+`);
+
+/* Add client_id / contract_id links to visits (idempotent). */
+function ensureColumn(table, col, decl){
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(r => r.name);
+  if(!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+}
+ensureColumn('visits', 'client_id', 'INTEGER');
+ensureColumn('visits', 'contract_id', 'INTEGER');
+ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS ict_keapsub ON contracts(keap_subscription_id)');
+
+/* ---------- helpers ---------- */
+function hashPw(pw){
+  const salt = crypto.randomBytes(16).toString('hex');
+  return salt + ':' + crypto.scryptSync(pw, salt, 32).toString('hex');
+}
+function checkPw(pw, stored){
+  const [salt, h] = String(stored).split(':');
+  if(!salt || !h) return false;
+  const a = Buffer.from(h, 'hex'), b = crypto.scryptSync(pw, salt, 32);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function getMeta(k){ const r = db.prepare('SELECT value FROM meta WHERE key=?').get(k); return r ? r.value : null; }
+function setMeta(k, v){ db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v)); }
+function log(user, action, detail){
+  db.prepare('INSERT INTO audit(ts,user,action,detail) VALUES(?,?,?,?)')
+    .run(new Date().toISOString(), user, action, typeof detail==='string'?detail:JSON.stringify(detail));
+}
+
+/* ---------- forgot-password tokens ---------- */
+function createPasswordReset(userId, ttlMinutes = 30){
+  const token = crypto.randomBytes(24).toString('hex');
+  const expires = new Date(Date.now() + ttlMinutes * 60000).toISOString();
+  db.prepare('INSERT INTO password_resets(token,user_id,expires,used,created) VALUES(?,?,?,0,?)')
+    .run(token, userId, expires, new Date().toISOString());
+  return token;
+}
+function consumePasswordReset(token, newPw){
+  const row = db.prepare('SELECT * FROM password_resets WHERE token=?').get(token);
+  if(!row) return { ok:false, error:'Invalid or expired link' };
+  if(row.used) return { ok:false, error:'This reset link was already used' };
+  if(new Date(row.expires) < new Date()) return { ok:false, error:'This reset link has expired' };
+  db.prepare('UPDATE users SET pw=? WHERE id=?').run(hashPw(newPw), row.user_id);
+  db.prepare('UPDATE password_resets SET used=1 WHERE token=?').run(token);
+  const u = db.prepare('SELECT id,email,name FROM users WHERE id=?').get(row.user_id);
+  return { ok:true, user:u };
+}
+
+/* ---------- first-run seed ---------- */
+function seed(){
+  if(getMeta('seeded')) return;
+  const seedPath = path.join(__dirname, 'seed_data.json');
+  if(!fs.existsSync(seedPath)){ console.log('No seed_data.json — starting empty.'); setMeta('seeded','empty'); bootstrapAdmin(); return; }
+  const DATA = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+  const norm = s => (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+  const TODAY = new Date().toISOString().slice(0,10);
+  const dayDiff = (a,b) => (new Date(a) - new Date(b)) / 864e5;
+
+  setMeta('teams', JSON.stringify(DATA.teams || ['Hogi','Cliff','Bryan']));
+
+  const insCoach = db.prepare('INSERT INTO coaches(id,name,team) VALUES(?,?,?)');
+  for(const c of DATA.coaches) insCoach.run(c.id, c.name.trim(), c.team);
+
+  // cell map with visit linking (same logic the prototype validated)
+  const cells = {};
+  for(const s of DATA.schedule)
+    cells[s.coach + '|' + s.week] = { kind: s.kind, text: s.text || '', visitId: null };
+  const gridByClient = {};
+  for(const s of DATA.schedule)
+    if(s.kind === 'visit' && s.client) (gridByClient[norm(s.client)] ||= []).push(s);
+
+  const coachTeam = Object.fromEntries(DATA.coaches.map(c => [c.id, c.team]));
+  const SP = { 'matt eschilman':'matt eschliman', 'josh stuban':'joshua stuban' };
+  const teamOfCoachText = txt => {
+    for(const part of (txt||'').split(/[,/&]| and /)){
+      let n = norm(part); n = SP[n] || n; if(!n) continue;
+      for(const c of DATA.coaches){
+        const cn = norm(c.name).replace(/\s*\/.*$/,'');
+        if(cn.includes(n) || n.includes(cn)) return c.team;
+      }
+    }
+    return null;
+  };
+
+  const insVisit = db.prepare(`INSERT INTO visits
+    (client,program,cycle,due,completed,team,coach_hist,salesperson,sold,source,cal_coach,cal_week,sched_hist)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  for(const v of DATA.visits){
+    const team = teamOfCoachText(v.coach) ||
+      (gridByClient[norm(v.client)] ? coachTeam[gridByClient[norm(v.client)][0].coach] : null);
+    let calCoach = null, calWeek = null;
+    if(!v.completed && v.due){
+      let best = null;
+      for(const s of (gridByClient[norm(v.client)] || [])){
+        const d = Math.abs(dayDiff(s.week, v.due));
+        if(!best || d < best.d) best = { d, s };
+      }
+      if(best && best.d <= 65 && best.s.week >= TODAY){
+        const key = best.s.coach + '|' + best.s.week;
+        if(cells[key] && !cells[key].visitId){
+          cells[key].visitId = 1; // mark linked
+          calCoach = best.s.coach; calWeek = best.s.week;
+        }
+      }
+    }
+    insVisit.run(v.client, v.program||'', v.cycle||'', v.due||null, v.completed?1:0,
+      team, v.coach||'', v.salesperson||'', v.sold||null, 'sheet', calCoach, calWeek,
+      v.scheduled_week||null);
+  }
+
+  // remaining non-open cells become blocks (incl. legacy visit cells with no inventory link)
+  const insBlock = db.prepare('INSERT INTO blocks(coach_id,week,kind,label) VALUES(?,?,?,?)');
+  for(const [key, c] of Object.entries(cells)){
+    if(c.kind === 'open') continue;
+    if(c.kind === 'visit' && c.visitId) continue;      // covered by visit cal link
+    const [coachId, week] = key.split('|');
+    insBlock.run(coachId, week, c.kind, c.text);
+  }
+  setMeta('seeded', new Date().toISOString());
+  bootstrapAdmin();
+  console.log('Seeded from Coach Master File extract:',
+    DATA.coaches.length, 'coaches,', DATA.visits.length, 'visits.');
+}
+function bootstrapAdmin(){
+  const n = db.prepare('SELECT COUNT(*) c FROM users').get().c;
+  if(n > 0) return;
+  const pw = 'Bulldog!' + Math.floor(1000 + Math.random()*9000);
+  db.prepare('INSERT INTO users(email,name,pw,role) VALUES(?,?,?,?)')
+    .run('mike@chriscollinsinc.com', 'Mike', hashPw(pw), 'admin');
+  setMeta('bootstrap_pw_notice', pw);
+  console.log('\n========================================================');
+  console.log('  First run — admin account created:');
+  console.log('  email:    mike@chriscollinsinc.com');
+  console.log('  password: ' + pw);
+  console.log('  (change it after logging in: Admin -> Users)');
+  console.log('========================================================\n');
+}
+/* ---------- shared client helpers ---------- */
+const normName = s => (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+const minDate = (a,b) => !a ? b : !b ? a : (a < b ? a : b);
+
+/* Find a client by normalized name, or create one. Returns the client row id. */
+function resolveClient(name, opts = {}){
+  const nm = (name||'').trim();
+  const key = normName(nm);
+  if(!key) return null;
+  let row = db.prepare('SELECT * FROM clients WHERE norm=?').get(key);
+  if(!row){
+    const r = db.prepare('INSERT INTO clients(name,norm,status,billing_start,keap_id,created) VALUES(?,?,?,?,?,?)')
+      .run(nm, key, opts.status || 'active', opts.billing_start || null, opts.keap_id || '', new Date().toISOString());
+    return Number(r.lastInsertRowid);
+  }
+  // keep billing_start as the earliest known
+  if(opts.billing_start){
+    const bs = minDate(row.billing_start, opts.billing_start);
+    if(bs !== row.billing_start) db.prepare('UPDATE clients SET billing_start=? WHERE id=?').run(bs, row.id);
+  }
+  if(opts.keap_id && !row.keap_id) db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(opts.keap_id, row.id);
+  return row.id;
+}
+/* Find a client already linked to a Keap company id. */
+function findClientByKeapId(keapCompanyId){
+  if(!keapCompanyId) return null;
+  return db.prepare('SELECT * FROM clients WHERE keap_id=?').get(String(keapCompanyId));
+}
+
+/* ---------- Phase 1 one-time backfill ---------- */
+/* Turns the flat visit rows (string client, no persisted contract) into the
+   client + contract entities. Idempotent: guarded by a meta flag, and only
+   touches rows that aren't linked yet, so it's safe to re-run. */
+function migratePhase1(){
+  if(getMeta('phase1_migrated')) return;
+  const parseCycle = c => { const m = /^(\d+)\s*of\s*(\d+)/i.exec(c||''); return m ? { k:+m[1], n:+m[2] } : null; };
+
+  const tx = () => {
+    // 1 & 2 — clients from distinct visit strings, link visits.client_id
+    const visitsForClients = db.prepare('SELECT id, client, sold FROM visits WHERE client_id IS NULL').all();
+    for(const v of visitsForClients){
+      const cid = resolveClient(v.client, { billing_start: v.sold || null });
+      if(cid) db.prepare('UPDATE visits SET client_id=? WHERE id=?').run(cid, v.id);
+    }
+
+    // 3 — reconstruct contracts per client from the visit sequence.
+    // A new contract begins when the cycle resets to "1 of N" or the program changes.
+    const clients = db.prepare('SELECT id FROM clients').all();
+    const insContract = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,created)
+      VALUES(?,?,?,?,?,?,?,?)`);
+    const now = new Date().toISOString();
+    for(const cl of clients){
+      const vs = db.prepare('SELECT * FROM visits WHERE client_id=? AND contract_id IS NULL ORDER BY id').all(cl.id);
+      let run = [];
+      const flush = () => {
+        if(!run.length) return;
+        const first = run[0];
+        const pc = parseCycle(first.cycle);
+        const count = pc ? pc.n : run.length;
+        let start = null; for(const r of run) start = minDate(start, r.sold);
+        const anyOpen = run.some(r => !r.completed);
+        const cr = insContract.run(cl.id, first.program || '', count, start, null,
+          anyOpen ? 'active' : 'completed', 'sheet', now);
+        const contractId = Number(cr.lastInsertRowid);
+        const upd = db.prepare('UPDATE visits SET contract_id=? WHERE id=?');
+        for(const r of run) upd.run(contractId, r.id);
+        run = [];
+      };
+      let prevProg = null;
+      for(const v of vs){
+        const pc = parseCycle(v.cycle);
+        const resets = pc && pc.k === 1;
+        const progChanged = prevProg !== null && v.program !== prevProg;
+        if(run.length && (resets || progChanged)) flush();
+        run.push(v);
+        prevProg = v.program;
+      }
+      flush();
+
+      // 4 — client status heuristic (pre-Keap): active if any incomplete visit, else inactive.
+      const openCount = db.prepare('SELECT COUNT(*) c FROM visits WHERE client_id=? AND completed=0').get(cl.id).c;
+      db.prepare('UPDATE clients SET status=? WHERE id=?').run(openCount > 0 ? 'active' : 'inactive', cl.id);
+    }
+  };
+
+  db.exec('BEGIN');
+  try{ tx(); db.exec('COMMIT'); }
+  catch(e){ db.exec('ROLLBACK'); console.error('Phase 1 migration failed:', e); return; }
+
+  const nc = db.prepare('SELECT COUNT(*) c FROM clients').get().c;
+  const ncon = db.prepare('SELECT COUNT(*) c FROM contracts').get().c;
+  setMeta('phase1_migrated', new Date().toISOString());
+  log('system', 'migrate.phase1', { clients: nc, contracts: ncon });
+  console.log(`Phase 1 migration: ${nc} clients, ${ncon} contracts backfilled from ${db.prepare('SELECT COUNT(*) c FROM visits').get().c} visits.`);
+}
+
+/* ---------- monthly client roster snapshot ---------- */
+/* Freezes every client's current status into client_month_snapshots for the given
+   period (default: this calendar month, UTC). Idempotent per (period, client_id) —
+   INSERT OR REPLACE means re-running the same month just refreshes it with today's
+   status rather than creating duplicates, so it's safe to call as often as you like;
+   only the *first* call for a new month matters, but later ones just update in place. */
+function snapshotClientMonth(period){
+  const p = period || new Date().toISOString().slice(0, 7);
+  const clients = db.prepare('SELECT * FROM clients').all();
+  const ins = db.prepare(`INSERT INTO client_month_snapshots(period,client_id,name,status,active_contracts,keap_id,created)
+    VALUES(?,?,?,?,?,?,?)
+    ON CONFLICT(period,client_id) DO UPDATE SET name=excluded.name, status=excluded.status,
+      active_contracts=excluded.active_contracts, keap_id=excluded.keap_id`);
+  const now = new Date().toISOString();
+  let n = 0;
+  for(const c of clients){
+    const activeContracts = db.prepare("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'").get(c.id).c;
+    ins.run(p, c.id, c.name, c.status, activeContracts, c.keap_id || '', now);
+    n++;
+  }
+  log('system', 'snapshot.client_month', { period: p, clients: n });
+  return { period: p, clients: n };
+}
+/* Runs the current month's snapshot once, guarded by a meta flag so a restart
+   or a busy day doesn't re-run it needlessly. Call this at startup — cheap even
+   if it's a no-op, and guarantees every month gets captured without a cron job. */
+function ensureCurrentMonthSnapshot(){
+  const period = new Date().toISOString().slice(0, 7);
+  const flagKey = 'snapshot_done_' + period;
+  if(getMeta(flagKey)) return;
+  snapshotClientMonth(period);
+  setMeta(flagKey, new Date().toISOString());
+}
+
+if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
+seed();
+migratePhase1();
+ensureCurrentMonthSnapshot();
+
+module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot };
