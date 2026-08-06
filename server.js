@@ -352,11 +352,10 @@ route('GET', /^\/api\/_keap-events-debug$/, null, (req, res) => {
 });
 
 /* ================= Keap webhook receiver ================= */
-/* Keap Classic sends a POST for each event; the payload can also be a verification
- * ping (contains a "key" to confirm) rather than a real event. We log everything raw
- * first (cheap insurance while validating the integration), then try to handle it.
- * No cookie auth here — Keap calls this directly. We only ever use the payload to
- * look up/mutate our own records, never to run arbitrary commands. */
+/* Keap Classic verification is handled entirely at the HTTP layer above (the
+ * X-Hook-Secret echo) per RESTHooks.org's Immediate Confirmation pattern —
+ * nothing here needs to deal with verification anymore. This function only
+ * ever sees real subscription events. */
 async function handleKeapWebhook(req, res, rawBody){
   let events;
   try{ events = JSON.parse(rawBody || '[]'); }catch(e){ events = []; }
@@ -364,31 +363,11 @@ async function handleKeapWebhook(req, res, rawBody){
 
   for(const evt of events){
     const eventKey = evt.event_key || evt.eventKey || '';
-    const verifyKey = evt.key || evt.verify_key || evt.verification_key || null;
     const objectId = (evt.object_keys && evt.object_keys[0]) || (evt.objectKeys && evt.objectKeys[0]) || evt.object_key || evt.id || evt.subscription_id || null;
 
     db.prepare('INSERT INTO keap_events(ts,event_key,object_id,raw) VALUES(?,?,?,?)')
-      .run(new Date().toISOString(), eventKey || '(verify)', String(objectId || ''), JSON.stringify(evt).slice(0, 4000));
+      .run(new Date().toISOString(), eventKey || '(unknown)', String(objectId || ''), JSON.stringify(evt).slice(0, 4000));
 
-    // Keap's verification ping includes both event_key AND verification_key —
-    // it is NOT a bare payload with no event_key. Check verifyKey first,
-    // regardless of whether eventKey is also present.
-    if(verifyKey){
-      const hooks = await keapGet('/v1/hooks');
-      const list = hooks.json || [];
-      const match = list.find(h => h.hookUrl && h.hookUrl.includes('/api/webhooks/keap') && h.eventKey === eventKey)
-        || list.find(h => h.hookUrl && h.hookUrl.includes('/api/webhooks/keap'));
-      let verifyResult = { attempted: false };
-      if(match){
-        const vr = await keapPost(`/v1/hooks/${match.key}/verify`, { key: verifyKey });
-        verifyResult = { attempted: true, matchKey: match.key, status: vr.status, ok: vr.ok, json: vr.json, error: vr.error, hooksGetOk: hooks.ok, hooksGetStatus: hooks.status };
-      } else {
-        verifyResult = { attempted: false, reason: 'no matching hook found', hooksGetOk: hooks.ok, hooksGetStatus: hooks.status, listLen: list.length };
-      }
-      db.prepare('INSERT INTO keap_events(ts,event_key,object_id,raw) VALUES(?,?,?,?)')
-        .run(new Date().toISOString(), '(verify-result)', String(match?.key || ''), JSON.stringify(verifyResult).slice(0, 4000));
-      continue;
-    }
     if(eventKey === 'subscription.add' && objectId){
       await onSubscriptionAdd(objectId);
     } else if((eventKey === 'subscription.edit' || eventKey === 'subscription.delete') && objectId){
@@ -447,6 +426,19 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
 
   if(url.pathname === '/api/webhooks/keap' && req.method === 'POST'){
+    // Keap/RESTHooks.org "Immediate Confirmation" verification: when a hook is
+    // (re)created, Keap sends a POST to this URL carrying an X-Hook-Secret header.
+    // We must respond 200 and echo that exact header/value back — that's the
+    // entire verification handshake. No separate follow-up API call is involved.
+    const hookSecret = req.headers['x-hook-secret'];
+    if(hookSecret){
+      db.prepare('INSERT INTO keap_events(ts,event_key,object_id,raw) VALUES(?,?,?,?)')
+        .run(new Date().toISOString(), '(verify-header)', '', JSON.stringify({ hookSecret }).slice(0, 4000));
+      res.writeHead(200, { 'X-Hook-Secret': hookSecret, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      req.resume(); // drain body, if any
+      return;
+    }
     let chunks = [];
     req.on('data', d => { chunks.push(d); if(Buffer.concat(chunks).length > 2e6) req.destroy(); });
     req.on('end', () => { handleKeapWebhook(req, res, Buffer.concat(chunks).toString()).catch(e => { console.error(e); send(res, 200, { ok:true }); }); });
