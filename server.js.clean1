@@ -339,6 +339,102 @@ route('GET', /^\/api\/audit$/, ['admin'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300').all());
 });
 
+/* TEMPORARY diagnostic — remove once the clients/contracts architecture restore has been
+ * verified live. Token-gated the same way earlier temp endpoints were. */
+const DEBUG_TOKEN = process.env.DEBUG_TOKEN || '';
+route('GET', /^\/api\/_db-state-debug$/, null, (req, res) => {
+  if(!DEBUG_TOKEN || req.headers['x-debug-token'] !== DEBUG_TOKEN) return err(res, 403, 'forbidden');
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+  const counts = {};
+  for(const t of tables){
+    try{ counts[t] = db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c; }catch(e){ counts[t] = 'error: ' + e.message; }
+  }
+  let contractsWithKeap = null, clientsWithKeap = null;
+  try{ contractsWithKeap = db.prepare('SELECT COUNT(*) c FROM contracts WHERE keap_subscription_id IS NOT NULL').get().c; }catch(e){}
+  try{ clientsWithKeap = db.prepare("SELECT COUNT(*) c FROM clients WHERE keap_id IS NOT NULL AND keap_id != ''").get().c; }catch(e){}
+
+  const schemas = {}, samples = {};
+  for(const t of ['clients', 'contracts', 'visits']){
+    if(!tables.includes(t)) continue;
+    try{ schemas[t] = db.prepare(`PRAGMA table_info(${t})`).all().map(c => ({ name: c.name, type: c.type, notnull: c.notnull, pk: c.pk })); }catch(e){ schemas[t] = 'error: ' + e.message; }
+    try{ samples[t] = db.prepare(`SELECT * FROM ${t} ORDER BY id DESC LIMIT 5`).all(); }catch(e){ samples[t] = 'error: ' + e.message; }
+  }
+
+  send(res, 200, { tables, counts, contractsWithKeap, clientsWithKeap, phase1MigratedFlag: getMeta('phase1_migrated'), schemas, samples });
+});
+
+/* TEMPORARY — one-time Keap identity backfill, computed offline against a snapshot of
+ * keap_master_v2.json (165 Keap companies) matched by normalized name against the live
+ * clients table, plus 4 known Riverside/Welborn renames. See keap_backfill_plan.json.
+ * GET = dry-run report (no writes). POST = applies it once, transactionally, and is
+ * idempotent (every write is guarded so re-running changes nothing already set).
+ * Remove this route + keap_backfill_plan.json once applied and verified. */
+const KEAP_BACKFILL_PLAN = (() => {
+  try{ return JSON.parse(fs.readFileSync(path.join(__dirname, 'keap_backfill_plan.json'), 'utf8')); }
+  catch(e){ return null; }
+})();
+function runKeapBackfill({ apply }){
+  if(!KEAP_BACKFILL_PLAN) throw new Error('keap_backfill_plan.json not found');
+  const result = { clientLinksApplied: 0, clientLinksSkipped: 0, contractLinksApplied: 0, contractLinksSkipped: 0,
+    pendingInserted: 0, pendingSkipped: 0, errors: [] };
+
+  const tx = () => {
+    for(const l of KEAP_BACKFILL_PLAN.clientKeapLinks){
+      const cl = db.prepare('SELECT id,keap_id FROM clients WHERE norm=?').get(l.clientNorm);
+      if(!cl){ result.errors.push(`client not found: ${l.clientNorm}`); continue; }
+      if(cl.keap_id){ result.clientLinksSkipped++; continue; }
+      result.clientLinksApplied++;
+      if(apply) db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(String(l.keapId), cl.id);
+    }
+    for(const l of KEAP_BACKFILL_PLAN.contractLinks){
+      const c = db.prepare('SELECT id,keap_subscription_id FROM contracts WHERE id=?').get(l.contractId);
+      if(!c){ result.errors.push(`contract not found: ${l.contractId}`); continue; }
+      if(c.keap_subscription_id){ result.contractLinksSkipped++; continue; }
+      result.contractLinksApplied++;
+      if(apply) db.prepare('UPDATE contracts SET keap_subscription_id=? WHERE id=?').run(l.keapSubId, c.id);
+    }
+    for(const p of KEAP_BACKFILL_PLAN.pendingInserts){
+      const existing = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(p.keapSubscriptionId);
+      const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(p.keapSubscriptionId);
+      if(existing || existingContract){ result.pendingSkipped++; continue; }
+      result.pendingInserted++;
+      if(apply){
+        db.prepare(`INSERT INTO pending_clients
+          (keap_subscription_id,keap_contact_id,keap_company_id,company_name,contact_name,product_desc,billing_amount,billing_cycle,billing_frequency,start_date,status,created)
+          VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?)`)
+          .run(p.keapSubscriptionId, null, p.keapCompanyId, p.companyName, '', '', p.billingAmount ?? null, p.billingCycle || '', p.billingFrequency || null, p.startDate || null, new Date().toISOString());
+      }
+    }
+  };
+
+  if(apply){
+    db.exec('BEGIN');
+    try{ tx(); db.exec('COMMIT'); }
+    catch(e){ db.exec('ROLLBACK'); throw e; }
+    log('system', 'keap.backfill.apply', result);
+  } else {
+    tx(); // dry run: reads only, no writes attempted since apply=false guards every write above
+  }
+  return result;
+}
+route('GET', /^\/api\/_keap-backfill$/, null, (req, res) => {
+  if(!DEBUG_TOKEN || req.headers['x-debug-token'] !== DEBUG_TOKEN) return err(res, 403, 'forbidden');
+  try{
+    const dryRun = runKeapBackfill({ apply: false });
+    send(res, 200, {
+      dryRun,
+      ambiguous: KEAP_BACKFILL_PLAN.ambiguous,
+      appOnlyUnmatched: KEAP_BACKFILL_PLAN.appOnlyUnmatched,
+      churnedKeapOnly: KEAP_BACKFILL_PLAN.churnedKeapOnly,
+    });
+  }catch(e){ err(res, 500, String(e && e.message || e)); }
+});
+route('POST', /^\/api\/_keap-backfill$/, null, (req, res) => {
+  if(!DEBUG_TOKEN || req.headers['x-debug-token'] !== DEBUG_TOKEN) return err(res, 403, 'forbidden');
+  try{ send(res, 200, runKeapBackfill({ apply: true })); }
+  catch(e){ err(res, 500, String(e && e.message || e)); }
+});
+
 /* ================= Keap webhook receiver ================= */
 /* Keap Classic verification is handled entirely at the HTTP layer below (the
  * X-Hook-Secret echo) per RESTHooks.org's Immediate Confirmation pattern —
