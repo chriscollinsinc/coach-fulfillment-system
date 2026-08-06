@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: coach-fulfillment-system
+    env: node
+    plan: starter
+    buildCommand: "true"
+    startCommand: node server.js
+    disk:
+      name: coach-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /opt/render/project/src/data/coach.db
+      - key: KEAP_TOKEN
+        sync: false   # set manually in the Render dashboard — never commit this to git

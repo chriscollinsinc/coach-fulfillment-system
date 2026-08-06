@@ -1,0 +1,10 @@
+node_modules/
+data/
+*.DS_Store
+.DS_Store
+
+# Keap audit/scratch scripts and their output — useful history, but not part of the deployed app.
+# Keep them out of the repo if you'd rather not commit raw Keap data dumps.
+keap_*.json
+recon*.json
+Keap_*.xlsx

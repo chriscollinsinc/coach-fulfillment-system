@@ -1,0 +1,633 @@
+/* Coach Fulfillment System — frontend */
+'use strict';
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+const norm = s => (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MO = MONTHS.map(m=>m.slice(0,3));
+const TODAY = new Date().toISOString().slice(0,10);
+const fmt = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}, ${y}`; };
+const fmtW = iso => { const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}`; };
+const dayDiff = (a,b)=>(new Date(a)-new Date(b))/864e5;
+const CYCLE_LEN = {'Monthly':12,'Semi-Monthly':6,'Quarterly':4,'Bi-Annual':2,'LID (Purchase)':1,'6 Visits Monthly':6};
+const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID (Purchase)':0,'6 Visits Monthly':1};
+const PROGRAMS = Object.keys(CYCLE_LEN);
+const BLOCKKINDS = {home:'Home',off:'Off / Vacation',training:'Training',bootcamp:'Bootcamp',event:'Event (Top Dog / Virtual)',truck:'TRUCK',travel:'Travel',mag:'Mills (M.A.G.)',launch_open:'Launch slot held',not_hired:'Not hired yet',shadow:'Shadow',meeting:'Meeting',blocked:'Blocked',visit:'Legacy visit (from sheet)',visit_legacy:'Legacy visit (from sheet)'};
+
+/* Mondays helpers */
+function mondayOf(d){ const x=new Date(d); const dow=(x.getDay()+6)%7; x.setDate(x.getDate()-dow); return x.toISOString().slice(0,10); }
+function addDays(iso,n){ const d=new Date(iso+'T12:00:00'); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
+function mondaysInMonth(y,m){ // m 0-based
+  const out=[]; let w=mondayOf(new Date(Date.UTC(y,m,1,12)));
+  if(+w.slice(5,7)!==m+1) w=addDays(w,7);
+  while(+w.slice(5,7)===m+1 && +w.slice(0,4)===y){ out.push(w); w=addDays(w,7); }
+  return out;
+}
+function mondaysRange(fromIso,toIso){ const out=[]; let w=mondayOf(new Date(fromIso+'T12:00:00')); if(w<fromIso) w=addDays(w,7); while(w<=toIso){ out.push(w); w=addDays(w,7);} return out; }
+
+/* Guess a program cadence from a Keap subscription's billing_cycle + billing_frequency —
+   prefill only; the lead always confirms/edits before creating the contract. */
+function guessProgram(cycle, freq){
+  const c=(cycle||'').toUpperCase(); const f=+freq||1;
+  if(c==='MONTH'){
+    if(f>=6) return 'Bi-Annual';
+    if(f===3) return 'Quarterly';
+    if(f===2) return 'Semi-Monthly';
+    return 'Monthly';
+  }
+  if(c==='YEAR') return 'Bi-Annual';
+  return 'Quarterly';
+}
+
+/* ---------- app state ---------- */
+let D = null;   // server state {user, teams, coaches, blocks, visits, users?, pendingClientCount?}
+let st = {
+  view:'dashboard', boardTeam:null,
+  boardY:+TODAY.slice(0,4), boardM:+TODAY.slice(5,7)-1,
+  placing:null, detail:null,
+  invFilter:'active', invSearch:'',
+  due2027:false,
+  pendingList:null,
+};
+let occ = null; // occupancy map coach|week -> {type:'visit'|'block', ...}
+
+async function api(method, url, body){
+  const r = await fetch(url,{method, headers:{'Content-Type':'application/json'}, body:body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({}));
+  if(r.status===401){ D=null; render(); throw new Error('signed out'); }
+  if(!r.ok){ toast(j.error||'Error'); throw new Error(j.error||'error'); }
+  return j;
+}
+async function refresh(){
+  D = await api('GET','/api/state');
+  occ = {};
+  for(const b of D.blocks) occ[b.coach_id+'|'+b.week] = {type:'block', kind:b.kind, label:b.label};
+  for(const v of D.visits) if(v.cal_coach && v.cal_week)
+    occ[v.cal_coach+'|'+v.cal_week] = {type:'visit', v};
+  if(!st.boardTeam) st.boardTeam = D.user.team || D.teams[0];
+  render();
+}
+const coach = id => D.coaches.find(c=>c.id===id);
+const status = v => v.completed?'completed': v.cal_week?'on_calendar': (v.due&&v.due<TODAY?'overdue': v.due?'needs_scheduling':'unknown');
+const isOpen = (cid,w) => !occ[cid+'|'+w];
+const canEdit = () => ['admin','lead'].includes(D.user.role);
+const myTeams = () => D.user.role==='admin' ? D.teams : [D.user.team];
+
+function toast(msg, undo){
+  const t=$('#toast');
+  t.innerHTML = esc(msg) + (undo?` <button onclick="undoAction()">Undo</button>`:'');
+  window._undo = undo||null;
+  t.classList.add('show');
+  clearTimeout(window._toastT);
+  window._toastT = setTimeout(()=>t.classList.remove('show'), undo?6000:2600);
+}
+async function undoAction(){ if(window._undo){ const f=window._undo; window._undo=null; $('#toast').classList.remove('show'); await f(); await refresh(); toast('Undone'); } }
+function openDlg(html){ const d=$('#dlg'); d.innerHTML=html; d.showModal(); }
+function closeDlg(){ $('#dlg').close(); }
+
+/* ---------- shell ---------- */
+function render(){
+  const app=$('#app');
+  if(!D){ app.innerHTML=loginView(); return; }
+  const views = {};
+  const r = D.user.role;
+  if(r!=='coach'){ views.dashboard='Dashboard'; }
+  if(r==='admin'||r==='lead'){
+    views.board='Schedule Board'; views.inventory='LID Inventory';
+    const n=D.pendingClientCount||0;
+    views.pending = 'Unassigned Clients' + (n?` (${n})`:'');
+  }
+  views.availability='Availability';
+  if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
+  if(r==='admin') views.admin='Admin';
+  if(!views[st.view]) st.view = Object.keys(views)[0];
+  app.innerHTML = `
+  <header>
+    <img class="logo" src="https://chriscollinsinc.com/wp-content/uploads/2020/03/logo-1.png" onerror="this.style.display='none'" alt="">
+    <h1>Coach Fulfillment</h1>
+    <nav>${Object.entries(views).map(([k,v])=>`<button class="${st.view===k?'active':''}" onclick="go('${k}')">${v}</button>`).join('')}</nav>
+    <div class="userchip">${esc(D.user.name)} · ${D.user.role}${D.user.team?' · '+D.user.team:''}<br>
+      <a onclick="pwDlg()">password</a> · <a onclick="logout()">sign out</a></div>
+  </header>
+  <main id="main"></main>`;
+  const m=$('#main');
+  if(st.view==='dashboard') m.innerHTML=dashboard();
+  if(st.view==='board') m.innerHTML=board();
+  if(st.view==='inventory') m.innerHTML=inventory();
+  if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
+  if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
+  if(st.view==='mysched') m.innerHTML=mySchedule();
+  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); }
+}
+function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
+async function logout(){ await api('POST','/api/logout'); D=null; render(); }
+function pwDlg(){
+  openDlg(`<h3>Change password</h3>
+    <label>New password</label><input type="password" id="pw1">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="savePw()">Save</button></div>`);
+}
+async function savePw(){ const p=$('#pw1').value; if(p.length<8){alert('Use at least 8 characters');return;}
+  await api('PATCH','/api/users/'+D.user.id,{password:p}); closeDlg(); toast('Password changed'); }
+
+/* ---------- login ---------- */
+function loginView(){
+  return `<div class="loginwrap"><div class="loginbox">
+    <img src="https://chriscollinsinc.com/wp-content/uploads/2020/03/logo-1.png" onerror="this.style.display='none'" alt="">
+    <h1>Coach Fulfillment System</h1>
+    <label>Email</label><input type="text" id="lEmail" autocomplete="username">
+    <label>Password</label><input type="password" id="lPw" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <div class="err" id="lErr"></div>
+    <button class="btn primary" onclick="doLogin()">Sign in</button>
+  </div></div>`;
+}
+async function doLogin(){
+  try{
+    const r = await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({email:$('#lEmail').value,password:$('#lPw').value})});
+    const j = await r.json();
+    if(!r.ok){ $('#lErr').textContent=j.error||'Sign-in failed'; return; }
+    await refresh();
+  }catch(e){ $('#lErr').textContent='Could not reach the server'; }
+}
+
+/* ---------- dashboard ---------- */
+function rolling12(){ const out=[]; let y=+TODAY.slice(0,4), m=+TODAY.slice(5,7)-1;
+  for(let i=0;i<12;i++){ out.push([y,m]); m++; if(m>11){m=0;y++;} } return out; }
+function capacity(team,y,m){
+  const weeks=mondaysInMonth(y,m); const members=D.coaches.filter(c=>c.team===team);
+  let booked=0, open=0, other=0, launch=0;
+  for(const c of members) for(const w of weeks){
+    const o=occ[c.id+'|'+w];
+    if(!o){ open++; continue; }
+    if(o.type==='visit'){ booked++; continue; }
+    if(o.kind==='visit'||o.kind==='mag'||o.kind==='visit_legacy'){ booked++; }
+    else if(o.kind==='launch_open') launch++;
+    else other++;
+  }
+  return {booked,open,launch,weeks:weeks.length*members.length};
+}
+function dashboard(){
+  const act=D.visits.filter(v=>!v.completed);
+  const n=k=>act.filter(v=>status(v)===k).length;
+  const done=D.visits.filter(v=>v.completed).length;
+  let html=`<div class="cards">
+    <div class="card"><div class="k">${done}</div><div class="l">Visits completed</div></div>
+    <div class="card ${n('overdue')?'bad':'ok'}"><div class="k">${n('overdue')}</div><div class="l">Overdue</div></div>
+    <div class="card ${n('needs_scheduling')?'warn':'ok'}"><div class="k">${n('needs_scheduling')}</div><div class="l">Needs scheduling</div></div>
+    <div class="card"><div class="k">${n('on_calendar')}</div><div class="l">On calendar</div></div>
+  </div>`;
+  if((D.pendingClientCount||0) > 0 && ['admin','lead'].includes(D.user.role)){
+    html += `<div class="panel" style="border-left:4px solid var(--primary)">
+      <b>${D.pendingClientCount} new Keap subscription${D.pendingClientCount>1?'s':''}</b> waiting for a team assignment.
+      <button class="btn tiny primary" onclick="go('pending')">Review →</button></div>`;
+  }
+  html+=`<div class="panel"><h2>Capacity vs. LIDs due — next 12 months</h2>`;
+  for(const t of myTeams()){
+    html+=`<h3>Team ${t}</h3><table><tr><th>Month</th><th class="num">Booked</th><th class="num">Open</th><th class="num">LIDs due</th><th>Load</th><th></th></tr>`;
+    for(const [y,m] of rolling12()){
+      const c=capacity(t,y,m);
+      const due=D.visits.filter(v=>!v.completed&&v.team===t&&v.due&&+v.due.slice(0,4)===y&&+v.due.slice(5,7)===m+1).length;
+      const cap=c.booked+c.open, pct=cap?Math.round(c.booked/cap*100):0;
+      const verdict=due>cap?`<span class="pill p-over">${due-cap} over</span>`
+        : c.open>0?`<span class="pill p-done">${c.open} open</span>`:`<span class="pill p-due">full</span>`;
+      html+=`<tr><td>${MO[m]} ${String(y).slice(2)}</td><td class="num">${c.booked}</td><td class="num">${c.open}</td><td class="num">${due}</td>
+        <td><div class="bar"><div style="width:${pct}%;background:var(--primary)"></div><div style="width:${100-pct}%;background:var(--open)"></div></div></td>
+        <td>${verdict} <button class="btn tiny" onclick="st.view='board';st.boardTeam='${t}';st.boardY=${y};st.boardM=${m};render()">Open →</button></td></tr>`;
+    }
+    html+=`</table>`;
+  }
+  html+=`<p class="small" style="margin-top:8px">Weeks with nothing scheduled or blocked count as open. Months beyond the imported 2026 plan will read fully open until leads fill them in.</p></div>`;
+  return html;
+}
+
+/* ---------- schedule board ---------- */
+function board(){
+  const t=st.boardTeam, y=st.boardY, m=st.boardM;
+  const weeks=mondaysInMonth(y,m);
+  const members=D.coaches.filter(c=>c.team===t);
+  const placing = st.placing ? D.visits.find(v=>v.id===st.placing) : null;
+
+  /* to-schedule list: overdue first, then due this month, then next month */
+  const nextM = m===11?[y+1,0]:[y,m+1];
+  const inMonth=(v,yy,mm)=>v.due&&+v.due.slice(0,4)===yy&&+v.due.slice(5,7)===mm+1;
+  const cand=D.visits.filter(v=>!v.completed&&!v.cal_week&&v.team===t);
+  const overdue=cand.filter(v=>v.due&&v.due<TODAY&&!inMonth(v,y,m)).sort((a,b)=>a.due.localeCompare(b.due));
+  const thisMo=cand.filter(v=>inMonth(v,y,m));
+  const nextMo=cand.filter(v=>inMonth(v,nextM[0],nextM[1]));
+
+  let html='';
+  if(placing){
+    html+=`<div class="placebanner">Placing <b>${esc(placing.client)}</b> — ${esc(placing.cycle)} ${esc(placing.program)}, due ${fmt(placing.due)}.
+      Click any open week below. <button class="btn tiny" onclick="st.placing=null;render()">Cancel</button></div>`;
+  }
+  html+=`<div class="controls">
+    ${myTeams().map(x=>`<button class="btn ${x===t?'primary':''}" onclick="st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
+    <span style="flex:1"></span>
+    <div class="monthnav">
+      <button class="btn" onclick="bMonth(-1)">‹</button>
+      <span class="mlabel">${MONTHS[m]} ${y}</span>
+      <button class="btn" onclick="bMonth(1)">›</button>
+      <button class="btn tiny" onclick="st.boardY=${+TODAY.slice(0,4)};st.boardM=${+TODAY.slice(5,7)-1};render()">Today</button>
+    </div></div>
+  <div class="boardlayout"><div class="panel" style="margin:0">
+  <table class="bgrid"><tr><th style="text-align:left">Coach</th>`;
+  weeks.forEach(w=>{ const now=TODAY>=w&&dayDiff(TODAY,w)<7;
+    html+=`<th class="${now?'wk-now':''}">wk of ${fmtW(w)}${now?' ●':''}</th>`; });
+  html+=`</tr>`;
+  for(const c of members){
+    html+=`<tr><td class="cname">${esc(c.name)}</td>`;
+    for(const w of weeks){
+      const o=occ[c.id+'|'+w]; const past=w<mondayOf(new Date());
+      let cls='slot', inner='', click='';
+      if(!o){
+        cls+=' s-open'+(past?' s-past':'');
+        if(placing && !past){ cls+=' target'; inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
+        else if(canEdit() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
+      } else if(o.type==='visit'){
+        const v=o.v; cls+= v.completed?' s-done':' s-visit';
+        inner=`<b>${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>`;
+        if(canEdit()) click=` onclick="st.detail=${v.id};st.placing=null;render()"`;
+      } else {
+        const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open':'s-block';
+        cls+=' '+kindCls+(past?' s-past':'');
+        inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
+        if(canEdit() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
+      }
+      html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
+    }
+    html+=`</tr>`;
+  }
+  html+=`</table>
+  <div class="legend"><span><i style="background:var(--visit)"></i>Visit</span><span><i style="background:var(--done)"></i>Completed</span>
+    <span><i style="background:var(--open);border:1px dashed var(--openb)"></i>Open</span><span><i style="background:var(--launch)"></i>Launch slot</span>
+    <span><i style="background:#e2f0f0"></i>Mills</span><span><i style="background:var(--offc)"></i>Blocked (home/off/etc.)</span></div>
+  <p class="small">Click a visit to manage it · click an open or blocked week to set Home/Off/Training/etc.</p>
+  </div>`;
+
+  /* side rail */
+  html+=`<div class="sidebox">`;
+  if(st.detail){
+    const v=D.visits.find(x=>x.id===st.detail);
+    if(v) html+=`<div class="detailbox"><b>${esc(v.client)}</b>
+      ${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}<br>
+      <span class="small">wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}</span>
+      <div class="btnrow">
+        <button class="btn tiny primary" onclick="completeV(${v.id})">Complete</button>
+        <button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>
+        <button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>
+        <button class="btn tiny" onclick="st.detail=null;render()">Close</button>
+      </div></div>`;
+  }
+  const section=(title,list)=>{
+    if(!list.length) return '';
+    let h=`<h2>${title} (${list.length})</h2>`;
+    list.slice(0,40).forEach(v=>{
+      h+=`<div class="duecard ${v.due&&v.due<TODAY?'over':''}"><b>${esc(v.client)}</b>
+        <div class="meta">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</div>
+        <button class="btn tiny primary" onclick="st.placing=${v.id};st.detail=null;render()">Place on calendar</button></div>`;
+    });
+    return h;
+  };
+  html+=section('Overdue / carryover',overdue);
+  html+=section(`Due ${MO[m]}`,thisMo);
+  html+=section(`Coming up · ${MO[nextM[1]]}`,nextMo);
+  if(!overdue.length&&!thisMo.length&&!nextMo.length) html+=`<h2>To schedule</h2><p class="small">Nothing waiting for Team ${t} in this window. 🎉</p>`;
+  html+=`</div></div>`;
+  return html;
+}
+function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.placing=null; st.detail=null; render(); }
+async function placeHere(cid,w){
+  const id=st.placing; if(!id) return;
+  await api('POST',`/api/visits/${id}/place`,{coach:cid,week:w});
+  st.placing=null;
+  await refresh();
+  toast(`Scheduled → ${coach(cid).name}, wk of ${fmtW(w)}`, async()=>api('POST',`/api/visits/${id}/unschedule`));
+}
+async function unscheduleV(id){
+  const v=D.visits.find(x=>x.id===id); const old={coach:v.cal_coach,week:v.cal_week};
+  await api('POST',`/api/visits/${id}/unschedule`); st.detail=null; await refresh();
+  toast('Unscheduled — back in the to-schedule list', async()=>api('POST',`/api/visits/${id}/place`,old));
+}
+async function completeV(id){
+  await api('POST',`/api/visits/${id}/complete`); st.detail=null; await refresh();
+  toast('Marked complete', async()=>api('POST',`/api/visits/${id}/reopen`));
+}
+function cellDlg(cid,w){
+  const o=occ[cid+'|'+w]; const cur=o&&o.type==='block'?o.kind:'open';
+  const opts=[['open','Open (available)'],...Object.entries(BLOCKKINDS).filter(([k])=>!['visit','visit_legacy'].includes(k))]
+    .map(([k,l])=>`<option value="${k}" ${cur===k?'selected':''}>${l}</option>`).join('');
+  openDlg(`<h3>${esc(coach(cid).name)} — week of ${fmt(w)}</h3>
+    <label>Week type</label><select id="ctKind">${opts}</select>
+    <label>Label (optional)</label><input id="ctLabel" value="${esc(o&&o.type==='block'?o.label:'')}">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveCell('${cid}','${w}')">Save</button></div>`);
+}
+async function saveCell(cid,w){
+  await api('PUT','/api/blocks',{coach:cid,week:w,kind:$('#ctKind').value,label:$('#ctLabel').value.trim()});
+  closeDlg(); await refresh();
+}
+
+/* ---------- inventory ---------- */
+function inventory(){
+  const f=st.invFilter,q=norm(st.invSearch);
+  let rows=D.visits.slice().sort((a,b)=>(a.due||'9').localeCompare(b.due||'9'));
+  const stf={active:v=>!v.completed,overdue:v=>status(v)==='overdue',needs:v=>status(v)==='needs_scheduling',
+    oncal:v=>status(v)==='on_calendar',completed:v=>!!v.completed,all:()=>true};
+  rows=rows.filter(stf[f]||stf.all);
+  if(D.user.role==='lead') rows=rows.filter(v=>!v.team||v.team===D.user.team);
+  if(q) rows=rows.filter(v=>norm(v.client).includes(q)||norm(v.coach_hist).includes(q));
+  const count=fn=>D.visits.filter(fn).length;
+  let html=`<div class="controls">
+    <button class="btn primary" onclick="contractDlg()">＋ New contract</button>
+    <button class="btn" onclick="visitDlg(0)">＋ Single visit</button>
+    <select onchange="st.invFilter=this.value;render()">
+      <option value="active" ${f==='active'?'selected':''}>Active — ${count(v=>!v.completed)}</option>
+      <option value="overdue" ${f==='overdue'?'selected':''}>Overdue — ${count(v=>status(v)==='overdue')}</option>
+      <option value="needs" ${f==='needs'?'selected':''}>Needs scheduling — ${count(v=>status(v)==='needs_scheduling')}</option>
+      <option value="oncal" ${f==='oncal'?'selected':''}>On calendar — ${count(v=>status(v)==='on_calendar')}</option>
+      <option value="completed" ${f==='completed'?'selected':''}>Completed — ${count(v=>!!v.completed)}</option>
+      <option value="all" ${f==='all'?'selected':''}>Everything — ${D.visits.length}</option></select>
+    <input placeholder="Search client or coach…" value="${esc(st.invSearch)}" oninput="st.invSearch=this.value;render()" style="width:230px">
+    <span class="small">${rows.length} rows</span></div>
+  <div class="panel"><table><tr><th>Client</th><th>Team</th><th>Program</th><th>Cycle</th><th>Due</th><th>Scheduled</th><th>Status</th><th style="width:190px"></th></tr>`;
+  rows.slice(0,400).forEach(v=>{
+    const s=status(v);
+    const sched=v.completed?(v.sched_hist||(v.cal_week?'wk of '+fmtW(v.cal_week):'—'))
+      : v.cal_week?`wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}`:'—';
+    const pill=v.completed?'<span class="pill p-done">Completed</span>'
+      :s==='overdue'?'<span class="pill p-over">Overdue</span>'
+      :s==='on_calendar'?'<span class="pill p-cal">On calendar</span>'
+      :s==='needs_scheduling'?'<span class="pill p-due">Needs scheduling</span>':'<span class="pill p-fut">—</span>';
+    let act='';
+    if(canEdit()){
+      act=`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button> `;
+      if(!v.completed&&!v.cal_week&&v.team) act+=`<button class="btn tiny" onclick="st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()">Place</button> `;
+      if(!v.completed) act+=`<button class="btn tiny primary" onclick="completeV(${v.id})">Complete</button> `;
+      act+=`<button class="btn tiny danger" onclick="delVisit(${v.id})">✕</button>`;
+    }
+    html+=`<tr><td>${esc(v.client)}</td><td>${esc(v.team||'?')}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
+      <td class="mono">${fmt(v.due)}</td><td class="small">${sched}</td><td>${pill}</td><td>${act}</td></tr>`;
+  });
+  if(rows.length>400) html+=`<tr><td colspan="8" class="small">…first 400 of ${rows.length}</td></tr>`;
+  html+=`</table></div>`;
+  return html;
+}
+const clientNames=()=>[...new Set(D.visits.map(v=>v.client))].sort();
+const teamOpts=sel=>myTeams().map(t=>`<option ${t===sel?'selected':''}>${t}</option>`).join('');
+const progOpts=sel=>PROGRAMS.map(p=>`<option ${p===sel?'selected':''}>${p}</option>`).join('');
+function contractDlg(){
+  openDlg(`<h3>New contract → generates due visits</h3>
+    <label>Client / dealership</label><input id="cName" list="cl"><datalist id="cl">${clientNames().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
+    <label>Program</label><select id="cProg" onchange="document.querySelector('#cN').value=(${JSON.stringify(CYCLE_LEN)})[this.value]||4">${progOpts('Quarterly')}</select>
+    <label>Number of visits</label><input type="number" id="cN" value="4" min="1" max="24">
+    <label>First visit due</label><input type="date" id="cFirst" value="${TODAY}">
+    <label>Team</label><select id="cTeam">${teamOpts(D.user.team)}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveContract()">Create</button></div>`);
+}
+async function saveContract(){
+  const b={client:$('#cName').value.trim(),program:$('#cProg').value,n:+$('#cN').value,first:$('#cFirst').value,team:$('#cTeam').value};
+  if(!b.client){alert('Client name required');return;}
+  await api('POST','/api/contracts',b); closeDlg(); await refresh();
+  toast(`${b.client}: ${b.n} ${b.program} visits added`);
+}
+function visitDlg(id){
+  const v=D.visits.find(x=>x.id===id)||{client:'',program:'Quarterly',cycle:'1 of 1',due:TODAY,team:D.user.team||D.teams[0]};
+  openDlg(`<h3>${id?'Edit visit':'Add single visit'}</h3>
+    <label>Client</label><input id="vName" value="${esc(v.client)}" list="cl"><datalist id="cl">${clientNames().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
+    <label>Program</label><select id="vProg">${progOpts(v.program)}</select>
+    <label>Cycle label</label><input id="vCycle" value="${esc(v.cycle)}">
+    <label>Due date</label><input type="date" id="vDue" value="${v.due||TODAY}">
+    <label>Team</label><select id="vTeam">${teamOpts(v.team)}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveVisit(${id||0})">Save</button></div>`);
+}
+async function saveVisit(id){
+  const b={client:$('#vName').value.trim(),program:$('#vProg').value,cycle:$('#vCycle').value.trim(),due:$('#vDue').value||null,team:$('#vTeam').value};
+  if(!b.client){alert('Client name required');return;}
+  if(id) await api('PATCH','/api/visits/'+id,b); else await api('POST','/api/visits',b);
+  closeDlg(); await refresh(); toast('Saved');
+}
+async function delVisit(id){
+  const v=D.visits.find(x=>x.id===id);
+  if(!confirm(`Delete ${v.client} — ${v.cycle} ${v.program}?`)) return;
+  await api('DELETE','/api/visits/'+id); await refresh(); toast('Deleted');
+}
+
+/* ---------- pending clients (new Keap subscriptions awaiting team assignment) ---------- */
+function pendingView(){
+  return `<div class="panel"><h2>Unassigned clients</h2>
+  <p class="small" style="margin-bottom:12px">New subscriptions from Keap land here first. Confirm the client name, program cadence,
+  and team, then create the contract — same as "New contract" today, just pre-filled from Keap.</p>
+  <div id="pendingOut">Loading…</div></div>`;
+}
+async function loadPending(){
+  try{
+    st.pendingList = await api('GET','/api/pending-clients');
+  }catch(e){ st.pendingList = []; }
+  const out=$('#pendingOut'); if(!out) return;
+  if(!st.pendingList.length){ out.innerHTML=`<p class="small">Nothing waiting — every Keap subscription has a team. 🎉</p>`; return; }
+  out.innerHTML = `<table><tr><th>Company</th><th>Contact</th><th>Keap plan</th><th class="num">Amount</th><th>Started</th><th style="width:260px"></th></tr>` +
+    st.pendingList.map(p=>`<tr>
+      <td><b>${esc(p.company_name||'(unknown company)')}</b></td>
+      <td class="small">${esc(p.contact_name||'—')}</td>
+      <td class="small">${esc(p.product_desc||'—')}</td>
+      <td class="num">${p.billing_amount?('$'+Number(p.billing_amount).toLocaleString()):'—'}</td>
+      <td class="mono small">${fmt(p.start_date)}</td>
+      <td><button class="btn tiny primary" onclick="assignPendingDlg(${p.id})">Assign to team</button>
+      <button class="btn tiny" onclick="ignorePending(${p.id})">Ignore</button></td>
+    </tr>`).join('') + `</table>`;
+}
+function assignPendingDlg(id){
+  const p = st.pendingList.find(x=>x.id===id);
+  const guess = guessProgram(p.billing_cycle, p.billing_frequency);
+  openDlg(`<h3>Assign ${esc(p.company_name||'client')} to a team</h3>
+    <p class="small">From Keap: ${esc(p.product_desc||'')}${p.billing_amount?` · $${Number(p.billing_amount).toLocaleString()}`:''}${p.billing_cycle?` · every ${p.billing_frequency||1} ${p.billing_cycle.toLowerCase()}(s)`:''}</p>
+    <label>Client / dealership name</label><input id="pName" value="${esc(p.company_name||p.contact_name||'')}">
+    <label>Program</label><select id="pProg" onchange="document.querySelector('#pN').value=(${JSON.stringify(CYCLE_LEN)})[this.value]||4">${progOpts(guess)}</select>
+    <label>Number of visits</label><input type="number" id="pN" value="${CYCLE_LEN[guess]||4}" min="1" max="24">
+    <label>First visit due</label><input type="date" id="pFirst" value="${p.start_date||TODAY}">
+    <label>Team</label><select id="pTeam">${teamOpts(D.user.team)}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveAssignPending(${id})">Create contract</button></div>`);
+}
+async function saveAssignPending(id){
+  const b={client:$('#pName').value.trim(),program:$('#pProg').value,n:+$('#pN').value,first:$('#pFirst').value,team:$('#pTeam').value};
+  if(!b.client){alert('Client name required');return;}
+  await api('POST',`/api/pending-clients/${id}/assign`,b);
+  closeDlg(); await refresh(); await loadPending();
+  toast(`${b.client} assigned to Team ${b.team} — ${b.n} ${b.program} visits added`);
+}
+async function ignorePending(id){
+  if(!confirm('Ignore this subscription? It won\\'t be added to the LID Inventory.')) return;
+  await api('POST',`/api/pending-clients/${id}/ignore`); await refresh(); await loadPending();
+  toast('Ignored');
+}
+
+/* ---------- availability ---------- */
+function availabilityView(){
+  return `<div class="panel"><h2>Sales availability</h2>
+  <p class="small" style="margin-bottom:12px">Can we take a new client, and when could they start? Finds coaches with enough open weeks to absorb the full visit cadence, after all existing commitments.</p>
+  <div class="controls">
+    <label>Program</label><select id="aProg">${PROGRAMS.map(p=>`<option ${p==='Quarterly'?'selected':''}>${p}</option>`).join('')}</select>
+    <label>Team</label><select id="aTeam"><option>Any</option>${D.teams.map(t=>`<option>${t}</option>`).join('')}</select>
+    <label>Start no earlier than</label><input type="date" id="aFrom" value="${TODAY}">
+    <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
+      <input type="checkbox" id="aFar" style="width:auto" ${st.due2027?'checked':''}> include unplanned months (2027+)</label>
+    <button class="btn primary" onclick="runAvail()">Check availability</button>
+  </div><div id="aOut"></div></div>
+  <div class="panel"><h2>Open capacity by month</h2><div id="capOut"></div></div>`;
+}
+function runAvail(){
+  const prog=$('#aProg').value,team=$('#aTeam').value,from=$('#aFrom').value||TODAY;
+  st.due2027=$('#aFar').checked;
+  const lastPlanned = D.blocks.reduce((a,b)=>b.week>a?b.week:a,'2026-12-28');
+  const horizon = st.due2027 ? addDays(TODAY,420) : lastPlanned;
+  const interval=INTERVAL[prog],nVisits=CYCLE_LEN[prog];
+  const results=[];
+  for(const c of D.coaches.filter(c=>team==='Any'||c.team===team)){
+    const open=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(c.id,w));
+    if(!open.length) continue;
+    let plan=null;
+    for(const start of open){
+      const used=new Set([start]);const seq=[start];let ok=true;
+      for(let k=1;k<nVisits;k++){
+        const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
+        if(target>new Date(horizon+'T12:00:00')) break;
+        const tIso=target.toISOString().slice(0,10);
+        const cand=open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
+          .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
+        if(!cand){ok=false;break;}
+        used.add(cand);seq.push(cand);
+      }
+      if(ok){plan={start,seq};break;}
+    }
+    if(plan) results.push({coach:c,plan,spare:open.length-plan.seq.length});
+  }
+  results.sort((a,b)=>a.plan.start.localeCompare(b.plan.start));
+  let html='';
+  if(!results.length){
+    html=`<p style="color:var(--bad);font-weight:600">No coach can absorb a full ${prog} cadence before ${fmt(horizon)}${team!=='Any'?` on Team ${team}`:''}.</p>`;
+  }else{
+    html=`<p style="margin:8px 0"><b style="color:var(--ok)">Yes — ${results.length} coach${results.length>1?'es':''} can take a new ${prog} client.</b>
+    Earliest start: <b>week of ${fmt(results[0].plan.start)}</b> with ${esc(results[0].coach.name)} (Team ${results[0].coach.team}).</p>
+    <table><tr><th>Coach</th><th>Team</th><th>Earliest start</th><th>Projected visit weeks</th><th class="num">Spare open weeks</th></tr>`;
+    results.slice(0,12).forEach(r=>{
+      html+=`<tr><td><b>${esc(r.coach.name)}</b></td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
+      <td>${r.plan.seq.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td><td class="num">${r.spare}</td></tr>`;
+    });
+    html+=`</table>`;
+  }
+  html+=`<p class="small" style="margin-top:8px">Planning horizon: through ${fmt(horizon)}. ${st.due2027?'Months past the current plan read as fully open — treat those as estimates.':'Check the box above to look into 2027 (not yet planned).'}</p>`;
+  $('#aOut').innerHTML=html;
+  let cb='';
+  for(const [y,m] of rolling12()){
+    let open=0,total=0;
+    for(const t of D.teams){const c=capacity(t,y,m);open+=c.open;total+=c.open+c.booked;}
+    const pct=total?Math.round(open/total*100):0;
+    cb+=`<div class="capbar-row"><div>${MO[m]} ${String(y).slice(2)}</div>
+      <div class="bar"><div style="width:${100-pct}%;background:var(--primary)"></div><div style="width:${pct}%;background:var(--open)"></div></div>
+      <div class="small mono">${open} open / ${total} workable</div></div>`;
+  }
+  $('#capOut').innerHTML=cb;
+}
+
+/* ---------- my schedule (coach) ---------- */
+function mySchedule(){
+  const cid=D.user.coach_id;
+  const c=coach(cid);
+  if(!c) return `<div class="panel"><h2>My schedule</h2><p class="small">Your account isn't linked to a coach yet — ask an admin to set it in Admin → Users.</p></div>`;
+  const weeks=mondaysRange(TODAY,addDays(TODAY,7*16));
+  let html=`<div class="panel"><h2>${esc(c.name)} — next 16 weeks</h2><table><tr><th>Week of</th><th>Assignment</th><th>Details</th></tr>`;
+  for(const w of weeks){
+    const o=occ[cid+'|'+w];
+    let what='<span class="pill p-done">Open</span>', det='';
+    if(o&&o.type==='visit'){ what=`<b>${esc(o.v.client)}</b>`; det=`${esc(o.v.cycle)} ${esc(o.v.program)} · due ${fmt(o.v.due)}`; }
+    else if(o){ what=esc(o.label||BLOCKKINDS[o.kind]||o.kind); det=esc(BLOCKKINDS[o.kind]||''); }
+    html+=`<tr><td class="mono">${fmtW(w)}</td><td>${what}</td><td class="small">${det}</td></tr>`;
+  }
+  return html+`</table></div>`;
+}
+
+/* ---------- admin ---------- */
+function adminView(){
+  let html=`<div class="panel"><h2>Teams &amp; coaches</h2>
+    <div class="controls"><button class="btn primary" onclick="coachDlg()">＋ Add coach</button>
+    <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
+  for(const t of D.teams){
+    const members=D.coaches.filter(c=>c.team===t);
+    html+=`<h3>Team ${t} (${members.length})</h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th></th></tr>`;
+    members.forEach(c=>{
+      const fv=D.visits.filter(v=>!v.completed&&v.cal_coach===c.id&&v.cal_week>=TODAY).length;
+      html+=`<tr><td><b>${esc(c.name)}</b></td><td class="num">${fv}</td>
+        <td><select onchange="moveCoach('${c.id}',this.value)"><option></option>${D.teams.filter(x=>x!==t).map(x=>`<option>${x}</option>`).join('')}</select></td>
+        <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')">Remove</button></td></tr>`;
+    });
+    html+=`</table>`;
+  }
+  html+=`</div><div class="panel"><h2>Users</h2>
+    <div class="controls"><button class="btn primary" onclick="userDlg()">＋ Add user</button></div>
+    <table><tr><th>Name</th><th>Email</th><th>Role</th><th>Team</th><th>Coach link</th><th>Status</th><th></th></tr>`;
+  (D.users||[]).forEach(u=>{
+    html+=`<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${u.role}</td><td>${esc(u.team||'—')}</td>
+      <td class="small">${esc(coach(u.coach_id)?.name||'—')}</td>
+      <td>${u.active?'<span class="pill p-done">active</span>':'<span class="pill p-over">disabled</span>'}</td>
+      <td><button class="btn tiny" onclick="resetPwDlg(${u.id},'${esc(u.name)}')">Reset pw</button>
+      ${u.id!==D.user.id?`<button class="btn tiny danger" onclick="toggleUser(${u.id},${u.active?0:1})">${u.active?'Disable':'Enable'}</button>`:''}</td></tr>`;
+  });
+  html+=`</table></div>
+  <div class="panel"><h2>Audit log</h2><div id="auditOut" class="small">Loading…</div></div>`;
+  return html;
+}
+function coachDlg(){
+  openDlg(`<h3>Add coach</h3><label>Name</label><input id="kName">
+    <label>Team</label><select id="kTeam">${teamOpts()}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveCoach()">Add</button></div>`);
+}
+async function saveCoach(){ const n=$('#kName').value.trim(); if(!n){alert('Name required');return;}
+  await api('POST','/api/coaches',{name:n,team:$('#kTeam').value}); closeDlg(); await refresh(); toast(n+' added — their weeks are open capacity'); }
+async function moveCoach(id,team){ if(!team) return; await api('PATCH','/api/coaches/'+id,{team}); await refresh(); toast('Moved'); }
+async function removeCoach(id,name){
+  if(!confirm(`Remove ${name}? Their scheduled visits return to the to-schedule list.`)) return;
+  await api('DELETE','/api/coaches/'+id); await refresh(); toast(name+' removed');
+}
+function teamDlg(){
+  openDlg(`<h3>Add team</h3><label>Team name</label><input id="tName">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveTeam()">Add</button></div>`);
+}
+async function saveTeam(){ await api('POST','/api/teams',{name:$('#tName').value}); closeDlg(); await refresh(); }
+function userDlg(){
+  openDlg(`<h3>Add user</h3>
+    <label>Name</label><input id="uName">
+    <label>Email</label><input id="uEmail">
+    <label>Role</label><select id="uRole"><option>lead</option><option>sales</option><option>coach</option><option>admin</option></select>
+    <label>Team (for leads)</label><select id="uTeam"><option value=""></option>${D.teams.map(t=>`<option>${t}</option>`).join('')}</select>
+    <label>Coach link (for coach role)</label><select id="uCoach"><option value=""></option>${D.coaches.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+    <label>Temporary password</label><input id="uPw" value="Welcome!${Math.floor(1000+Math.random()*9000)}">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveUser()">Create</button></div>`);
+}
+async function saveUser(){
+  await api('POST','/api/users',{name:$('#uName').value,email:$('#uEmail').value,role:$('#uRole').value,
+    team:$('#uTeam').value||null,coach_id:$('#uCoach').value||null,password:$('#uPw').value});
+  closeDlg(); await refresh(); toast('User created — send them their temporary password');
+}
+function resetPwDlg(id,name){
+  openDlg(`<h3>Reset password — ${name}</h3><label>New password</label><input id="rPw" value="Welcome!${Math.floor(1000+Math.random()*9000)}">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="doResetPw(${id})">Reset</button></div>`);
+}
+async function doResetPw(id){ await api('PATCH','/api/users/'+id,{password:$('#rPw').value}); closeDlg(); toast('Password reset'); }
+async function toggleUser(id,active){ await api('PATCH','/api/users/'+id,{active:!!active}); await refresh(); }
+async function loadAudit(){
+  try{ const rows=await api('GET','/api/audit');
+    $('#auditOut').innerHTML=`<table><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th></tr>`+
+      rows.map(r=>`<tr><td class="mono small">${r.ts.slice(0,16).replace('T',' ')}</td><td>${esc(r.user)}</td><td>${esc(r.action)}</td><td class="small">${esc(r.detail).slice(0,120)}</td></tr>`).join('')+`</table>`;
+  }catch(e){}
+}
+
+/* ---------- boot ---------- */
+refresh().catch(()=>{ D=null; render(); });
