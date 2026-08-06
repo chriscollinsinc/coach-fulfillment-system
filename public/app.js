@@ -9,8 +9,8 @@ const TODAY = new Date().toISOString().slice(0,10);
 const fmt = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}, ${y}`; };
 const fmtW = iso => { const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}`; };
 const dayDiff = (a,b)=>(new Date(a)-new Date(b))/864e5;
-const CYCLE_LEN = {'Monthly':12,'Semi-Monthly':6,'Quarterly':4,'Bi-Annual':2,'LID (Purchase)':1,'6 Visits Monthly':6};
-const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID (Purchase)':0,'6 Visits Monthly':1};
+const CYCLE_LEN = {'Monthly':12,'Semi-Monthly':6,'Quarterly':4,'Bi-Annual':2,'LID (Purchase)':1,'6 Visits Monthly':6,'Coaching Only':0};
+const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID (Purchase)':0,'6 Visits Monthly':1,'Coaching Only':0};
 const PROGRAMS = Object.keys(CYCLE_LEN);
 const BLOCKKINDS = {home:'Home',off:'Off / Vacation',training:'Training',bootcamp:'Bootcamp',event:'Event (Top Dog / Virtual)',truck:'TRUCK',travel:'Travel',mag:'Mills (M.A.G.)',launch_open:'Launch slot held',not_hired:'Not hired yet',shadow:'Shadow',meeting:'Meeting',blocked:'Blocked',visit:'Legacy visit (from sheet)',visit_legacy:'Legacy visit (from sheet)'};
 
@@ -406,18 +406,42 @@ const clientNames=()=>[...new Set(D.visits.map(v=>v.client))].sort();
 const teamOpts=sel=>myTeams().map(t=>`<option ${t===sel?'selected':''}>${t}</option>`).join('');
 const progOpts=sel=>PROGRAMS.map(p=>`<option ${p===sel?'selected':''}>${p}</option>`).join('');
 function contractDlg(){
-  openDlg(`<h3>New contract → generates due visits</h3>
+  openDlg(`<h3>New contract</h3>
     <label>Client / dealership</label><input id="cName" list="cl"><datalist id="cl">${clientNames().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
-    <label>Program</label><select id="cProg" onchange="document.querySelector('#cN').value=(${JSON.stringify(CYCLE_LEN)})[this.value]||4">${progOpts('Quarterly')}</select>
-    <label>Number of visits</label><input type="number" id="cN" value="4" min="1" max="24">
-    <label>First visit due</label><input type="date" id="cFirst" value="${TODAY}">
-    <label>Team</label><select id="cTeam">${teamOpts(D.user.team)}</select>
+    <label>Program</label><select id="cProg" onchange="onContractProgramChange()">${progOpts('Quarterly')}</select>
+    <div id="cVisitFields">
+      <label>Number of visits</label><input type="number" id="cN" value="4" min="1" max="24">
+      <label>First visit due</label><input type="date" id="cFirst" value="${TODAY}">
+      <label>Team</label><select id="cTeam">${teamOpts(D.user.team)}</select>
+    </div>
+    <div id="cCoachFields" style="display:none">
+      <label>Assigned coach</label><select id="cCoach">${coachOptsFor()}</select>
+      <p class="small">Coaching Only — remote coaching, no LID visits will be scheduled.</p>
+    </div>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveContract()">Create</button></div>`);
+  onContractProgramChange();
+}
+function onContractProgramChange(){
+  const prog = $('#cProg').value;
+  const isCoachingOnly = prog === 'Coaching Only';
+  $('#cN').value = CYCLE_LEN[prog] || 4;
+  $('#cVisitFields').style.display = isCoachingOnly ? 'none' : '';
+  $('#cCoachFields').style.display = isCoachingOnly ? '' : 'none';
 }
 async function saveContract(){
-  const b={client:$('#cName').value.trim(),program:$('#cProg').value,n:+$('#cN').value,first:$('#cFirst').value,team:$('#cTeam').value};
-  if(!b.client){alert('Client name required');return;}
+  const client = $('#cName').value.trim();
+  if(!client){alert('Client name required');return;}
+  const program = $('#cProg').value;
+  if(program==='Coaching Only'){
+    const coachId = $('#cCoach').value;
+    if(!coachId){ alert('Pick a coach'); return; }
+    const coach = D.coaches.find(c=>c.id===coachId);
+    await api('POST','/api/contracts',{client, program, n:0, first:null, team:coach.team, coachId});
+    closeDlg(); await refresh(); toast(`${client} added — Coaching Only, assigned to ${coach.name}`);
+    return;
+  }
+  const b={client,program,n:+$('#cN').value,first:$('#cFirst').value,team:$('#cTeam').value};
   await api('POST','/api/contracts',b); closeDlg(); await refresh();
   toast(`${b.client}: ${b.n} ${b.program} visits added`);
 }
@@ -543,21 +567,50 @@ async function loadPending(){
       : `<p class="small">Nothing waiting — you're all caught up.</p>`;
   }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
 }
+function coachOptsFor(team){
+  const list = D.coaches.filter(c=>!team||c.team===team);
+  return `<option value="">— select —</option>` + list.map(c=>`<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`).join('');
+}
 function assignPendingDlg(id){
   const r = (st.pendingList||[]).find(x=>x.id===id); if(!r) return;
   const guessed = guessProgram(r.billing_cycle, r.billing_frequency);
   openDlg(`<h3>Assign — ${esc(r.company_name||'(unknown)')}</h3>
     <label>Client name</label><input id="pClient" value="${esc(r.company_name||r.contact_name||'')}">
-    <label>Program</label><select id="pProg">${PROGRAMS.map(p=>`<option ${p===guessed?'selected':''}>${p}</option>`).join('')}</select>
-    <label>Number of visits</label><input id="pN" type="number" value="${CYCLE_LEN[guessed]||4}">
-    <label>First visit due</label><input id="pFirst" type="date" value="${r.start_date||TODAY}">
-    <label>Team</label><select id="pTeam">${teamOpts()}</select>
+    <label>Program</label><select id="pProg" onchange="onPendingProgramChange()">${PROGRAMS.map(p=>`<option ${p===guessed?'selected':''}>${p}</option>`).join('')}</select>
+    <div id="pVisitFields">
+      <label>Number of visits</label><input id="pN" type="number" value="${CYCLE_LEN[guessed]||4}">
+      <label>First visit due</label><input id="pFirst" type="date" value="${r.start_date||TODAY}">
+      <label>Team</label><select id="pTeam">${teamOpts()}</select>
+    </div>
+    <div id="pCoachFields" style="display:none">
+      <label>Assigned coach</label><select id="pCoach" onchange="onPendingCoachChange()">${coachOptsFor()}</select>
+      <p class="small">Coaching Only — remote coaching, no LID visits will be scheduled.</p>
+    </div>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary" onclick="saveAssignPending(${id})">Create contract</button></div>`);
+    <button class="btn primary" onclick="saveAssignPending(${id})">Create</button></div>`);
+  onPendingProgramChange();
+}
+function onPendingProgramChange(){
+  const isCoachingOnly = $('#pProg').value === 'Coaching Only';
+  $('#pVisitFields').style.display = isCoachingOnly ? 'none' : '';
+  $('#pCoachFields').style.display = isCoachingOnly ? '' : 'none';
+}
+function onPendingCoachChange(){
+  const sel = $('#pCoach'); const opt = sel.options[sel.selectedIndex];
+  st._pendingCoachTeam = opt ? opt.dataset.team : null;
 }
 async function saveAssignPending(id){
   const client=$('#pClient').value.trim(); if(!client){alert('Client name required');return;}
-  const program=$('#pProg').value, n=+$('#pN').value, first=$('#pFirst').value, team=$('#pTeam').value;
+  const program=$('#pProg').value;
+  if(program==='Coaching Only'){
+    const coachId = $('#pCoach').value;
+    if(!coachId){ alert('Pick a coach'); return; }
+    const coach = D.coaches.find(c=>c.id===coachId);
+    await api('POST',`/api/pending-clients/${id}/assign`,{client, program, n:0, first:null, team:coach.team, coachId});
+    closeDlg(); await refresh(); toast(client+' added — Coaching Only, assigned to '+coach.name);
+    return;
+  }
+  const n=+$('#pN').value, first=$('#pFirst').value, team=$('#pTeam').value;
   if(!first||!(n>0)||!team){alert('Program visit count, first due date and team are required');return;}
   await api('POST',`/api/pending-clients/${id}/assign`,{client,program,n,first,team});
   closeDlg(); await refresh(); toast(client+' added — contract created');

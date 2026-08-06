@@ -152,10 +152,14 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
 
 /* ----- contracts & visits ----- */
 route('POST', /^\/api\/contracts$/, ['admin','lead'], (req, res, m, body, user) => {
-  const { client, program, n, first, team } = body;
-  if(!client || !first || !(n > 0)) return err(res, 400, 'client, first due date and visit count required');
+  const { client, program, n, first, team, coachId } = body;
+  const isCoachingOnly = program === 'Coaching Only';
+  if(!client) return err(res, 400, 'client name required');
+  if(!isCoachingOnly && (!first || !(n > 0))) return err(res, 400, 'client, first due date and visit count required');
   if(!canEditTeam(user, team)) return err(res, 403, 'You can only add to your own team');
-  const { ids } = createContractAndVisits({ clientName: client, program, n, first, team: team || user.team, source: 'app', actorEmail: user.email });
+  if(coachId && !getCoach(coachId)) return err(res, 400, 'unknown coach');
+  const { clientId, ids } = createContractAndVisits({ clientName: client, program, n: isCoachingOnly ? 0 : n, first: first || null, team: team || user.team, source: 'app', actorEmail: user.email });
+  if(coachId) db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=? AND assigned_coach_id IS NULL').run(coachId, clientId);
   send(res, 200, { ok: true, ids });
 });
 route('POST', /^\/api\/visits$/, ['admin','lead'], (req, res, m, body, user) => {
@@ -306,17 +310,21 @@ route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req,
   const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
   if(!pc) return err(res, 404, 'not found');
   if(pc.status !== 'pending') return err(res, 400, 'already handled');
-  const { client, program, n, first, team } = body;
-  if(!client || !first || !(n > 0) || !team) return err(res, 400, 'client, program visit count, first due date and team required');
+  const { client, program, n, first, team, coachId } = body;
+  const isCoachingOnly = program === 'Coaching Only';
+  if(!client || !team) return err(res, 400, 'client and team required');
+  if(!isCoachingOnly && (!first || !(n > 0))) return err(res, 400, 'program visit count and first due date required');
   if(!canEditTeam(user, team)) return err(res, 403, 'You can only assign to your own team');
+  if(coachId && !getCoach(coachId)) return err(res, 400, 'unknown coach');
   const { clientId, contractId, ids } = createContractAndVisits({
-    clientName: client, program, n, first, team, source: 'keap',
+    clientName: client, program, n: isCoachingOnly ? 0 : n, first: first || null, team, source: 'keap',
     keapSubscriptionId: pc.keap_subscription_id, price: pc.billing_amount, keapCompanyId: pc.keap_company_id,
     actorEmail: user.email,
   });
+  if(coachId) db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(coachId, clientId);
   db.prepare("UPDATE pending_clients SET status='assigned', resolved_client_id=?, resolved_contract_id=? WHERE id=?")
     .run(clientId, contractId, pc.id);
-  log(user.email, 'pendingclient.assign', { pendingId: pc.id, client, team, contractId });
+  log(user.email, 'pendingclient.assign', { pendingId: pc.id, client, team, contractId, coachId });
   send(res, 200, { ok: true, clientId, contractId, ids });
 });
 route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req, res, m, body, user) => {

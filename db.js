@@ -1170,10 +1170,34 @@ function migrateCoachingAssignments(){
   console.log(`Coaching Assignments import: ${assigned} clients assigned a coach, ${created} new Coaching-Only clients created.`);
 }
 
+/* ---------- keep the Unassigned Clients queue clean ---------- */
+/* A Keap webhook can queue a subscription for a dealership that's already a
+   known client here (most commonly: one of the Coaching-Only clients we just
+   added straight from the sheet, which have no keap_subscription_id link yet
+   to tell the webhook handler "already handled"). Runs every boot — cheap,
+   and safe to re-run since it only ever touches rows still sitting at
+   status='pending'. Matched-and-cleared rows are marked 'ignored' (not
+   deleted) with resolved_client_id set, so there's a record of why. */
+function reconcilePendingClients(){
+  const pending = db.prepare("SELECT * FROM pending_clients WHERE status='pending'").all();
+  let cleared = 0;
+  for(const p of pending){
+    const nm = normName(p.company_name || p.contact_name || '');
+    if(!nm) continue;
+    const existing = db.prepare('SELECT id FROM clients WHERE norm=?').get(nm);
+    if(!existing) continue;
+    db.prepare("UPDATE pending_clients SET status='ignored', resolved_client_id=? WHERE id=?").run(existing.id, p.id);
+    log('system', 'pendingclient.auto_cleared', { pendingId: p.id, company: p.company_name, matchedClientId: existing.id });
+    cleared++;
+  }
+  if(cleared) console.log(`Unassigned Clients queue: auto-cleared ${cleared} entr${cleared===1?'y':'ies'} already matching a known client.`);
+}
+
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
 seed();
 migratePhase1();
 migrateCoachingAssignments();
+reconcilePendingClients();
 ensureCurrentMonthSnapshot();
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot };
