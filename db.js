@@ -1238,12 +1238,82 @@ function deleteLegacyMagDuplicates(){
   console.log(`Deleted ${deleted} legacy M.A.G. duplicate client(s) — not real, confirmed with Mike.`);
 }
 
+/* ---------- one-time: Keap identity-linking reconciliation pass ---------- */
+/* Approved by Mike 2026-08-06. Matches every current client that has no
+   keap_id yet against the live Keap company export by normalized name.
+   Only unambiguous, exact normalized-name matches are auto-linked here —
+   anything fuzzy or unmatched is left alone and listed in the SOP/notes
+   for a person to resolve by hand. This only writes into the app's DB;
+   it never touches Keap. Guarded by a meta flag; runs once. */
+function migrateKeapIdentityLink(){
+  if(getMeta('keap_identity_linked')) return;
+  const matches = [
+    ['Acura of Highland Park', 288678],
+    ['BMW of Lafayette', 32042],
+    ['Bill Jacobs BMW/MINI', 28513],
+    ['Bill Jacobs Land Rover of Hinsdale', 41631],
+    ['Bill Jacobs Volkswagen', 44183],
+    ['Brickell Bentley Jacksonville', 251393],
+    ['Brickell Buick GMC', 218999],
+    ['Brickell Honda', 158567],
+    ['Brickell Mazda', 219001],
+    ['Cambridge Centre Honda', 37143],
+    ['Country Nissan', 226195],
+    ['Cox Chevrolet', 28535],
+    ['Federico CDJR', 305447],
+    ['Federico Kia', 288470],
+    ['Holmes Honda - Shreveport', 29745],
+    ['Holmes Honda Bossier City', 236001],
+    ['Koehne Chevrolet Buick GMC, Inc', 256550],
+    ['M.A.G. Beckley Chevrolet', 337616],
+    ['M.A.G. Classic Hyundai of North Wilkesboro', 337554],
+    ['M.A.G. Mercedes-Benz of Hampton', 337668],
+    ['Mercedes Benz of Lafayette', 301970],
+    ['Northampton Volkswagen', 226203],
+    ['Page Toyota', 45885],
+    ['Patriot Buick GMC of Boyertown', 28943],
+    ['Patriot Chevrolet of Limerick', 95655],
+    ['Price Family Ford Sacramento', 349300],
+    ['Price Family JLR of Marin Luxury Cars', 337138],
+    ['Price Family Modesto Toyota', 349228],
+    ['Price Family Toyota Walnut Creek', 337136],
+    ['Price The Luxury Collection Walnut Creek', 337148],
+    ['Riverton Chevrolet', 41003],
+    ['Riverton Elko Chevrolet Buick GMC Cadillac', 187093],
+    ['Rogers Toyota Lewiston', 193217],
+    ['Roseville Chevrolet', 310195],
+    ['Sam Boswell Honda', 175013],
+    ['Sherwood Honda', 198319],
+    ['Steven Kia', 370364],
+    ['Steven Nissan', 288332],
+    ['Steven Toyota', 36610],
+    ['Watsonville CDJR', 249712],
+    ['Wesley Chapel Toyota', 219793],
+    ['Steven Honda, Hyundai, Ford', 370358],
+  ];
+  let linked = 0;
+  const linkedNames = [];
+  const skipped = [];
+  for(const [name, keapId] of matches){
+    const row = db.prepare('SELECT id, name, keap_id FROM clients WHERE norm=?').get(normName(name));
+    if(!row){ skipped.push(name + ' (not found)'); continue; }
+    if(row.keap_id){ skipped.push(name + ' (already linked)'); continue; }
+    db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(String(keapId), row.id);
+    linkedNames.push(row.name);
+    linked++;
+  }
+  setMeta('keap_identity_linked', new Date().toISOString());
+  log('system', 'migrate.keap_identity_link', { linked, linkedNames, skipped });
+  console.log(`Keap identity link: linked keap_id on ${linked} client(s). Still unresolved (need human review): BMW of Barrington, Brickell Bentley of Central NJ, Brickell Infiniti Stuart, Brickell Ocean Cadillac, Castle Downers Grove, Castle Subaru of Portage, Mercedes Benz of Midlothian, Mills -, MotorWerks Cadillac, MotorWerks Infiniti, Motorwerks Honda, Motorwerks Mercedez Benz, Motorwerks Porsche of Barrington.`);
+}
+
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
 seed();
 migratePhase1();
 migrateCoachingAssignments();
 reconcilePendingClients();
 deleteLegacyMagDuplicates();
+migrateKeapIdentityLink();
 ensureCurrentMonthSnapshot();
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot };
