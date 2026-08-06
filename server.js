@@ -596,6 +596,35 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
   res.end(fs.readFileSync(file));
 });
+/* ---------- one-time: Castle store consolidation ---------- */
+/* Keap organizes these as 5 separate companies, but fulfillment is 2 clients:
+   the 4 Downers Grove brands (Genesis, Hyundai, Mazda, Volkswagen) share one
+   monthly visit, and Castle Subaru of Portage gets its own. Decided directly
+   with Mike on 2026-08-06; recorded here (and as a note on each client) so
+   the "why" survives the next person who looks at Keap and wonders why
+   there's no 1:1 match. Guarded by a meta flag — runs once, ever. */
+function migrateCastleStores(){
+  if(getMeta('castle_stores_migrated')) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const COACH_ID = 'bryan_bryan_hubert'; // "Bryan's team" — defaulted to the team's namesake coach
+  const stores = [
+    { name: 'Castle Downers Grove', note: 'Represents Castle Genesis, Castle Hyundai, Castle Mazda, and Castle Volkswagen — all Downers Grove. Keap tracks these as 4 separate companies, but fulfillment is one monthly visit covering all four brands.' },
+    { name: 'Castle Subaru of Portage', note: 'Separate Castle store (Portage, not Downers Grove) — its own monthly visit, not part of the Downers Grove consolidation.' },
+  ];
+  for(const s of stores){
+    const clientId = resolveClient(s.name, { billing_start: today });
+    db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=? AND assigned_coach_id IS NULL').run(COACH_ID, clientId);
+    const already = db.prepare("SELECT id FROM contracts WHERE client_id=? AND program='Monthly'").get(clientId);
+    if(!already) createContractAndVisits({ clientName: s.name, program: 'Monthly', n: 12, first: today, team: 'Bryan', source: 'manual', actorEmail: 'system' });
+    db.prepare('INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,created) VALUES(?,?,?,?,?,?,?)')
+      .run(clientId, today, 'LID', 'system', 'System', s.note, new Date().toISOString());
+  }
+  setMeta('castle_stores_migrated', new Date().toISOString());
+  log('system', 'migrate.castle_stores', { stores: stores.map(s => s.name) });
+  console.log('Castle store consolidation: created Castle Downers Grove and Castle Subaru of Portage.');
+}
+migrateCastleStores();
+
 server.listen(PORT, () => console.log(`Coach Fulfillment System running → http://localhost:${PORT}`));
 
 // Re-check daily (in addition to the check db.js already runs at startup) so a new
