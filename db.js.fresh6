@@ -123,26 +123,17 @@ ensureColumn('clients', 'assigned_coach_id', 'TEXT');
 
 /* ---------- client profiles: coach notes ---------- */
 /* A running notes history per client, visible/addable by any coach, lead, or
-   admin — the idea is this replaces jotting notes in Keap going forward.
-   Each note is titled by its own date + type (Coaching Call / LID) rather
-   than just when it was typed up, since those can differ. Only admins can
-   edit or delete a note, so the history stays trustworthy. */
+   admin — the idea is this replaces jotting notes in Keap going forward. */
 db.exec(`
 CREATE TABLE IF NOT EXISTS client_notes(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client_id INTEGER NOT NULL,
-  note_date TEXT NOT NULL,            -- 'YYYY-MM-DD' — the date the call/LID actually happened
-  note_type TEXT NOT NULL DEFAULT 'Coaching Call' CHECK(note_type IN ('Coaching Call','LID')),
   author_email TEXT NOT NULL,
   author_name TEXT DEFAULT '',
   body TEXT NOT NULL,
-  created TEXT NOT NULL,
-  edited TEXT);
+  created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS icn_client ON client_notes(client_id);
 `);
-ensureColumn('client_notes', 'note_date', "TEXT NOT NULL DEFAULT ''");
-ensureColumn('client_notes', 'note_type', "TEXT NOT NULL DEFAULT 'Coaching Call'");
-ensureColumn('client_notes', 'edited', 'TEXT');
 
 /* ---------- helpers ---------- */
 function hashPw(pw){

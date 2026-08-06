@@ -642,14 +642,12 @@ function clientProfileView(data, notes){
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
   html += `<div class="panel"><h2>Notes</h2>
-    <p class="small" style="margin-bottom:10px">Any coach, lead, or admin can add a note here — this is meant to replace jotting notes in Keap going forward. Only admins can edit or delete a note.</p>
-    <div class="controls" style="margin-bottom:6px">
-      <label style="margin:0">Date</label><input type="date" id="cliNoteDate" value="${TODAY}" style="width:150px">
-      <label style="margin:0">Type</label><select id="cliNoteType"><option>Coaching Call</option><option>LID</option></select>
-    </div>
+    <p class="small" style="margin-bottom:10px">Any coach, lead, or admin can add a note here — this is meant to replace jotting notes in Keap going forward.</p>
     <textarea id="cliNoteBody" rows="3" style="width:100%;box-sizing:border-box" placeholder="Add a note about this client…"></textarea>
     <div class="dlgrow" style="margin-top:6px"><button class="btn primary" onclick="saveClientNote(${client.id})">Add note</button></div>
-    <div style="margin-top:14px">${notes.length ? notes.map(n=>clientNoteCard(client.id, n)).join('') : '<p class="small">No notes yet.</p>'}</div>
+    <div style="margin-top:14px">${notes.length ? notes.map(n=>`
+      <div class="duecard"><div class="meta">${esc(n.author_name||n.author_email)} · ${n.created.slice(0,16).replace('T',' ')}</div>
+      <div style="margin-top:4px;white-space:pre-wrap">${esc(n.body)}</div></div>`).join('') : '<p class="small">No notes yet.</p>'}</div>
   </div>`;
 
   html += `<div class="panel"><h2>Coming soon</h2>
@@ -663,48 +661,11 @@ async function saveAssignedCoach(clientId, coachId){
   toast('Coach assignment saved');
   await loadClientProfile(clientId);
 }
-function clientNoteCard(clientId, n){
-  const title = `${fmt(n.note_date)} — ${esc(n.note_type)}`;
-  const isAdmin = D.user.role === 'admin';
-  const editedTag = n.edited ? ` <span class="small">(edited ${n.edited.slice(0,16).replace('T',' ')})</span>` : '';
-  return `<div class="duecard" id="note-${n.id}">
-    <div class="meta"><b>${title}</b> · ${esc(n.author_name||n.author_email)} · logged ${n.created.slice(0,16).replace('T',' ')}${editedTag}</div>
-    <div style="margin-top:4px;white-space:pre-wrap" id="note-body-${n.id}">${esc(n.body)}</div>
-    ${isAdmin ? `<div class="dlgrow" style="margin-top:6px">
-      <button class="btn tiny" onclick="editNoteDlg(${clientId},${n.id})">Edit</button>
-      <button class="btn tiny danger" onclick="deleteClientNote(${clientId},${n.id})">Delete</button>
-    </div>` : ''}
-  </div>`;
-}
 async function saveClientNote(clientId){
   const body = $('#cliNoteBody').value.trim();
   if(!body){ alert('Note cannot be empty'); return; }
-  const note_date = $('#cliNoteDate').value || TODAY;
-  const note_type = $('#cliNoteType').value;
-  await api('POST','/api/clients/'+clientId+'/notes', { body, note_date, note_type });
+  await api('POST','/api/clients/'+clientId+'/notes', { body });
   toast('Note added');
-  await loadClientProfile(clientId);
-}
-function editNoteDlg(clientId, noteId){
-  const n = (st.clientNotes||[]).find(x=>x.id===noteId); if(!n) return;
-  openDlg(`<h3>Edit note</h3>
-    <label>Date</label><input type="date" id="enDate" value="${n.note_date}">
-    <label>Type</label><select id="enType"><option ${n.note_type==='Coaching Call'?'selected':''}>Coaching Call</option><option ${n.note_type==='LID'?'selected':''}>LID</option></select>
-    <label>Note</label><textarea id="enBody" rows="4" style="width:100%;box-sizing:border-box">${esc(n.body)}</textarea>
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary" onclick="saveEditedNote(${clientId},${noteId})">Save</button></div>`);
-}
-async function saveEditedNote(clientId, noteId){
-  const body = $('#enBody').value.trim();
-  if(!body){ alert('Note cannot be empty'); return; }
-  await api('PATCH',`/api/clients/${clientId}/notes/${noteId}`, { body, note_date: $('#enDate').value, note_type: $('#enType').value });
-  closeDlg(); toast('Note updated');
-  await loadClientProfile(clientId);
-}
-async function deleteClientNote(clientId, noteId){
-  if(!confirm('Delete this note? This cannot be undone.')) return;
-  await api('DELETE',`/api/clients/${clientId}/notes/${noteId}`);
-  toast('Note deleted');
   await loadClientProfile(clientId);
 }
 
