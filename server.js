@@ -358,16 +358,24 @@ async function handleKeapWebhook(req, res, rawBody){
 
   for(const evt of events){
     const eventKey = evt.event_key || evt.eventKey || '';
-    const verifyKey = evt.key || evt.verify_key || null;
+    const verifyKey = evt.key || evt.verify_key || evt.verification_key || null;
     const objectId = (evt.object_keys && evt.object_keys[0]) || (evt.objectKeys && evt.objectKeys[0]) || evt.object_key || evt.id || evt.subscription_id || null;
 
     db.prepare('INSERT INTO keap_events(ts,event_key,object_id,raw) VALUES(?,?,?,?)')
       .run(new Date().toISOString(), eventKey || '(verify)', String(objectId || ''), JSON.stringify(evt).slice(0, 4000));
 
-    if(verifyKey && !eventKey){
+    // Keap's verification ping includes both event_key AND verification_key —
+    // it is NOT a bare payload with no event_key. Check verifyKey first,
+    // regardless of whether eventKey is also present.
+    if(verifyKey){
       const hooks = await keapGet('/v1/hooks');
-      const hookId = (hooks.json || []).find(h => h.hookUrl && h.hookUrl.includes('/api/webhooks/keap'))?.key;
-      if(hookId) await keapPost(`/v1/hooks/${hookId}/verify`, { key: verifyKey });
+      const list = hooks.json || [];
+      // Match the specific hook for this event key first (there are 3 hooks
+      // sharing the same hookUrl — one per event key — so a bare URL match
+      // could verify the wrong one).
+      const match = list.find(h => h.hookUrl && h.hookUrl.includes('/api/webhooks/keap') && h.eventKey === eventKey)
+        || list.find(h => h.hookUrl && h.hookUrl.includes('/api/webhooks/keap'));
+      if(match) await keapPost(`/v1/hooks/${match.key}/verify`, { key: verifyKey });
       continue;
     }
     if(eventKey === 'subscription.add' && objectId){
