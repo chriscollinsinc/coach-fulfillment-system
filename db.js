@@ -1307,6 +1307,172 @@ function migrateKeapIdentityLink(){
   console.log(`Keap identity link: linked keap_id on ${linked} client(s). Still unresolved (need human review): BMW of Barrington, Brickell Bentley of Central NJ, Brickell Infiniti Stuart, Brickell Ocean Cadillac, Castle Downers Grove, Castle Subaru of Portage, Mercedes Benz of Midlothian, Mills -, MotorWerks Cadillac, MotorWerks Infiniti, Motorwerks Honda, Motorwerks Mercedez Benz, Motorwerks Porsche of Barrington.`);
 }
 
+
+/* ---------- one-time + ongoing: Keap revenue sync ---------- */
+/* Keap is the source of truth for money (see SOP). For any client that has
+   a keap_id, backfill its active contract's price from Keap's normalized
+   activeMonthly figure (monthly-equivalent, even for quarterly/semi-annual
+   billers — confirmed with Mike 2026-08-07). Where the company has exactly
+   one active Keap subscription, also stamp keap_subscription_id onto that
+   contract so future Keap status/amount changes can flow through automatically.
+   Contracts without a keap_subscription_id are never touched automatically —
+   a manually-entered price always wins until that contract is Keap-linked.
+   This one-time pass covers everyone already linked as of 2026-08-07; going
+   forward, apply the same rule (Keap wins only for keap_subscription_id
+   contracts) at the point a client is newly linked. Guarded by a meta flag. */
+const KEAP_REVENUE = [
+    [288678, 1495, 6552],
+    [349958, 5495, 6794],
+    [28513, 1495, 1069],
+    [41631, 1495, 1073],
+    [44183, 1495, 1071],
+    [196821, 6495, 6482],
+    [300258, 6495, 6454],
+    [32042, 1495, 7155],
+    [87679, 3333, 6925],
+    [314212, 4833, 6120],
+    [218983, 1495, 2237],
+    [251393, 500, 6961],
+    [218999, 1495, 4786],
+    [158567, 1495, 6426],
+    [218989, 1495, 2239],
+    [219001, 1495, 4784],
+    [218995, 1495, 2245],
+    [284514, 6495, 6466],
+    [37521, 4495, 6816],
+    [37143, 1410.68, 6989],
+    [227465, 6495, 7091],
+    [354363, 5795, 6951],
+    [351252, 5795, 6806],
+    [356261, 5795, 6993],
+    [226195, 1500, 6492],
+    [350008, 6495, 6762],
+    [28535, 1467, null],
+    [353231, 15495, 6897],
+    [66239, 6495, 6204],
+    [338218, 8995, 7234],
+    [161421, 5495, 6228],
+    [161761, 6495, 6969],
+    [351714, 5995, 6830],
+    [305447, 2000, 6836],
+    [288470, 2000, 6838],
+    [200185, 6495, 6546],
+    [323238, 6495, 6268],
+    [355895, 4833, 7055],
+    [355899, 4833, 7057],
+    [53983, 5995, 6788],
+    [163735, 6012.05, null],
+    [294778, 4495, 6398],
+    [356659, 6495, 7001],
+    [299022, 6495, 7005],
+    [356669, 6495, 7003],
+    [55627, 6495, 6851],
+    [29745, 1395, 1543],
+    [236001, 1395, 2635],
+    [288936, 3333, 7157],
+    [37181, 5395, 6308],
+    [57269, 5395, 6362],
+    [63891, 5495, 6901],
+    [329246, 6495, 6462],
+    [284844, 5995, 6670],
+    [338876, 6295, 6594],
+    [34330, 6495, 6983],
+    [256550, 1500, 5985],
+    [251365, 3333, 6855],
+    [61229, 3333, 6270],
+    [325788, 3333, 7185],
+    [351742, 4495, 7149],
+    [329728, 5495, 6544],
+    [348966, 5495, 6704],
+    [329652, 6495, 7173],
+    [349102, 6495, 6786],
+    [301970, 1495, 7153],
+    [53375, 4495, 6396],
+    [322616, 8995, 6428],
+    [326196, 9495, 7147],
+    [327684, 8995, 7103],
+    [226203, 1500, 6498],
+    [291942, 3995, 6774],
+    [45885, 1500, 6810],
+    [226001, 6495, 7177],
+    [28943, 1500, 6891],
+    [95655, 1500, 6889],
+    [249819, 1500, 7228],
+    [82197, 3333, 7069],
+    [57879, 3333, 6824],
+    [349300, 1750, 6724],
+    [337138, 1750, 6532],
+    [170361, 3695, 7183],
+    [349228, 1750, 6722],
+    [337136, 1750, 6572],
+    [337130, 1750, 6536],
+    [337148, 1750, 6528],
+    [355197, 6995, 7097],
+    [354993, 6495, 7009],
+    [302582, 4495, 6939],
+    [286972, 1500, 6382],
+    [41003, 1495, 1945],
+    [187093, 1495, 2231],
+    [193217, 1512.05, null],
+    [310195, 1995, 7232],
+    [175013, 1500, 6849],
+    [291566, 3333, 4882],
+    [252518, 3333, 7073],
+    [336836, 3333, 6504],
+    [217385, 3333, 3208],
+    [359532, 25000, 7236],
+    [198319, 1995, 6642],
+    [36404, 4495, 6812],
+    [312103, 4495, 6370],
+    [312105, 4495, 6372],
+    [354075, 3995, 6921],
+    [36398, 4495, 6814],
+    [46951, 4495, 6893],
+    [69825, 6495, 6844],
+    [247003, 4495, 5855],
+    [61275, 6495, 6202],
+    [68469, 5495, 6875],
+    [68201, 5495, 6436],
+    [271748, 6333, null],
+    [52269, 6495, 6232],
+    [242655, 3333, 5989],
+    [305945, 6495, 6029],
+    [346774, 6495, 6756],
+    [337446, 5395, 6540],
+    [337734, 5495, 6542],
+    [249712, 1500, 3606],
+    [349908, 5495, 6738],
+    [349906, 5495, 6736],
+    [349904, 5495, 6740],
+    [349912, 5495, 6734],
+    [219793, 1500, 6490],
+    [261420, 4495, 7111],
+];
+function migrateKeapRevenueSync(){
+  if(getMeta('keap_revenue_synced')) return;
+  let priced = 0, subLinked = 0, skippedNoContract = 0;
+  for(const [companyId, monthly, subId] of KEAP_REVENUE){
+    const client = db.prepare('SELECT id FROM clients WHERE keap_id=?').get(String(companyId));
+    if(!client) continue;
+    const contract = db.prepare("SELECT id, price, keap_subscription_id FROM contracts WHERE client_id=? AND status='active' ORDER BY id DESC LIMIT 1").get(client.id);
+    if(!contract){ skippedNoContract++; continue; }
+    if(!contract.price){
+      db.prepare('UPDATE contracts SET price=? WHERE id=?').run(monthly, contract.id);
+      priced++;
+    }
+    if(subId && !contract.keap_subscription_id){
+      const dupe = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(String(subId));
+      if(!dupe){
+        db.prepare('UPDATE contracts SET keap_subscription_id=? WHERE id=?').run(String(subId), contract.id);
+        subLinked++;
+      }
+    }
+  }
+  setMeta('keap_revenue_synced', new Date().toISOString());
+  log('system', 'migrate.keap_revenue_sync', { priced, subLinked, skippedNoContract });
+  console.log(`Keap revenue sync: priced ${priced} contract(s) from Keap's monthly-equivalent amount, linked keap_subscription_id on ${subLinked}, skipped ${skippedNoContract} (no active contract to price).`);
+}
+
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
 seed();
 migratePhase1();
@@ -1314,6 +1480,7 @@ migrateCoachingAssignments();
 reconcilePendingClients();
 deleteLegacyMagDuplicates();
 migrateKeapIdentityLink();
+migrateKeapRevenueSync();
 ensureCurrentMonthSnapshot();
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot };
