@@ -334,6 +334,11 @@ route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req,
   log(user.email, 'pendingclient.ignore', { pendingId: pc.id, company: pc.company_name });
   send(res, 200, { ok: true });
 });
+route('POST', /^\/api\/keap\/sync$/, ['admin'], (req, res, m, body, user) => {
+  keapSyncAllLinkedContracts(user.email)
+    .then(summary => send(res, 200, { ok: true, ...summary }))
+    .catch(e => { console.error('keap sync failed:', e); err(res, 500, 'Sync failed: ' + String(e && e.message || e)); });
+});
 route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) => {
   send(res, 200, db.prepare(`
     SELECT c.id, c.program, c.status, cl.name AS client_name,
@@ -516,21 +521,40 @@ async function onSubscriptionAdd(subId){
   log('keap.webhook', 'pendingclient.queued', { subId, companyName, contactName });
 }
 
-async function onSubscriptionChange(subId, eventKey){
+async function onSubscriptionChange(subId, eventKey, opts = {}){
+  const source = opts.source || 'keap.webhook';
+  const isDelete = eventKey === 'subscription.delete';
   const sub = await keapGet(`/v1/subscriptions/${subId}`);
+  // For a delete event, Keap already told us via the event itself — the subscription
+  // may legitimately 404 once gone, so we don't need a successful fetch to act on it.
+  // For anything else (edit events, or a manual sync poll), a failed fetch — timeout,
+  // network blip, non-2xx — must NOT be read as "inactive". Report it and touch nothing.
+  if(!isDelete && !sub.ok){
+    return { subId, found: false, error: `keap fetch failed (status ${sub.status})` };
+  }
   const s = sub.json || {};
   const contract = db.prepare('SELECT * FROM contracts WHERE keap_subscription_id=?').get(String(subId));
-  const stillActive = eventKey === 'subscription.delete' ? false : !!s.active;
+  const stillActive = isDelete ? false : !!s.active;
 
   if(!contract){
     // Might be a subscription that's still in the pending queue (never assigned yet) — ignore/remove it if cancelled.
     if(!stillActive) db.prepare("UPDATE pending_clients SET status='ignored' WHERE keap_subscription_id=?").run(String(subId));
-    return;
+    return { subId, found: false };
   }
+  let statusChanged = false, priceChanged = false;
   const newStatus = stillActive ? 'active' : 'cancelled';
   if(contract.status !== newStatus){
     db.prepare('UPDATE contracts SET status=? WHERE id=?').run(newStatus, contract.id);
-    log('keap.webhook', 'contract.status', { contractId: contract.id, subId, status: newStatus });
+    log(source, 'contract.status', { contractId: contract.id, subId, status: newStatus });
+    statusChanged = true;
+  }
+  // Only ever overwrite price on a contract we already own via keap_subscription_id —
+  // never touches a contract without one (see Keap_App_Source_of_Truth_SOP.md).
+  const keapAmount = Number(s.billing_amount) || null;
+  if(keapAmount && Number(contract.price) !== keapAmount){
+    db.prepare('UPDATE contracts SET price=? WHERE id=?').run(keapAmount, contract.id);
+    log(source, 'contract.price', { contractId: contract.id, subId, oldPrice: contract.price, newPrice: keapAmount });
+    priceChanged = true;
   }
   // Roll client status up from all their contracts.
   const client = db.prepare('SELECT * FROM clients WHERE id=?').get(contract.client_id);
@@ -539,12 +563,50 @@ async function onSubscriptionChange(subId, eventKey){
     const newClientStatus = anyActive ? 'active' : 'cancelled';
     if(client.status !== newClientStatus){
       db.prepare('UPDATE clients SET status=? WHERE id=?').run(newClientStatus, client.id);
-      log('keap.webhook', 'client.status', { clientId: client.id, name: client.name, status: newClientStatus });
+      log(source, 'client.status', { clientId: client.id, name: client.name, status: newClientStatus });
     }
   }
   // Note: we deliberately do NOT auto-delete future scheduled visits on churn — a lead
   // reviews the Inventory screen (now flagged via the client's cancelled status) and
   // removes/reassigns them by hand, so nothing gets silently wiped off the board.
+  return { subId, found: true, statusChanged, priceChanged };
+}
+
+/* ---------- manual "Sync with Keap" pass ----------
+   Admin-triggered refresh of every contract we already own via keap_subscription_id.
+   Reuses the exact same single-subscription lookup the webhook handler uses — this
+   is a bulk re-run of proven logic, not a new discovery mechanism. It never touches
+   a contract that isn't already Keap-linked (that's still the manual identity-link
+   review process). Runs contracts sequentially with a small delay to stay well under
+   Keap's rate limits. */
+async function keapSyncAllLinkedContracts(actorEmail){
+  const rows = db.prepare("SELECT keap_subscription_id FROM contracts WHERE keap_subscription_id IS NOT NULL AND keap_subscription_id != ''").all();
+  const summary = { checked: 0, statusChanged: 0, priceChanged: 0, notFound: 0, errors: [] };
+  if(!KEAP_TOKEN){
+    summary.errors.push(`KEAP_TOKEN is not configured on this server — ${rows.length} linked contract(s) were skipped, nothing was synced.`);
+    return summary;
+  }
+  for(const row of rows){
+    summary.checked++;
+    try{
+      const r = await onSubscriptionChange(row.keap_subscription_id, 'subscription.edit', { source: 'keap.manual_sync' });
+      if(r.error) summary.errors.push(`sub ${row.keap_subscription_id}: ${r.error}`);
+      else if(!r.found) summary.notFound++;
+      else{
+        if(r.statusChanged) summary.statusChanged++;
+        if(r.priceChanged) summary.priceChanged++;
+      }
+    }catch(e){
+      summary.errors.push(`sub ${row.keap_subscription_id}: ${String(e && e.message || e)}`);
+    }
+    await new Promise(r => setTimeout(r, 150)); // stay well under Keap's rate limit
+  }
+  const totalRevenue = db.prepare("SELECT COALESCE(SUM(price),0) t FROM contracts WHERE status='active'").get().t;
+  const activeClients = db.prepare("SELECT COUNT(*) c FROM clients WHERE status='active'").get().c;
+  summary.totalRevenue = totalRevenue;
+  summary.activeClients = activeClients;
+  log(actorEmail, 'keap.manual_sync', summary);
+  return summary;
 }
 
 /* ================= server ================= */

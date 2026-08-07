@@ -633,8 +633,31 @@ function clientsView(){
   if(!st.cliSort) st.cliSort = { key:'name', dir:'asc' };
   return `<div class="panel"><h2>Clients</h2>
   <p class="small" style="margin-bottom:12px">Every dealership we've coached — with who's assigned, Keap-imported details, and a running notes history. Click a column header to sort.</p>
-  <div class="controls"><input placeholder="Search client…" id="cliSearch" value="${esc(st.cliSearch||'')}" oninput="st.cliSearch=this.value;renderClientTable()" style="width:260px"></div>
+  <div class="controls"><input placeholder="Search client…" id="cliSearch" value="${esc(st.cliSearch||'')}" oninput="st.cliSearch=this.value;renderClientTable()" style="width:260px">
+    ${D.user.role==='admin' ? `<button class="btn tiny" id="keapSyncBtn" onclick="syncWithKeap()">Sync with Keap</button>` : ''}
+  </div>
   <div id="clientsOut">Loading…</div></div>`;
+}
+async function syncWithKeap(){
+  const btn = $('#keapSyncBtn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Syncing…'; }
+  try{
+    const r = await api('POST','/api/keap/sync',{});
+    const lines = [
+      `Checked ${r.checked} Keap-linked contract(s).`,
+      `Price updated: ${r.priceChanged}`,
+      `Status changed: ${r.statusChanged}`,
+      r.notFound ? `Not found in Keap: ${r.notFound}` : '',
+      r.errors && r.errors.length ? `Errors: ${r.errors.length}\n  ${r.errors.slice(0,5).join('\n  ')}` : '',
+      typeof r.totalRevenue==='number' ? `\nCurrent active revenue total: ${fmtMoney(r.totalRevenue)} across ${r.activeClients} active client(s).` : '',
+    ].filter(Boolean).join('\n');
+    alert(lines);
+    await loadClients();
+  }catch(e){
+    alert('Sync failed: ' + (e.message||e));
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = 'Sync with Keap'; }
+  }
 }
 async function loadClients(){
   try{ st.clientsList = await api('GET','/api/clients'); renderClientTable(); }

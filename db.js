@@ -120,6 +120,12 @@ ensureColumn('visits', 'contract_id', 'INTEGER');
 ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS ict_keapsub ON contracts(keap_subscription_id)');
 ensureColumn('clients', 'assigned_coach_id', 'TEXT');
+/* For cases like Castle (one Keap invoice covering multiple separately-visited
+   locations): the linked client's own contract price stays $0, and this field
+   points at whichever client is the real revenue owner, so revenue totals never
+   double-count or guess at a split. Purely informational until someone sets it —
+   does not change any existing aggregation. */
+ensureColumn('clients', 'revenue_owner_client_id', 'INTEGER');
 
 /* ---------- client profiles: coach notes ---------- */
 /* A running notes history per client, visible/addable by any coach, lead, or
