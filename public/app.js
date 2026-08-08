@@ -27,6 +27,7 @@ function mondaysRange(fromIso,toIso){ const out=[]; let w=mondayOf(new Date(from
 
 /* ---------- app state ---------- */
 let D = null;   // server state {user, teams, coaches, blocks, visits, users?}
+let ssoEnabled;  // undefined = not checked yet, else true/false — set once from /api/sso-config on the login screen
 let st = {
   view:'dashboard', boardTeam:null,
   boardY:+TODAY.slice(0,4), boardM:+TODAY.slice(5,7)-1,
@@ -123,10 +124,27 @@ async function savePw(){ const p=$('#pw1').value; if(p.length<8){alert('Use at l
   await api('PATCH','/api/users/'+D.user.id,{password:p}); closeDlg(); toast('Password changed'); }
 
 /* ---------- login ---------- */
+const SSO_ERRORS = {
+  bad_state: 'That sign-in link expired or was already used — try again.',
+  token_exchange_failed: 'Google sign-in failed. Please try again.',
+  userinfo_failed: 'Google sign-in failed. Please try again.',
+  email_not_verified: 'That Google account\'s email isn\'t verified — sign in with email/password instead.',
+  wrong_domain: 'That Google account isn\'t on the right Workspace domain for this app.',
+  no_account: 'No Coach Fulfillment System account exists for that email yet — ask an admin to create one, then try Google sign-in again.',
+  server_error: 'Something went wrong on our end. Please try again or use email/password.',
+};
 function loginView(){
+  if(ssoEnabled === undefined){
+    ssoEnabled = null; // avoid firing the fetch twice while it's in flight
+    fetch('/api/sso-config').then(r=>r.json()).then(j=>{ ssoEnabled = !!j.googleEnabled; render(); }).catch(()=>{ ssoEnabled = false; });
+  }
+  const ssoErr = new URLSearchParams(location.search).get('ssoerror');
   return `<div class="loginwrap"><div class="loginbox">
     <img src="https://chriscollinsinc.com/wp-content/uploads/2020/03/logo-1.png" onerror="this.style.display='none'" alt="">
     <h1>Coach Fulfillment System</h1>
+    ${ssoErr ? `<div class="err">${esc(SSO_ERRORS[ssoErr] || 'Sign-in failed.')}</div>` : ''}
+    ${ssoEnabled ? `<a class="btn" style="display:block;text-align:center;margin-bottom:14px" href="/auth/google">Sign in with Google</a>
+    <div class="small" style="text-align:center;margin-bottom:10px;color:var(--muted)">— or —</div>` : ''}
     <label>Email</label><input type="text" id="lEmail" autocomplete="username">
     <label>Password</label><input type="password" id="lPw" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
     <div class="err" id="lErr"></div>

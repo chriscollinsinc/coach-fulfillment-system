@@ -12,6 +12,87 @@ const SECRET = getMeta('secret');
 const PUB = path.join(__dirname, 'public');
 const MIME = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css', '.json':'application/json', '.png':'image/png', '.svg':'image/svg+xml', '.ico':'image/x-icon' };
 
+/* ---------- Google SSO (OAuth 2.0 / OIDC "Sign in with Google") ----------
+   Adds an alternate login path alongside the existing email/password login —
+   it never replaces it. Deliberately does NOT auto-create accounts: SSO only
+   ever signs in a user who already exists (created by an admin the normal
+   way), the same access-control model as today. Set these three env vars on
+   Render to turn it on; until GOOGLE_CLIENT_ID is set, the button is hidden
+   and these routes 404 harmlessly.
+     GOOGLE_CLIENT_ID       — from the OAuth client in Google Cloud Console
+     GOOGLE_CLIENT_SECRET   — from the same OAuth client
+     GOOGLE_ALLOWED_DOMAIN  — e.g. chriscollinsinc.com; Google accounts outside
+                              this Workspace domain are rejected even if a user
+                              row somehow matched by email. */
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_ALLOWED_DOMAIN = (process.env.GOOGLE_ALLOWED_DOMAIN || '').toLowerCase();
+function googleRedirectUri(req){
+  return `https://${req.headers.host}/auth/google/callback`;
+}
+async function handleGoogleStart(req, res){
+  const state = crypto.randomBytes(16).toString('hex');
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: googleRedirectUri(req),
+    response_type: 'code',
+    scope: 'openid email profile',
+    state,
+    prompt: 'select_account',
+  });
+  if(GOOGLE_ALLOWED_DOMAIN) params.set('hd', GOOGLE_ALLOWED_DOMAIN); // Workspace hint only — we verify server-side too
+  res.writeHead(302, {
+    Location: `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
+    'Set-Cookie': `ssostate=${encodeURIComponent(sign(state))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`,
+  });
+  res.end();
+}
+async function handleGoogleCallback(req, res, url){
+  const fail = (reason) => { res.writeHead(302, { Location: `/?ssoerror=${encodeURIComponent(reason)}` }); res.end(); };
+  try{
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const cookieMatch = /(?:^|;\s*)ssostate=([^;]+)/.exec(req.headers.cookie || '');
+    const cookieState = unsign(cookieMatch && decodeURIComponent(cookieMatch[1]));
+    if(!code || !state || !cookieState || cookieState !== state) return fail('bad_state');
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: googleRedirectUri(req), grant_type: 'authorization_code',
+      }),
+    });
+    const tokenJson = await tokenRes.json();
+    if(!tokenRes.ok || !tokenJson.access_token) return fail('token_exchange_failed');
+
+    const infoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: 'Bearer ' + tokenJson.access_token },
+    });
+    const info = await infoRes.json();
+    if(!infoRes.ok || !info.email) return fail('userinfo_failed');
+    if(!info.email_verified) return fail('email_not_verified');
+    const domain = String(info.email).split('@')[1] || '';
+    if(GOOGLE_ALLOWED_DOMAIN && domain.toLowerCase() !== GOOGLE_ALLOWED_DOMAIN) return fail('wrong_domain');
+
+    const u = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(info.email).toLowerCase().trim());
+    if(!u) return fail('no_account'); // real account required — SSO signs in, it never provisions
+
+    log(u.email, 'login.google_sso', '');
+    res.writeHead(302, {
+      Location: '/',
+      'Set-Cookie': [
+        `cfs=${encodeURIComponent(sign(String(u.id)))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+        'ssostate=; Path=/; Max-Age=0',
+      ],
+    });
+    res.end();
+  }catch(e){
+    console.error('Google SSO callback error:', e);
+    fail('server_error');
+  }
+}
+
 /* ---------- Keap REST helper (server-side, for webhook enrichment + hook verify) ---------- */
 const KEAP_TOKEN = process.env.KEAP_TOKEN || '';
 const KEAP_BASE = process.env.KEAP_BASE || 'https://api.infusionsoft.com/crm/rest';
@@ -101,6 +182,9 @@ function createContractAndVisits({ clientName, program, n, first, team, source, 
 }
 
 /* ================= API ================= */
+route('GET', /^\/api\/sso-config$/, null, (req, res) => {
+  send(res, 200, { googleEnabled: !!GOOGLE_CLIENT_ID });
+});
 route('POST', /^\/api\/login$/, null, (req, res, m, body) => {
   const u = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(body.email || '').toLowerCase().trim());
   if(!u || !checkPw(String(body.password || ''), u.pw)) return err(res, 401, 'Invalid email or password');
@@ -612,6 +696,17 @@ async function keapSyncAllLinkedContracts(actorEmail){
 /* ================= server ================= */
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+
+  if(url.pathname === '/auth/google' && req.method === 'GET'){
+    if(!GOOGLE_CLIENT_ID) { res.writeHead(404); res.end('Google SSO is not configured'); return; }
+    handleGoogleStart(req, res).catch(e => { console.error(e); res.writeHead(500); res.end('SSO error'); });
+    return;
+  }
+  if(url.pathname === '/auth/google/callback' && req.method === 'GET'){
+    if(!GOOGLE_CLIENT_ID) { res.writeHead(404); res.end('Google SSO is not configured'); return; }
+    handleGoogleCallback(req, res, url).catch(e => { console.error(e); res.writeHead(500); res.end('SSO error'); });
+    return;
+  }
 
   if(url.pathname === '/api/webhooks/keap' && req.method === 'POST'){
     // Keap/RESTHooks.org "Immediate Confirmation" verification: when a hook is
