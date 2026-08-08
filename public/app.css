@@ -39,7 +39,7 @@ tr:hover td{background:#fafbfd}
 .small{font-size:12px;color:var(--muted)}
 .pill{display:inline-block;padding:1px 9px;font-size:11.5px;font-weight:600;white-space:nowrap}
 .p-done{background:#e2f4ea;color:#186b45}.p-over{background:#fbe3e3;color:#a12626}
-.p-due{background:#fdeecd;color:#8a5b06}.p-cal{background:#fde5de;color:#b93c22}.p-fut{background:#e8edf5;color:#44506b}
+.p-due{background:#fdeecd;color:#8a5b06}.p-cal{background:#dbe9fb;color:#1d4f91}.p-fut{background:#e8edf5;color:#44506b}
 .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 select,input,button.btn,textarea{padding:7px 12px;border:1px solid var(--line);border-radius:0;background:#fff;font-size:13px;color:var(--ink);font-family:inherit}
 button.btn{font-family:var(--head);text-transform:uppercase;letter-spacing:.8px;font-size:12px;cursor:pointer}
