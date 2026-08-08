@@ -5,7 +5,54 @@
 'use strict';
 const tls = require('node:tls');
 
-function sendMail({ to, subject, text }){
+function buildMessage({ user, to, subject, text, attachments }){
+  if(!attachments || !attachments.length){
+    return [
+      `From: Coach Fulfillment System <${user}>`,
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      text.replace(/^\./gm, '..'),
+      '.',
+    ].join('\r\n');
+  }
+  const boundary = 'cfs-boundary-' + Math.random().toString(36).slice(2);
+  const parts = [
+    `From: Coach Fulfillment System <${user}>`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    text,
+    '',
+  ];
+  for(const a of attachments){
+    const b64 = a.content.toString('base64');
+    const lines = b64.match(/.{1,76}/g) || [''];
+    parts.push(
+      `--${boundary}`,
+      `Content-Type: ${a.contentType || 'application/octet-stream'}; name="${a.filename}"`,
+      'Content-Transfer-Encoding: base64',
+      `Content-Disposition: attachment; filename="${a.filename}"`,
+      '',
+      ...lines,
+      '',
+    );
+  }
+  parts.push(`--${boundary}--`);
+  // Dot-stuff per RFC 5321 — same `^.` /gm approach the plain-text path already used
+  // (matches after both \n and \r\n, since base64 never contains '.' this only ever
+  // touches the plain-text intro) — done BEFORE appending the final ".\r\n" terminator,
+  // which must stay a bare single dot for the SMTP server to recognize end-of-DATA.
+  const body = parts.join('\r\n').replace(/^\./gm, '..');
+  return body + '\r\n.';
+}
+
+function sendMail({ to, subject, text, attachments }){
   return new Promise((resolve, reject) => {
     const user = process.env.GMAIL_USER;
     const pass = process.env.GMAIL_APP_PASSWORD;
@@ -20,15 +67,7 @@ function sendMail({ to, subject, text }){
       { cmd: `MAIL FROM:<${user}>`, expect: '250' },
       { cmd: `RCPT TO:<${to}>`, expect: '250' },
       { cmd: 'DATA', expect: '354' },
-      { cmd: [
-          `From: Coach Fulfillment System <${user}>`,
-          `To: ${to}`,
-          `Subject: ${subject}`,
-          'Content-Type: text/plain; charset=utf-8',
-          '',
-          text.replace(/^\./gm, '..'),
-          '.',
-        ].join('\r\n'), expect: '250' },
+      { cmd: buildMessage({ user, to, subject, text, attachments }), expect: '250' },
       { cmd: 'QUIT', expect: '221' },
     ];
     let i = 0;
@@ -63,4 +102,4 @@ function sendMail({ to, subject, text }){
   });
 }
 
-module.exports = { sendMail };
+module.exports = { sendMail, buildMessage };

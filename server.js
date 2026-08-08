@@ -4,7 +4,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot } = require('./db.js');
+const zlib = require('node:zlib');
+const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH } = require('./db.js');
 const { sendMail } = require('./mail.js');
 
 const PORT = process.env.PORT || 3000;
@@ -185,9 +186,37 @@ function createContractAndVisits({ clientName, program, n, first, team, source, 
 route('GET', /^\/api\/sso-config$/, null, (req, res) => {
   send(res, 200, { googleEnabled: !!GOOGLE_CLIENT_ID });
 });
+/* ---------- login rate limiting ----------
+   In-memory only (resets on redeploy — acceptable, this is a speed bump against
+   automated guessing, not a persistent ban list). Keyed by normalized email so
+   one attacker can't lock out a real user by spraying wrong passwords under
+   their address from many IPs — that's still possible here, but only delays
+   that one account's own login, not a mechanism to block anyone else. */
+const LOGIN_ATTEMPTS = new Map(); // email -> { count, firstAt, lockedUntil }
+const LOGIN_MAX_ATTEMPTS = 5, LOGIN_WINDOW_MS = 15*60*1000, LOGIN_LOCKOUT_MS = 15*60*1000;
+function loginRateLimited(email){
+  const rec = LOGIN_ATTEMPTS.get(email);
+  if(!rec) return false;
+  if(rec.lockedUntil && rec.lockedUntil > Date.now()) return true;
+  if(rec.lockedUntil && rec.lockedUntil <= Date.now()) { LOGIN_ATTEMPTS.delete(email); return false; }
+  return false;
+}
+function recordLoginFailure(email){
+  const now = Date.now();
+  let rec = LOGIN_ATTEMPTS.get(email);
+  if(!rec || (now - rec.firstAt) > LOGIN_WINDOW_MS) rec = { count: 0, firstAt: now, lockedUntil: 0 };
+  rec.count++;
+  if(rec.count >= LOGIN_MAX_ATTEMPTS) rec.lockedUntil = now + LOGIN_LOCKOUT_MS;
+  LOGIN_ATTEMPTS.set(email, rec);
+}
+function clearLoginFailures(email){ LOGIN_ATTEMPTS.delete(email); }
+
 route('POST', /^\/api\/login$/, null, (req, res, m, body) => {
-  const u = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(String(body.email || '').toLowerCase().trim());
-  if(!u || !checkPw(String(body.password || ''), u.pw)) return err(res, 401, 'Invalid email or password');
+  const email = String(body.email || '').toLowerCase().trim();
+  if(loginRateLimited(email)) return err(res, 429, 'Too many failed attempts — try again in a few minutes.');
+  const u = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(email);
+  if(!u || !checkPw(String(body.password || ''), u.pw)){ recordLoginFailure(email); return err(res, 401, 'Invalid email or password'); }
+  clearLoginFailures(email);
   log(u.email, 'login', '');
   send(res, 200, { ok: true, user: { id: u.id, email: u.email, name: u.name, role: u.role, team: u.team, coach_id: u.coach_id } },
     { 'Set-Cookie': `cfs=${encodeURIComponent(sign(String(u.id)))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000` });
@@ -431,6 +460,120 @@ route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) 
     WHERE c.status='cancelled' ORDER BY c.id DESC LIMIT 50`).all());
 });
 
+/* ----- revenue history ----- */
+route('GET', /^\/api\/revenue-history$/, ['admin','lead'], (req, res) => {
+  send(res, 200, db.prepare('SELECT * FROM revenue_snapshots ORDER BY date DESC LIMIT 180').all());
+});
+
+/* ----- backups + nightly maintenance (admin can also trigger by hand) ----- */
+const ADMIN_EMAILS = () => db.prepare("SELECT email FROM users WHERE role='admin' AND active=1").all().map(r => r.email);
+
+async function takeBackupAndEmail(actorEmail){
+  const admins = ADMIN_EMAILS();
+  if(!admins.length) return { ok: false, error: 'No active admin users to send the backup to.' };
+  let raw;
+  try{ raw = fs.readFileSync(DB_PATH); }
+  catch(e){ return { ok: false, error: 'Could not read database file: ' + e.message }; }
+  const gz = zlib.gzipSync(raw);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const results = [];
+  for(const to of admins){
+    try{
+      await sendMail({
+        to, subject: `Coach Fulfillment System — DB backup (${dateStr})`,
+        text: `Attached is a full backup of the Coach Fulfillment System database as of ${new Date().toISOString()}.\n\nTo restore: gunzip the attachment and replace the running server's database file (see README for the exact path), then restart the app.\n\nTriggered by: ${actorEmail}`,
+        attachments: [{ filename: `coach-fulfillment-backup-${dateStr}.db.gz`, content: gz, contentType: 'application/gzip' }],
+      });
+      results.push({ to, ok: true });
+    }catch(e){ results.push({ to, ok: false, error: e.message }); }
+  }
+  const anyOk = results.some(r => r.ok);
+  log(actorEmail, 'backup.sent', { sizeBytes: gz.length, results });
+  return { ok: anyOk, sizeBytes: gz.length, results };
+}
+route('POST', /^\/api\/admin\/backup-now$/, ['admin'], (req, res, m, body, user) => {
+  takeBackupAndEmail(user.email)
+    .then(r => send(res, 200, r))
+    .catch(e => err(res, 500, 'Backup failed: ' + e.message));
+});
+
+/* Soft-deleted clients older than this are purged for real — cascades through
+   their notes/visits/contracts/snapshots. Runs nightly; never runs on-demand
+   from a route, since there's no undo past this point. */
+function purgeOldSoftDeletes(){
+  const cutoff = new Date(Date.now() - 30*24*60*60*1000).toISOString();
+  const rows = db.prepare('SELECT id, name FROM clients WHERE deleted_at IS NOT NULL AND deleted_at < ?').all(cutoff);
+  for(const r of rows){
+    db.prepare('UPDATE pending_clients SET resolved_client_id=NULL WHERE resolved_client_id=?').run(r.id);
+    db.prepare('DELETE FROM client_notes WHERE client_id=?').run(r.id);
+    db.prepare('DELETE FROM visits WHERE client_id=?').run(r.id);
+    db.prepare('DELETE FROM contracts WHERE client_id=?').run(r.id);
+    db.prepare('DELETE FROM client_month_snapshots WHERE client_id=?').run(r.id);
+    db.prepare('DELETE FROM clients WHERE id=?').run(r.id);
+    log('system', 'client.purge', { clientId: r.id, name: r.name });
+  }
+  return { purged: rows.length };
+}
+
+function recordRevenueSnapshot(){
+  const today = new Date().toISOString().slice(0, 10);
+  const totalRevenue = db.prepare("SELECT COALESCE(SUM(price),0) t FROM contracts WHERE status='active'").get().t;
+  const activeClients = db.prepare("SELECT COUNT(*) c FROM clients WHERE status='active' AND deleted_at IS NULL").get().c;
+  const keapLinked = db.prepare("SELECT COUNT(*) c FROM contracts WHERE status='active' AND keap_subscription_id IS NOT NULL AND keap_subscription_id != ''").get().c;
+  db.prepare(`INSERT INTO revenue_snapshots(date,total_revenue,active_clients,keap_linked_contracts,created) VALUES(?,?,?,?,?)
+    ON CONFLICT(date) DO UPDATE SET total_revenue=excluded.total_revenue, active_clients=excluded.active_clients, keap_linked_contracts=excluded.keap_linked_contracts`)
+    .run(today, totalRevenue, activeClients, keapLinked, new Date().toISOString());
+  return { totalRevenue, activeClients, keapLinked };
+}
+
+async function runNightlyMaintenance(actorEmail){
+  const summary = { startedAt: new Date().toISOString() };
+  try{ summary.sync = await keapSyncAllLinkedContracts(actorEmail); }
+  catch(e){ summary.sync = { error: String(e && e.message || e) }; }
+  try{ summary.revenue = recordRevenueSnapshot(); }
+  catch(e){ summary.revenue = { error: String(e && e.message || e) }; }
+  try{ summary.purge = purgeOldSoftDeletes(); }
+  catch(e){ summary.purge = { error: String(e && e.message || e) }; }
+  try{ summary.backup = await takeBackupAndEmail(actorEmail); }
+  catch(e){ summary.backup = { error: String(e && e.message || e) }; }
+
+  // Digest: overdue visits + stale pending queue, alongside the above — one email,
+  // not four, so admins get one thing to skim instead of a flood.
+  try{
+    const overdue = db.prepare("SELECT COUNT(*) c FROM visits WHERE completed=0 AND due IS NOT NULL AND due < ?").get(new Date().toISOString().slice(0,10)).c;
+    const stalePending = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending' AND created < ?").get(new Date(Date.now()-7*24*60*60*1000).toISOString()).c;
+    const syncErrors = (summary.sync && summary.sync.errors) ? summary.sync.errors.length : 0;
+    const lines = [
+      `Coach Fulfillment System — nightly summary for ${new Date().toISOString().slice(0,10)}`,
+      '',
+      `Keap sync: ${summary.sync.error ? 'FAILED — ' + summary.sync.error : `checked ${summary.sync.checked}, price updated ${summary.sync.priceChanged}, status changed ${summary.sync.statusChanged}, errors ${syncErrors}`}`,
+      `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
+      `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
+      `Database backup: ${summary.backup.ok ? `sent (${Math.round((summary.backup.sizeBytes||0)/1024)} KB)` : 'FAILED — ' + (summary.backup.error || 'see results')}`,
+      '',
+      `Overdue visits (not yet completed, past due): ${overdue}`,
+      `Pending Clients queue items older than 7 days: ${stalePending}`,
+    ];
+    if(overdue > 0 || stalePending > 0 || syncErrors > 0 || !summary.backup.ok) lines.push('', 'One or more of the above needs a look.');
+    const admins = ADMIN_EMAILS();
+    let digestSent = 0;
+    for(const to of admins){
+      try{ await sendMail({ to, subject: 'Coach Fulfillment System — nightly summary', text: lines.join('\n') }); digestSent++; }
+      catch(e){ console.error('digest email failed:', e.message); }
+    }
+    summary.digestSentTo = digestSent;
+    summary.digestAttempted = admins.length;
+  }catch(e){ summary.digestError = String(e && e.message || e); }
+
+  log(actorEmail, 'nightly.maintenance', summary);
+  return summary;
+}
+route('POST', /^\/api\/admin\/run-nightly-now$/, ['admin'], (req, res, m, body, user) => {
+  runNightlyMaintenance(user.email)
+    .then(r => send(res, 200, r))
+    .catch(e => err(res, 500, 'Nightly run failed: ' + e.message));
+});
+
 /* ----- audit ----- */
 route('GET', /^\/api\/audit$/, ['admin'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 300').all());
@@ -452,6 +595,44 @@ route('POST', /^\/api\/client-history\/snapshot-now$/, ['admin'], (req, res, m, 
 });
 
 /* ----- client profiles ----- */
+route('GET', /^\/api\/clients\/export\.csv$/, ['admin','lead'], (req, res) => {
+  const rows = db.prepare(`
+    SELECT cl.*,
+      (SELECT COUNT(*) FROM contracts co WHERE co.client_id=cl.id AND co.status='active') AS active_contracts,
+      co.name AS assigned_coach_name
+    FROM clients cl
+    LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
+    WHERE cl.deleted_at IS NULL
+    ORDER BY cl.status='active' DESC, cl.name`).all();
+  const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active'").all();
+  const byClient = {};
+  for(const c of activeContracts) (byClient[c.client_id] ||= []).push(c);
+  const esc = s => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
+  const header = ['Client','Status','Program(s)','Monthly Revenue','Active Contracts','Assigned Coach','Keap ID'];
+  const lines = [header.join(',')];
+  for(const r of rows){
+    const cs = byClient[r.id] || [];
+    const programs = [...new Set(cs.map(c => c.program).filter(Boolean))].join(', ');
+    const revenue = cs.reduce((sum, c) => sum + (Number(c.price) || 0), 0);
+    lines.push([esc(r.name), esc(r.status), esc(programs), revenue.toFixed(2), r.active_contracts, esc(r.assigned_coach_name||''), esc(r.keap_id||'')].join(','));
+  }
+  res.writeHead(200, {
+    'Content-Type': 'text/csv',
+    'Content-Disposition': `attachment; filename="clients-${new Date().toISOString().slice(0,10)}.csv"`,
+  });
+  res.end(lines.join('\r\n'));
+});
+route('GET', /^\/api\/clients\/deleted$/, ['admin'], (req, res) => {
+  send(res, 200, db.prepare("SELECT id, name, deleted_at FROM clients WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").all());
+});
+route('POST', /^\/api\/clients\/(\d+)\/restore$/, ['admin'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  if(!cl.deleted_at) return err(res, 400, 'not deleted');
+  db.prepare('UPDATE clients SET deleted_at=NULL WHERE id=?').run(cl.id);
+  log(user.email, 'client.restore', { clientId: cl.id, name: cl.name });
+  send(res, 200, { ok: true });
+});
 route('GET', /^\/api\/clients$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const rows = db.prepare(`
     SELECT cl.*,
@@ -459,6 +640,7 @@ route('GET', /^\/api\/clients$/, ['admin','lead','sales','coach'], (req, res, m,
       co.name AS assigned_coach_name
     FROM clients cl
     LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
+    WHERE cl.deleted_at IS NULL
     ORDER BY cl.status='active' DESC, cl.name`).all();
   const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active'").all();
   const byClient = {};
@@ -504,13 +686,12 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
 route('DELETE', /^\/api\/clients\/(\d+)$/, ['admin'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
-  db.prepare('UPDATE pending_clients SET resolved_client_id=NULL WHERE resolved_client_id=?').run(cl.id);
-  db.prepare('DELETE FROM client_notes WHERE client_id=?').run(cl.id);
-  db.prepare('DELETE FROM visits WHERE client_id=?').run(cl.id);
-  db.prepare('DELETE FROM contracts WHERE client_id=?').run(cl.id);
-  db.prepare('DELETE FROM client_month_snapshots WHERE client_id=?').run(cl.id);
-  db.prepare('DELETE FROM clients WHERE id=?').run(cl.id);
-  log(user.email, 'client.delete', { clientId: cl.id, name: cl.name });
+  // Soft delete — hides the client from every normal listing immediately, but keeps
+  // all its data intact for 30 days in case this was a mis-click. A nightly job purges
+  // it for real after that window (see purgeOldSoftDeletes). Restore via Admin ->
+  // Recently deleted any time before the purge runs.
+  db.prepare('UPDATE clients SET deleted_at=? WHERE id=?').run(new Date().toISOString(), cl.id);
+  log(user.email, 'client.delete', { clientId: cl.id, name: cl.name, note: 'soft delete — recoverable for 30 days' });
   send(res, 200, { ok: true });
 });
 route('GET', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m) => {
@@ -800,3 +981,10 @@ server.listen(PORT, () => console.log(`Coach Fulfillment System running → http
 // calendar month gets captured automatically even if the server just runs for weeks
 // without a redeploy. Cheap no-op every day except the first day of a new month.
 setInterval(() => { try{ ensureCurrentMonthSnapshot(); }catch(e){ console.error('monthly snapshot check failed:', e); } }, 24 * 60 * 60 * 1000);
+
+// Nightly: Keap sync, revenue snapshot, soft-delete purge, DB backup email, admin digest.
+// Runs 24h after boot and every 24h after that — deliberately not pinned to a clock time
+// (no scheduler dependency), which means it'll drift across a restart but always still
+// runs about once a day. Each piece is independently try/caught inside runNightlyMaintenance
+// so one failure (e.g. Keap unreachable) doesn't skip the backup or the others.
+setInterval(() => { runNightlyMaintenance('system.nightly').catch(e => console.error('nightly maintenance failed:', e)); }, 24 * 60 * 60 * 1000);

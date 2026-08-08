@@ -126,6 +126,26 @@ ensureColumn('clients', 'assigned_coach_id', 'TEXT');
    double-count or guess at a split. Purely informational until someone sets it —
    does not change any existing aggregation. */
 ensureColumn('clients', 'revenue_owner_client_id', 'INTEGER');
+/* Soft delete: "Delete client" sets this instead of removing the row, so a
+   mis-click has a recovery window. A nightly job purges rows older than 30
+   days for real. Deleted clients are excluded from every normal listing —
+   see the WHERE deleted_at IS NULL clauses added alongside this column. */
+ensureColumn('clients', 'deleted_at', 'TEXT');
+
+/* ---------- revenue history ---------- */
+/* One row per day the app has been running, capturing the total active
+   revenue and active client count at that moment — lets the "is our number
+   converging with Keap's" question be answered as a trend, not just as
+   today's snapshot. Written by the nightly job (see server.js). */
+db.exec(`
+CREATE TABLE IF NOT EXISTS revenue_snapshots(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL UNIQUE,          -- 'YYYY-MM-DD'
+  total_revenue REAL NOT NULL,
+  active_clients INTEGER NOT NULL,
+  keap_linked_contracts INTEGER NOT NULL DEFAULT 0,
+  created TEXT);
+`);
 
 /* ---------- client profiles: coach notes ---------- */
 /* A running notes history per client, visible/addable by any coach, lead, or
@@ -290,6 +310,13 @@ function resolveClient(name, opts = {}){
     const r = db.prepare('INSERT INTO clients(name,norm,status,billing_start,keap_id,created) VALUES(?,?,?,?,?,?)')
       .run(nm, key, opts.status || 'active', opts.billing_start || null, opts.keap_id || '', new Date().toISOString());
     return Number(r.lastInsertRowid);
+  }
+  // A real new contract/subscription for a name that matches a soft-deleted client
+  // means it's back — restore it rather than silently attaching new work to a
+  // client that's hidden from every listing.
+  if(row.deleted_at){
+    db.prepare('UPDATE clients SET deleted_at=NULL WHERE id=?').run(row.id);
+    log('system', 'client.auto_restore', { clientId: row.id, name: row.name, reason: 'new contract/subscription matched a soft-deleted client' });
   }
   // keep billing_start as the earliest known
   if(opts.billing_start){
@@ -1489,4 +1516,4 @@ migrateKeapIdentityLink();
 migrateKeapRevenueSync();
 ensureCurrentMonthSnapshot();
 
-module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot };
+module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH };

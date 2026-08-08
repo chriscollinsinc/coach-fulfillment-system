@@ -110,7 +110,7 @@ function render(){
   if(st.view==='clientprofile'){ m.innerHTML='<div class="panel">Loading…</div>'; loadClientProfile(st.clientId); }
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
-  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); }
+  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); loadDeletedClients(); loadRevenueHistory(); }
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
 async function logout(){ await api('POST','/api/logout'); D=null; render(); }
@@ -677,6 +677,7 @@ function clientsView(){
   return `<div class="panel"><h2>Clients</h2>
   <p class="small" style="margin-bottom:12px">Every dealership we've coached — with who's assigned, Keap-imported details, and a running notes history. Click a column header to sort.</p>
   <div class="controls"><input placeholder="Search client…" id="cliSearch" value="${esc(st.cliSearch||'')}" oninput="st.cliSearch=this.value;renderClientTable()" style="width:260px">
+    ${['admin','lead'].includes(D.user.role) ? `<a class="btn tiny" href="/api/clients/export.csv">Export CSV</a>` : ''}
     ${D.user.role==='admin' ? `<button class="btn tiny" id="keapSyncBtn" onclick="syncWithKeap()">Sync with Keap</button>` : ''}
   </div>
   <div id="clientsOut">Loading…</div></div>`;
@@ -819,10 +820,10 @@ async function saveAssignedCoach(clientId, coachId){
 }
 function deleteClientDlg(clientId, clientName){
   openDlg(`<h3>Delete ${esc(clientName)}?</h3>
-    <p class="small">This permanently deletes the client, its contracts, visits, and notes. This cannot be undone.</p>
+    <p class="small">This removes the client from every list immediately. It's recoverable for 30 days from Admin → Recently deleted — after that it's purged for good, along with its contracts, visits, and notes.</p>
     <label>Type the client name to confirm</label><input id="delConfirm" placeholder="${esc(clientName)}">
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary danger" onclick="doDeleteClient(${clientId},'${esc(clientName).replace(/'/g,"\\'")}')">Delete permanently</button></div>`);
+    <button class="btn primary danger" onclick="doDeleteClient(${clientId},'${esc(clientName).replace(/'/g,"\\'")}')">Delete</button></div>`);
 }
 async function doDeleteClient(clientId, clientName){
   if($('#delConfirm').value.trim() !== clientName){ alert('Name does not match — nothing was deleted.'); return; }
@@ -923,6 +924,19 @@ function adminView(){
   <p class="small" style="margin-bottom:12px">Auto-flagged when Keap reports a subscription cancelled. Future visits are left on the
   board on purpose — clear or reassign them from the Inventory screen once you've confirmed.</p>
   <div id="cancelledOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Backups &amp; nightly maintenance</h2>
+  <p class="small" style="margin-bottom:12px">Every night the app checks Keap-linked contracts for drift, snapshots the revenue total, purges any client past its 30-day
+  delete window, and emails every admin a full database backup plus a summary — overdue visits, stale Pending Clients items, and whether the backup went out.
+  Use the button below to run all of that right now instead of waiting for it, or just to get a backup on demand.</p>
+  <div class="controls"><button class="btn" id="backupNowBtn" onclick="backupNow()">Backup now</button>
+  <button class="btn" id="nightlyNowBtn" onclick="runNightlyNow()">Run full nightly check now</button></div>
+  <div id="maintenanceOut" class="small"></div></div>
+  <div class="panel"><h2>Revenue history</h2>
+  <p class="small" style="margin-bottom:12px">One row per day, captured by the nightly job — total active revenue and client count, so drift (toward or away from Keap) shows as a trend.</p>
+  <div id="revenueHistoryOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Recently deleted</h2>
+  <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
+  <div id="deletedOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Client roster history</h2>
   <p class="small" style="margin-bottom:12px">A frozen snapshot of every client's status is captured automatically at the start of each month,
   so you can look back at who was active in any given month, not just today.</p>
@@ -1008,6 +1022,54 @@ async function loadAudit(){
     $('#auditOut').innerHTML=`<table><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th></tr>`+
       rows.map(r=>`<tr><td class="mono small">${r.ts.slice(0,16).replace('T',' ')}</td><td>${esc(r.user)}</td><td>${esc(r.action)}</td><td class="small">${esc(r.detail).slice(0,120)}</td></tr>`).join('')+`</table>`;
   }catch(e){}
+}
+async function backupNow(){
+  const btn=$('#backupNowBtn'); if(btn){btn.disabled=true;btn.textContent='Sending…';}
+  try{
+    const r = await api('POST','/api/admin/backup-now',{});
+    $('#maintenanceOut').innerHTML = r.ok
+      ? `<p>Backup sent (${Math.round((r.sizeBytes||0)/1024)} KB) to: ${esc((r.results||[]).filter(x=>x.ok).map(x=>x.to).join(', ')||'—')}</p>`
+      : `<p>Backup failed: ${esc(r.error||(r.results||[]).map(x=>x.error).filter(Boolean).join('; ')||'unknown error')}</p>`;
+  }catch(e){ $('#maintenanceOut').innerHTML = `<p>Backup failed: ${esc(e.message||e)}</p>`; }
+  finally{ if(btn){btn.disabled=false;btn.textContent='Backup now';} }
+}
+async function runNightlyNow(){
+  const btn=$('#nightlyNowBtn'); if(btn){btn.disabled=true;btn.textContent='Running…';}
+  try{
+    const r = await api('POST','/api/admin/run-nightly-now',{});
+    const lines=[
+      r.sync.error?`Keap sync: FAILED — ${esc(r.sync.error)}`:`Keap sync: checked ${r.sync.checked}, priced ${r.sync.priceChanged}, status changed ${r.sync.statusChanged}, errors ${(r.sync.errors||[]).length}`,
+      r.revenue.error?`Revenue snapshot: FAILED — ${esc(r.revenue.error)}`:`Revenue snapshot: ${fmtMoney(r.revenue.totalRevenue)} across ${r.revenue.activeClients} active client(s)`,
+      r.purge.error?`Purge: FAILED — ${esc(r.purge.error)}`:`Purge: ${r.purge.purged} client(s) purged`,
+      r.backup.ok?`Backup: sent (${Math.round((r.backup.sizeBytes||0)/1024)} KB)`:`Backup: FAILED`,
+      `Digest emailed to ${r.digestSentTo||0} of ${r.digestAttempted||0} admin(s).`,
+    ];
+    $('#maintenanceOut').innerHTML = `<ul style="margin:0;padding-left:18px">${lines.map(l=>`<li>${l}</li>`).join('')}</ul>`;
+    await loadRevenueHistory(); await loadDeletedClients();
+  }catch(e){ $('#maintenanceOut').innerHTML = `<p>Run failed: ${esc(e.message||e)}</p>`; }
+  finally{ if(btn){btn.disabled=false;btn.textContent='Run full nightly check now';} }
+}
+async function loadRevenueHistory(){
+  try{
+    const rows = await api('GET','/api/revenue-history');
+    if(!rows.length){ $('#revenueHistoryOut').innerHTML = '<p>No snapshots yet — the first one is captured by tonight\'s run, or click "Run full nightly check now" above.</p>'; return; }
+    $('#revenueHistoryOut').innerHTML = `<table><tr><th>Date</th><th class="num">Revenue</th><th class="num">Active clients</th><th class="num">Keap-linked contracts</th></tr>` +
+      rows.slice(0,30).map(r=>`<tr><td class="mono">${esc(r.date)}</td><td class="num">${fmtMoney(r.total_revenue)}</td><td class="num">${r.active_clients}</td><td class="num">${r.keap_linked_contracts}</td></tr>`).join('') +
+      `</table>`;
+  }catch(e){ $('#revenueHistoryOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function loadDeletedClients(){
+  try{
+    const rows = await api('GET','/api/clients/deleted');
+    $('#deletedOut').innerHTML = rows.length ? `<table><tr><th>Client</th><th>Deleted</th><th></th></tr>` +
+      rows.map(r=>`<tr><td>${esc(r.name)}</td><td class="mono small">${r.deleted_at.slice(0,16).replace('T',' ')}</td>
+        <td><button class="btn tiny" onclick="restoreClient(${r.id},'${esc(r.name).replace(/'/g,"\\'")}')">Restore</button></td></tr>`).join('') + `</table>`
+      : `<p>Nothing in the recovery window right now.</p>`;
+  }catch(e){ $('#deletedOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function restoreClient(id, name){
+  await api('POST','/api/clients/'+id+'/restore',{});
+  toast(name+' restored'); await loadDeletedClients();
 }
 
 /* ---------- boot ---------- */
