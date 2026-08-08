@@ -173,6 +173,13 @@ ensureColumn('client_notes', 'edited', 'TEXT');
    completes a visit and writes a note in the same step) rather than only ever
    being general-purpose client commentary. Nullable — general notes still work. */
 ensureColumn('client_notes', 'visit_id', 'INTEGER');
+/* Keap notes import: 'source' distinguishes notes typed in this app ('app', the
+   default) from notes pulled in from Keap ('keap'). 'keap_note_id' is Keap's own
+   note id, recorded only on imported notes — a unique index on it makes re-running
+   an import idempotent (re-importing the same Keap note is a no-op, never a dupe). */
+ensureColumn('client_notes', 'source', "TEXT NOT NULL DEFAULT 'app'");
+ensureColumn('client_notes', 'keap_note_id', 'TEXT');
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ucn_keap_note ON client_notes(keap_note_id) WHERE keap_note_id IS NOT NULL;`);
 
 /* ---------- helpers ---------- */
 function hashPw(pw){

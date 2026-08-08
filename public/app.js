@@ -828,7 +828,10 @@ function clientProfileView(data, notes){
       <label style="margin:0">Type</label><select id="cliNoteType"><option>Coaching Call</option><option>LID</option></select>
     </div>
     <textarea id="cliNoteBody" rows="3" style="width:100%;box-sizing:border-box" placeholder="Add a note about this client…"></textarea>
-    <div class="dlgrow" style="margin-top:6px"><button class="btn primary" onclick="saveClientNote(${client.id})">Add note</button></div>
+    <div class="dlgrow" style="margin-top:6px">
+      <button class="btn primary" onclick="saveClientNote(${client.id})">Add note</button>
+      ${canEdit() && client.keap_id ? `<button class="btn" onclick="keapNotesPreviewDlg(${client.id})">Import from Keap…</button>` : ''}
+    </div>
     <div style="margin-top:14px">${notes.length ? notes.map(n=>clientNoteCard(client.id, n)).join('') : '<p class="small">No notes yet.</p>'}</div>
   </div>`;
 
@@ -860,14 +863,51 @@ function clientNoteCard(clientId, n){
   const title = `${fmt(n.note_date)} — ${esc(n.note_type)}`;
   const isAdmin = D.user.role === 'admin';
   const editedTag = n.edited ? ` <span class="small">(edited ${n.edited.slice(0,16).replace('T',' ')})</span>` : '';
+  const keapTag = n.source === 'keap' ? ` <span class="pill" style="background:#e2f0f0;color:#2a6a6a">via Keap</span>` : '';
   return `<div class="duecard" id="note-${n.id}">
-    <div class="meta"><b>${title}</b> · ${esc(n.author_name||n.author_email)} · logged ${n.created.slice(0,16).replace('T',' ')}${editedTag}</div>
+    <div class="meta"><b>${title}</b>${keapTag} · ${esc(n.author_name||n.author_email)} · logged ${n.created.slice(0,16).replace('T',' ')}${editedTag}</div>
     <div style="margin-top:4px;white-space:pre-wrap" id="note-body-${n.id}">${esc(n.body)}</div>
     ${isAdmin ? `<div class="dlgrow" style="margin-top:6px">
       <button class="btn tiny" onclick="editNoteDlg(${clientId},${n.id})">Edit</button>
       <button class="btn tiny danger" onclick="deleteClientNote(${clientId},${n.id})">Delete</button>
     </div>` : ''}
   </div>`;
+}
+async function keapNotesPreviewDlg(clientId){
+  openDlg(`<h3>Import notes from Keap</h3><p class="small">Fetching candidate notes from Keap…</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Close</button></div>`);
+  let r;
+  try{ r = await api('GET', '/api/clients/'+clientId+'/keap-notes-preview'); }
+  catch(e){ openDlg(`<h3>Import notes from Keap</h3><p class="small" style="color:var(--bad)">${esc(e.message||String(e))}</p><div class="dlgrow"><button class="btn" onclick="closeDlg()">Close</button></div>`); return; }
+  st.keapPreview = r.candidates;
+  if(!r.candidates.length){
+    openDlg(`<h3>Import notes from Keap</h3>
+      <p class="small">No new candidate notes found (checked ${r.totalFetched} Keap note(s); ${r.excludedCount} were system-generated or already imported).</p>
+      <div class="dlgrow"><button class="btn" onclick="closeDlg()">Close</button></div>`);
+    return;
+  }
+  const rows = r.candidates.map((c,i)=>`
+    <div class="duecard">
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+        <input type="checkbox" class="knImport" value="${esc(c.keap_note_id)}" checked style="margin-top:3px">
+        <span>
+          <b>${esc(c.title||'(untitled)')}</b> <span class="small">— ${fmt(c.note_date)} · ${esc(c.author_name||'unknown')}</span>
+          <div class="small" style="white-space:pre-wrap;margin-top:3px;max-height:80px;overflow:auto">${esc((c.body||'').slice(0,400))}${(c.body||'').length>400?'…':''}</div>
+        </span>
+      </label>
+    </div>`).join('');
+  openDlg(`<h3>Import notes from Keap</h3>
+    <p class="small" style="margin-bottom:8px">${r.candidates.length} candidate note(s) found (checked ${r.totalFetched} total Keap note(s); ${r.excludedCount} filtered out as system-generated or already imported). Review and uncheck any you don't want, then import.</p>
+    <div style="max-height:50vh;overflow-y:auto">${rows}</div>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="doImportKeapNotes(${clientId})">Import selected</button></div>`);
+}
+async function doImportKeapNotes(clientId){
+  const noteIds = Array.from(document.querySelectorAll('.knImport:checked')).map(x=>x.value);
+  if(!noteIds.length){ alert('Select at least one note to import.'); return; }
+  const r = await api('POST', '/api/clients/'+clientId+'/keap-notes-import', { noteIds });
+  closeDlg(); toast(`Imported ${r.imported} note(s) from Keap`);
+  await loadClientProfile(clientId);
 }
 async function saveClientNote(clientId){
   const body = $('#cliNoteBody').value.trim();

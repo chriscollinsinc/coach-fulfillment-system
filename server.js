@@ -764,6 +764,78 @@ route('DELETE', /^\/api\/clients\/(\d+)\/notes\/(\d+)$/, ['admin'], (req, res, m
   send(res, 200, { ok: true });
 });
 
+/* ---------- Keap notes import (preview-then-approve) ----------
+ * Keap's /v1/notes endpoint mixes real human coaching notes in with a much
+ * larger volume of sales/system noise (webform logs, dedupe entries, "no
+ * contact made" call logs) that all carry user_id:0. We treat "a real,
+ * non-zero user_id" as the signal for "a person actually typed this" rather
+ * than matching on title text, since real coaching content sometimes has a
+ * vague/unrelated-looking title. Nothing gets written to client_notes until
+ * an admin reviews the exact list and picks which notes to bring in. */
+async function fetchKeapNoteCandidates(cl){
+  if(!KEAP_TOKEN) return { ok:false, error:'KEAP_TOKEN is not configured on this server.' };
+  if(!cl.keap_id) return { ok:false, error:'This client has no linked Keap company id yet.' };
+  const already = new Set(db.prepare('SELECT keap_note_id FROM client_notes WHERE keap_note_id IS NOT NULL').all().map(r => r.keap_note_id));
+  const all = [];
+  let offset = 0;
+  const PAGE = 200, MAX_PAGES = 15; // 3000 notes ceiling per client — generous for any single dealer
+  for(let page = 0; page < MAX_PAGES; page++){
+    const r = await keapGet(`/v1/notes?company_id=${encodeURIComponent(cl.keap_id)}&limit=${PAGE}&offset=${offset}`);
+    if(!r.ok) return { ok:false, error: `Keap returned an error (HTTP ${r.status || 'network'}) while fetching notes.` };
+    const batch = (r.json && r.json.notes) || [];
+    all.push(...batch);
+    if(batch.length < PAGE) break;
+    offset += PAGE;
+  }
+  const excluded = [];
+  const candidates = [];
+  for(const n of all){
+    const keapId = String(n.id);
+    const isReal = n.user_id && Number(n.user_id) !== 0;
+    if(!isReal){ excluded.push({ keap_note_id: keapId, title: n.title || '', reason: 'system/no author (user_id 0)' }); continue; }
+    if(already.has(keapId)){ excluded.push({ keap_note_id: keapId, title: n.title || '', reason: 'already imported' }); continue; }
+    const when = n.date_created || n.last_updated || '';
+    candidates.push({
+      keap_note_id: keapId,
+      title: n.title || '',
+      body: n.body || '',
+      author_name: n.user_name || (n.created_by && n.created_by.name) || '',
+      note_date: /^\d{4}-\d{2}-\d{2}/.test(when) ? when.slice(0,10) : new Date().toISOString().slice(0,10),
+    });
+  }
+  return { ok:true, candidates, excludedCount: excluded.length, totalFetched: all.length };
+}
+route('GET', /^\/api\/clients\/(\d+)\/keap-notes-preview$/, ['admin','lead'], async (req, res, m) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  fetchKeapNoteCandidates(cl).then(r => {
+    if(!r.ok) return err(res, 400, r.error);
+    send(res, 200, { candidates: r.candidates, excludedCount: r.excludedCount, totalFetched: r.totalFetched });
+  }).catch(e => err(res, 500, String(e && e.message || e)));
+});
+route('POST', /^\/api\/clients\/(\d+)\/keap-notes-import$/, ['admin','lead'], async (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  const wantIds = new Set((body.noteIds || []).map(String));
+  if(!wantIds.size) return err(res, 400, 'no notes selected');
+  fetchKeapNoteCandidates(cl).then(r => {
+    if(!r.ok) return err(res, 400, r.error);
+    let imported = 0;
+    const now = new Date().toISOString();
+    const ins = db.prepare(`INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,created,source,keap_note_id)
+      VALUES(?,?,?,?,?,?,?,'keap',?)`);
+    for(const c of r.candidates){
+      if(!wantIds.has(c.keap_note_id)) continue;
+      // keap_note_id has a unique index — a re-import of an already-picked note is a
+      // silent no-op here rather than a duplicate row or a thrown error.
+      try{ ins.run(cl.id, c.note_date, 'Coaching Call', 'keap-import', c.author_name, c.title ? `${c.title}\n\n${c.body}` : c.body, now, c.keap_note_id); imported++; }
+      catch(e){ /* unique constraint — already imported, skip */ }
+    }
+    log(user.email, 'client.keap_notes_import', { clientId: cl.id, name: cl.name, imported, requested: wantIds.size });
+    send(res, 200, { ok:true, imported });
+  }).catch(e => err(res, 500, String(e && e.message || e)));
+});
+
 /* ================= Keap webhook receiver ================= */
 /* Keap Classic verification is handled entirely at the HTTP layer below (the
  * X-Hook-Secret echo) per RESTHooks.org's Immediate Confirmation pattern —
