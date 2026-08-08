@@ -252,7 +252,8 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
     teams: JSON.parse(getMeta('teams') || '[]'),
     coaches: db.prepare('SELECT * FROM coaches WHERE active=1 ORDER BY team,name').all(),
     blocks: db.prepare('SELECT * FROM blocks').all(),
-    visits: db.prepare('SELECT * FROM visits').all(),
+    visits: db.prepare(`SELECT v.*, cl.assigned_coach_id AS client_assigned_coach_id
+      FROM visits v LEFT JOIN clients cl ON cl.id = v.client_id`).all(),
   };
   if(user.role === 'admin' || user.role === 'lead'){
     out.pendingClientCount = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending'").get().c;
@@ -320,11 +321,38 @@ route('POST', /^\/api\/visits\/(\d+)\/unschedule$/, ['admin','lead'], (req, res,
   log(user.email, 'visit.unschedule', { id: v.id, client: v.client });
   send(res, 200, { ok: true });
 });
-route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead'], (req, res, m, body, user) => {
+/* A coach may complete a visit only if they're the one who scheduled it
+   (cal_coach) or the one permanently assigned to the client (clients.assigned_coach_id)
+   — never any visit generally, even on their own team. Admin/lead keep the
+   broader team-level permission they already had. Re-derived from the DB here,
+   never trusted from the request body. */
+function canCompleteVisit(user, v){
+  if(user.role === 'admin') return true;
+  if(user.role === 'lead') return canEditTeam(user, v.team);
+  if(user.role === 'coach'){
+    if(v.cal_coach && v.cal_coach === user.coach_id) return true;
+    if(v.client_id){
+      const cl = db.prepare('SELECT assigned_coach_id FROM clients WHERE id=?').get(v.client_id);
+      if(cl && cl.assigned_coach_id && cl.assigned_coach_id === user.coach_id) return true;
+    }
+    return false;
+  }
+  return false;
+}
+route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
-  if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
+  if(!canCompleteVisit(user, v)) return err(res, 403, 'You can only complete a visit you scheduled or are the assigned coach for');
   db.prepare('UPDATE visits SET completed=1, completed_on=? WHERE id=?').run(new Date().toISOString().slice(0,10), v.id);
   log(user.email, 'visit.complete', { id: v.id, client: v.client, cycle: v.cycle });
+  // Optional note logged in the same step, tied to this specific visit rather than
+  // just general client commentary — this is how a completion becomes documented.
+  if(body && body.note && String(body.note).trim()){
+    if(v.client_id){
+      db.prepare(`INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,visit_id,created)
+        VALUES(?,?,?,?,?,?,?,?)`)
+        .run(v.client_id, new Date().toISOString().slice(0,10), 'LID', user.email, user.name, String(body.note).trim(), v.id, new Date().toISOString());
+    }
+  }
   send(res, 200, { ok: true });
 });
 route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin','lead'], (req, res, m, body, user) => {
@@ -695,7 +723,10 @@ route('DELETE', /^\/api\/clients\/(\d+)$/, ['admin'], (req, res, m, body, user) 
   send(res, 200, { ok: true });
 });
 route('GET', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m) => {
-  send(res, 200, db.prepare('SELECT * FROM client_notes WHERE client_id=? ORDER BY id DESC').all(+m[1]));
+  send(res, 200, db.prepare(`
+    SELECT n.*, v.due AS visit_due, v.program AS visit_program
+    FROM client_notes n LEFT JOIN visits v ON v.id = n.visit_id
+    WHERE n.client_id=? ORDER BY n.id DESC`).all(+m[1]));
 });
 const NOTE_TYPES = ['Coaching Call', 'LID'];
 route('POST', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {

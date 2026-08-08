@@ -57,6 +57,12 @@ const coach = id => D.coaches.find(c=>c.id===id);
 const status = v => v.completed?'completed': v.cal_week?'on_calendar': (v.due&&v.due<TODAY?'overdue': v.due?'needs_scheduling':'unknown');
 const isOpen = (cid,w) => !occ[cid+'|'+w];
 const canEdit = () => ['admin','lead'].includes(D.user.role);
+// A coach can complete a visit only if they're the one who scheduled it (cal_coach)
+// or the one permanently assigned to the client (client_assigned_coach_id) — this is
+// a UI convenience mirror of the server-side check in server.js's canCompleteVisit;
+// the server re-derives and enforces this independently, so this never has to be
+// trusted as the real security boundary.
+const ownsVisit = v => D.user.role==='coach' && ((v.cal_coach && v.cal_coach===D.user.coach_id) || (v.client_assigned_coach_id && v.client_assigned_coach_id===D.user.coach_id));
 const myTeams = () => D.user.role==='admin' ? D.teams : [D.user.team];
 
 function toast(msg, undo){
@@ -83,10 +89,11 @@ function render(){
   const r = D.user.role;
   if(r!=='coach'){ views.dashboard='Dashboard'; }
   if(r==='admin'||r==='lead'){
-    views.board='Schedule Board'; views.inventory='LID Inventory';
+    views.board='Schedule Board';
     const n=D.pendingClientCount||0;
     views.pending = 'Unassigned Clients' + (n?` (${n})`:'');
   }
+  views.inventory = r==='coach' ? 'My Visits' : 'LID Inventory';
   views.clients='Clients';
   views.availability='Availability';
   if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
@@ -320,7 +327,7 @@ function board(){
       ${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}<br>
       <span class="small">wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}</span>
       <div class="btnrow">
-        <button class="btn tiny primary" onclick="completeV(${v.id})">Complete</button>
+        <button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Complete</button>
         <button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>
         <button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>
         <button class="btn tiny" onclick="st.detail=null;render()">Close</button>
@@ -356,8 +363,21 @@ async function unscheduleV(id){
   await api('POST',`/api/visits/${id}/unschedule`); st.detail=null; await refresh();
   toast('Unscheduled — back in the to-schedule list', async()=>api('POST',`/api/visits/${id}/place`,old));
 }
-async function completeV(id){
-  await api('POST',`/api/visits/${id}/complete`); st.detail=null; await refresh();
+function completeVisitDlg(id){
+  const v = D.visits.find(x=>x.id===id);
+  openDlg(`<h3>Complete visit${v?' — '+esc(v.client):''}</h3>
+    ${v?`<p class="small">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</p>`:''}
+    <label>Note for this visit (optional)</label>
+    <textarea id="cvNote" rows="4" placeholder="What happened on this visit — this gets logged on the client's notes, tied to this specific visit."></textarea>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="doCompleteV(${id})">Mark complete</button></div>`);
+}
+async function doCompleteV(id){
+  const note = ($('#cvNote')||{}).value || '';
+  try{
+    await api('POST',`/api/visits/${id}/complete`, note.trim() ? { note: note.trim() } : {});
+  }catch(e){ closeDlg(); alert(e.message||'Could not complete that visit'); return; }
+  closeDlg(); st.detail=null; await refresh();
   toast('Marked complete', async()=>api('POST',`/api/visits/${id}/reopen`));
 }
 function cellDlg(cid,w){
@@ -394,11 +414,15 @@ function sortInventory(key){
 function inventory(){
   if(!st.invSort) st.invSort = { key:'due', dir:'asc' };
   const f=st.invFilter,q=norm(st.invSearch);
+  const isCoach = D.user.role==='coach';
   let rows=D.visits.slice();
   const stf={active:v=>!v.completed,overdue:v=>status(v)==='overdue',needs:v=>status(v)==='needs_scheduling',
     oncal:v=>status(v)==='on_calendar',completed:v=>!!v.completed,all:()=>true};
   rows=rows.filter(stf[f]||stf.all);
   if(D.user.role==='lead') rows=rows.filter(v=>!v.team||v.team===D.user.team);
+  // Coaches only ever see their own visits here — this page is where they complete
+  // work, not a company-wide client roster.
+  if(isCoach) rows=rows.filter(ownsVisit);
   if(q) rows=rows.filter(v=>norm(v.client).includes(q)||norm(v.coach_hist).includes(q));
   const { key, dir } = st.invSort;
   const col = INV_COLS.find(c=>c.key===key) || INV_COLS[4];
@@ -407,19 +431,20 @@ function inventory(){
     if(av===bv) return (a.due||'9').localeCompare(b.due||'9');
     return dir==='asc'?av.localeCompare(bv):bv.localeCompare(av);
   });
-  const count=fn=>D.visits.filter(fn).length;
+  const base = isCoach ? D.visits.filter(ownsVisit) : D.visits;
+  const count=fn=>base.filter(fn).length;
   const arrow = k => st.invSort.key===k ? (st.invSort.dir==='asc'?' ▲':' ▼') : '';
   const th = c => `<th style="cursor:pointer;user-select:none" onclick="sortInventory('${c.key}')">${c.label}<span class="small">${arrow(c.key)}</span></th>`;
   let html=`<div class="controls">
-    <button class="btn primary" onclick="contractDlg()">＋ New contract</button>
-    <button class="btn" onclick="visitDlg(0)">＋ Single visit</button>
+    ${canEdit() ? `<button class="btn primary" onclick="contractDlg()">＋ New contract</button>
+    <button class="btn" onclick="visitDlg(0)">＋ Single visit</button>` : ''}
     <select onchange="st.invFilter=this.value;render()">
       <option value="active" ${f==='active'?'selected':''}>Active — ${count(v=>!v.completed)}</option>
       <option value="overdue" ${f==='overdue'?'selected':''}>Overdue — ${count(v=>status(v)==='overdue')}</option>
       <option value="needs" ${f==='needs'?'selected':''}>Needs scheduling — ${count(v=>status(v)==='needs_scheduling')}</option>
       <option value="oncal" ${f==='oncal'?'selected':''}>On calendar — ${count(v=>status(v)==='on_calendar')}</option>
       <option value="completed" ${f==='completed'?'selected':''}>Completed — ${count(v=>!!v.completed)}</option>
-      <option value="all" ${f==='all'?'selected':''}>Everything — ${D.visits.length}</option></select>
+      <option value="all" ${f==='all'?'selected':''}>Everything — ${base.length}</option></select>
     <input placeholder="Search client or coach…" value="${esc(st.invSearch)}" oninput="st.invSearch=this.value;render()" style="width:230px">
     <span class="small">${rows.length} rows</span></div>
   <div class="panel" style="overflow-x:auto"><table><tr>${INV_COLS.map(th).join('')}<th style="width:245px"></th></tr>`;
@@ -435,9 +460,9 @@ function inventory(){
     if(canEdit()){
       act=`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>`;
       if(!v.completed&&!v.cal_week&&v.team) act+=`<button class="btn tiny" onclick="st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()">Place</button>`;
-      if(!v.completed) act+=`<button class="btn tiny" onclick="completeV(${v.id})">Complete</button>`;
-      act+=`<button class="btn tiny danger" onclick="delVisit(${v.id})">✕</button>`;
     }
+    if(!v.completed && (canEdit() || ownsVisit(v))) act+=`<button class="btn tiny" onclick="completeVisitDlg(${v.id})">Complete</button>`;
+    if(canEdit()) act+=`<button class="btn tiny danger" onclick="delVisit(${v.id})">✕</button>`;
     html+=`<tr><td>${esc(v.client)}</td><td>${esc(v.team||'?')}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
       <td class="mono">${fmt(v.due)}</td><td class="small">${sched}</td><td>${pill}</td><td class="actions-nowrap">${act}</td></tr>`;
   });

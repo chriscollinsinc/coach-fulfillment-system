@@ -169,6 +169,10 @@ CREATE INDEX IF NOT EXISTS icn_client ON client_notes(client_id);
 ensureColumn('client_notes', 'note_date', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('client_notes', 'note_type', "TEXT NOT NULL DEFAULT 'Coaching Call'");
 ensureColumn('client_notes', 'edited', 'TEXT');
+/* Ties a note to the specific visit it documents (set automatically when a coach
+   completes a visit and writes a note in the same step) rather than only ever
+   being general-purpose client commentary. Nullable — general notes still work. */
+ensureColumn('client_notes', 'visit_id', 'INTEGER');
 
 /* ---------- helpers ---------- */
 function hashPw(pw){
