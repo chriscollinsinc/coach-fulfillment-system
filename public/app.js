@@ -358,15 +358,40 @@ async function saveCell(cid,w){
 }
 
 /* ---------- inventory ---------- */
+const INV_COLS = [
+  { key:'client', label:'Client', get:v=>v.client||'' },
+  { key:'team', label:'Team', get:v=>v.team||'' },
+  { key:'program', label:'Program', get:v=>v.program||'' },
+  { key:'cycle', label:'Cycle', get:v=>v.cycle||'' },
+  { key:'due', label:'Due', get:v=>v.due||'' },
+  { key:'scheduled', label:'Scheduled', get:v=>v.cal_week||'' },
+  { key:'status', label:'Status', get:v=>status(v) },
+];
+function sortInventory(key){
+  if(!st.invSort) st.invSort = { key:'due', dir:'asc' };
+  if(st.invSort.key===key) st.invSort.dir = st.invSort.dir==='asc'?'desc':'asc';
+  else st.invSort = { key, dir:'asc' };
+  render();
+}
 function inventory(){
+  if(!st.invSort) st.invSort = { key:'due', dir:'asc' };
   const f=st.invFilter,q=norm(st.invSearch);
-  let rows=D.visits.slice().sort((a,b)=>(a.due||'9').localeCompare(b.due||'9'));
+  let rows=D.visits.slice();
   const stf={active:v=>!v.completed,overdue:v=>status(v)==='overdue',needs:v=>status(v)==='needs_scheduling',
     oncal:v=>status(v)==='on_calendar',completed:v=>!!v.completed,all:()=>true};
   rows=rows.filter(stf[f]||stf.all);
   if(D.user.role==='lead') rows=rows.filter(v=>!v.team||v.team===D.user.team);
   if(q) rows=rows.filter(v=>norm(v.client).includes(q)||norm(v.coach_hist).includes(q));
+  const { key, dir } = st.invSort;
+  const col = INV_COLS.find(c=>c.key===key) || INV_COLS[4];
+  rows.sort((a,b)=>{
+    const av=(col.get(a)||'').toString().toLowerCase(), bv=(col.get(b)||'').toString().toLowerCase();
+    if(av===bv) return (a.due||'9').localeCompare(b.due||'9');
+    return dir==='asc'?av.localeCompare(bv):bv.localeCompare(av);
+  });
   const count=fn=>D.visits.filter(fn).length;
+  const arrow = k => st.invSort.key===k ? (st.invSort.dir==='asc'?' ▲':' ▼') : '';
+  const th = c => `<th style="cursor:pointer;user-select:none" onclick="sortInventory('${c.key}')">${c.label}<span class="small">${arrow(c.key)}</span></th>`;
   let html=`<div class="controls">
     <button class="btn primary" onclick="contractDlg()">＋ New contract</button>
     <button class="btn" onclick="visitDlg(0)">＋ Single visit</button>
@@ -379,7 +404,7 @@ function inventory(){
       <option value="all" ${f==='all'?'selected':''}>Everything — ${D.visits.length}</option></select>
     <input placeholder="Search client or coach…" value="${esc(st.invSearch)}" oninput="st.invSearch=this.value;render()" style="width:230px">
     <span class="small">${rows.length} rows</span></div>
-  <div class="panel"><table><tr><th>Client</th><th>Team</th><th>Program</th><th>Cycle</th><th>Due</th><th>Scheduled</th><th>Status</th><th style="width:190px"></th></tr>`;
+  <div class="panel" style="overflow-x:auto"><table><tr>${INV_COLS.map(th).join('')}<th style="width:245px"></th></tr>`;
   rows.slice(0,400).forEach(v=>{
     const s=status(v);
     const sched=v.completed?(v.sched_hist||(v.cal_week?'wk of '+fmtW(v.cal_week):'—'))
@@ -390,13 +415,13 @@ function inventory(){
       :s==='needs_scheduling'?'<span class="pill p-due">Needs scheduling</span>':'<span class="pill p-fut">—</span>';
     let act='';
     if(canEdit()){
-      act=`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button> `;
-      if(!v.completed&&!v.cal_week&&v.team) act+=`<button class="btn tiny" onclick="st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()">Place</button> `;
-      if(!v.completed) act+=`<button class="btn tiny" onclick="completeV(${v.id})">Complete</button> `;
+      act=`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>`;
+      if(!v.completed&&!v.cal_week&&v.team) act+=`<button class="btn tiny" onclick="st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()">Place</button>`;
+      if(!v.completed) act+=`<button class="btn tiny" onclick="completeV(${v.id})">Complete</button>`;
       act+=`<button class="btn tiny danger" onclick="delVisit(${v.id})">✕</button>`;
     }
     html+=`<tr><td>${esc(v.client)}</td><td>${esc(v.team||'?')}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
-      <td class="mono">${fmt(v.due)}</td><td class="small">${sched}</td><td>${pill}</td><td>${act}</td></tr>`;
+      <td class="mono">${fmt(v.due)}</td><td class="small">${sched}</td><td>${pill}</td><td class="actions-nowrap">${act}</td></tr>`;
   });
   if(rows.length>400) html+=`<tr><td colspan="8" class="small">…first 400 of ${rows.length}</td></tr>`;
   html+=`</table></div>`;
