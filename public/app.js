@@ -109,6 +109,7 @@ function render(){
   if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
   if(r==='coach' && D.user.coach_id) views.myprofile='My Profile';
   if(r==='admin') views.admin='Admin';
+  views.faq='FAQ';
   if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile') st.view = Object.keys(views)[0];
   app.innerHTML = `
   <header>
@@ -132,6 +133,7 @@ function render(){
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
   if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); loadDeletedClients(); loadRevenueHistory(); loadFormerCoaches(); }
+  if(st.view==='faq') m.innerHTML=faqView();
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
 async function logout(){ await api('POST','/api/logout'); D=null; render(); }
@@ -1098,6 +1100,55 @@ function mySchedule(){
     html+=`<tr><td class="mono">${fmtW(w)}</td><td>${what}</td><td class="small">${det}</td></tr>`;
   }
   return html+`</table></div>`;
+}
+
+/* ---------- FAQ / SOPs ---------- */
+const FAQ = [
+  { cat: 'Visits & completion', roles: ['admin','lead','sales','coach'], items: [
+    { q: 'Who can mark a visit complete?', a: `Only the coach who scheduled it (they're listed as the calendar coach for that slot) or the coach permanently assigned to that client. An admin or lead can complete any visit on their team. This is checked on the server every time — a coach can't complete a visit for a store that isn't theirs, even by editing the request.` },
+    { q: 'What happens to the note I add when completing a visit?', a: `It's saved to that client's Notes tab and tagged to the specific visit it documents — you'll see the visit's due date and program show up next to it automatically. That link is set only by the complete step itself, so it can't be edited onto a different visit later.` },
+    { q: 'I completed a visit by mistake — can I undo it?', a: `Admins and leads can reopen a completed visit from the Inventory page, which clears its completed status. The note you logged (if any) stays on the client's record either way.` },
+  ]},
+  { cat: 'Client notes & Keap', roles: ['admin','lead'], items: [
+    { q: 'Can I pull a client\'s historical notes out of Keap?', a: `Yes — open a client's profile and click "Import from Keap…" (only shows up if the client has a linked Keap company ID). It fetches that client's Keap notes, filters out system/sales noise automatically, and shows you the real candidates to review before anything is saved. You pick which ones actually come in; nothing imports without that review step.` },
+    { q: 'Will re-running the Keap import create duplicates?', a: `No. Every imported note carries its original Keap note ID, and the app won't insert the same one twice — re-previewing after an import shows those notes as already-imported and excludes them automatically.` },
+    { q: 'What does "Sync with Keap" do on the Clients page?', a: `Re-checks every contract that already has a Keap subscription ID against Keap's live record and updates price/status if they've drifted. It never touches a contract that isn't already Keap-linked, and if Keap can't be reached it reports an error for that item and changes nothing — a failed check never gets misread as "cancelled" or "$0."` },
+  ]},
+  { cat: 'Clients', roles: ['admin','lead','sales'], items: [
+    { q: 'I deleted a client by mistake — is it gone for good?', a: `No — deleting a client is a soft delete. It disappears from every normal list immediately, but it's fully recoverable for 30 days from Admin → Recently deleted. After 30 days a nightly job purges it permanently, along with its contracts, visits, and notes.` },
+    { q: 'What happens if a new contract or subscription comes in for a client I soft-deleted?', a: `The app auto-restores the client the moment a new contract or Keap subscription matches their name — it never silently attaches new work to a hidden record. You'll see an audit log entry ("client.auto_restore") when this happens.` },
+    { q: 'One Keap invoice covers multiple stores I visit separately — how should revenue be tracked?', a: `Pick one client as the "revenue owner" — it carries the real Keap subscription ID and full price. Every other client covered by that same invoice keeps its own visits and coach assignment, but its contract price is set to $0 with a pointer back to the revenue owner, so the $0 reads as "billed elsewhere" rather than "worth nothing." Revenue totals stay accurate with no manual splitting. See the SOP doc for the full Castle example.` },
+  ]},
+  { cat: 'Coaches & profiles', roles: ['admin','lead','coach'], items: [
+    { q: 'What happens to a coach\'s history when they leave?', a: `Nothing about it changes. Every visit a coach completed is permanently credited to them (separately from who's currently scheduled), so their profile keeps showing accurate history and notes forever — deactivating them only affects future scheduling, not the record of past work. Their profile stays fully browsable from Admin → Former coaches.` },
+    { q: 'What happens to a departing coach\'s stores?', a: `When you deactivate a coach, you choose: hand all their current stores and upcoming scheduled visits to one teammate in a single step, or leave them unassigned so they surface as open work. The dialog shows every teammate's current workload (stores + upcoming visits) so you can pick who has room — lightest-loaded teammates are listed first.` },
+    { q: 'Can I split a departing coach\'s stores across more than one person?', a: `Not in one step yet — the deactivation flow reassigns everything to a single coach. To split the book, deactivate with one recipient, then move individual stores to someone else afterward from each client's profile (Assignment & Keap details → Assigned coach).` },
+    { q: 'What\'s on a coach\'s "To-do" list?', a: `Anything currently in their court: overdue stores, anything due in the next two weeks, and any completed visit that's still missing a note. It's computed fresh every time the profile loads, not stored, so it's always current.` },
+  ]},
+  { cat: 'Accounts & security', roles: ['admin'], items: [
+    { q: 'How do coaches log in?', a: `Either with an email/password you set up for them (Admin → Users → Add user, role "coach", linked to their coach profile), or with Google Sign-In if SSO is configured for your Workspace domain — both work side by side. SSO never auto-creates an account; the email has to already exist as a user first.` },
+    { q: 'What happens after repeated failed logins?', a: `5 failed attempts on the same email within 15 minutes triggers a 15-minute lockout, even with the correct password — this resets on redeploy and isn't a persistent ban list.` },
+    { q: 'Can I change someone\'s login email later?', a: `Yes — Admin → Users → Edit lets you change name, email, role, team, and coach link after the account exists. Changing the email only changes how they log in; it doesn't rewrite anything already recorded under their old address in notes, audit logs, or Keap sync history.` },
+  ]},
+  { cat: 'Backups & data', roles: ['admin'], items: [
+    { q: 'Is the database backed up automatically?', a: `Yes — a nightly job emails a backup attachment to admins, alongside a Keap sync pass and the day's revenue snapshot. You can also trigger it on demand from Admin → Backups & nightly maintenance.` },
+    { q: 'Where can I see revenue trending over time, not just today\'s snapshot?', a: `Admin → Revenue history — one row per day captured automatically, so drift toward or away from Keap shows up as a trend rather than a single point-in-time number.` },
+    { q: 'Can I export the client/inventory list?', a: `Yes — the LID Inventory page has a CSV export that respects whatever filters you currently have applied.` },
+  ]},
+];
+function faqView(){
+  const role = D.user.role;
+  const sections = FAQ.filter(s=>s.roles.includes(role));
+  let html = `<div class="panel"><h2>FAQ &amp; SOPs</h2>
+    <p class="small">How this app's less-obvious features work — click a question to expand it. Sections only show if they're relevant to your role.</p></div>`;
+  for(const s of sections){
+    html += `<div class="panel"><h2>${esc(s.cat)}</h2>` +
+      s.items.map(i=>`<details style="margin-bottom:8px">
+        <summary style="cursor:pointer;font-weight:600;padding:6px 0">${esc(i.q)}</summary>
+        <div class="small" style="padding:4px 0 8px 4px;white-space:pre-wrap">${esc(i.a)}</div>
+      </details>`).join('') + `</div>`;
+  }
+  return html;
 }
 
 /* ---------- admin ---------- */
