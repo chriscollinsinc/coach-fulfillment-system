@@ -342,7 +342,12 @@ function canCompleteVisit(user, v){
 route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   if(!canCompleteVisit(user, v)) return err(res, 403, 'You can only complete a visit you scheduled or are the assigned coach for');
-  db.prepare('UPDATE visits SET completed=1, completed_on=? WHERE id=?').run(new Date().toISOString().slice(0,10), v.id);
+  // Snapshot who actually did the work, for the coach's permanent history — the coach
+  // themself if a coach completed it, otherwise whichever coach it was scheduled under
+  // (an admin/lead completing on a coach's behalf still credits that coach).
+  const creditCoachId = user.role === 'coach' ? user.coach_id : (v.cal_coach || null);
+  db.prepare('UPDATE visits SET completed=1, completed_on=?, completed_by_coach_id=?, completed_by_email=? WHERE id=?')
+    .run(new Date().toISOString().slice(0,10), creditCoachId, user.email, v.id);
   log(user.email, 'visit.complete', { id: v.id, client: v.client, cycle: v.cycle });
   // Optional note logged in the same step, tied to this specific visit rather than
   // just general client commentary — this is how a completion becomes documented.
@@ -402,10 +407,59 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
 route('DELETE', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, body, user) => {
   const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
   if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
-  db.prepare('UPDATE visits SET cal_coach=NULL, cal_week=NULL WHERE cal_coach=? AND completed=0').run(c.id);
+  // Reassignment is optional — pass reassignToCoachId to hand this coach's current
+  // stores + open scheduled slots to someone else in one step; omit it to just free
+  // them up (stores become unassigned, slots return to the to-schedule pool).
+  // Either way, nothing about their COMPLETED history changes — completed_by_coach_id
+  // permanently credits the coach who actually did the work, so their profile/history
+  // stays intact and correct even after they're deactivated.
+  const toId = body && body.reassignToCoachId ? String(body.reassignToCoachId) : null;
+  if(toId){
+    const dest = getCoach(toId);
+    if(!dest) return err(res, 400, 'reassignment target coach not found');
+    if(!canEditTeam(user, dest.team)) return err(res, 403, 'Reassignment target is not on your team');
+  }
+  const storesMoved = db.prepare('SELECT COUNT(*) n FROM clients WHERE assigned_coach_id=?').get(c.id).n;
+  db.prepare('UPDATE clients SET assigned_coach_id=? WHERE assigned_coach_id=?').run(toId, c.id);
+  if(toId) db.prepare('UPDATE visits SET cal_coach=? WHERE cal_coach=? AND completed=0').run(toId, c.id);
+  else db.prepare('UPDATE visits SET cal_coach=NULL, cal_week=NULL WHERE cal_coach=? AND completed=0').run(c.id);
   db.prepare('UPDATE coaches SET active=0 WHERE id=?').run(c.id);
-  log(user.email, 'coach.remove', { id: c.id, name: c.name });
-  send(res, 200, { ok: true });
+  log(user.email, 'coach.remove', { id: c.id, name: c.name, storesMoved, reassignedTo: toId || null });
+  send(res, 200, { ok: true, storesMoved });
+});
+route('GET', /^\/api\/coaches\/inactive$/, ['admin','lead'], (req, res, m, body, user) => {
+  const rows = db.prepare('SELECT * FROM coaches WHERE active=0 ORDER BY team,name').all()
+    .filter(c => canEditTeam(user, c.team));
+  send(res, 200, rows);
+});
+/* ----- coach profile: assigned stores, visit history, notes — the "what happens
+   when a coach leaves" answer is that none of this ever disappears. A deactivated
+   coach's profile is still fully browsable by admins/leads; only future scheduling
+   moves on without them. ----- */
+route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (req, res, m, body, user) => {
+  const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
+  if(user.role === 'coach' && user.coach_id !== c.id) return err(res, 403, 'You can only view your own profile');
+  if(user.role === 'lead' && !canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  const assignedClients = db.prepare(`SELECT id, name, status FROM clients WHERE assigned_coach_id=? AND deleted_at IS NULL ORDER BY name`).all(c.id);
+  const yr = new Date().getFullYear();
+  const visitHistory = db.prepare(`
+    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.completed_on, v.completed_by_email
+    FROM visits v WHERE v.completed_by_coach_id=? ORDER BY v.completed_on DESC LIMIT 500`).all(c.id);
+  const upcoming = db.prepare(`
+    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
+    FROM visits v WHERE v.cal_coach=? AND v.completed=0 ORDER BY v.due`).all(c.id);
+  const completedThisYear = visitHistory.filter(v => (v.completed_on||'').slice(0,4) === String(yr)).length;
+  const notes = db.prepare(`
+    SELECT n.id, n.client_id, cl.name AS client_name, n.note_date, n.note_type, n.body, n.author_name, n.author_email, n.source
+    FROM client_notes n JOIN clients cl ON cl.id = n.client_id
+    WHERE n.author_email IN (SELECT email FROM users WHERE coach_id=?)
+    ORDER BY n.note_date DESC LIMIT 200`).all(c.id);
+  send(res, 200, {
+    coach: c,
+    assignedClients,
+    stats: { assignedStores: assignedClients.length, completedThisYear, allTimeCompleted: visitHistory.length, upcomingCount: upcoming.length },
+    visitHistory, upcoming, notes,
+  });
 });
 route('POST', /^\/api\/teams$/, ['admin'], (req, res, m, body, user) => {
   const teams = JSON.parse(getMeta('teams') || '[]');

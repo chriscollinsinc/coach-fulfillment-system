@@ -180,6 +180,12 @@ ensureColumn('client_notes', 'visit_id', 'INTEGER');
 ensureColumn('client_notes', 'source', "TEXT NOT NULL DEFAULT 'app'");
 ensureColumn('client_notes', 'keap_note_id', 'TEXT');
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ucn_keap_note ON client_notes(keap_note_id) WHERE keap_note_id IS NOT NULL;`);
+/* Who actually completed a visit, captured at the moment it's completed — this is
+   what a coach's profile/history is built from. It's intentionally separate from
+   cal_coach (who's currently scheduled) so that reassigning a client to a new coach,
+   or a coach leaving, never rewrites who really did the historical work. */
+ensureColumn('visits', 'completed_by_coach_id', 'TEXT');
+ensureColumn('visits', 'completed_by_email', 'TEXT');
 
 /* ---------- helpers ---------- */
 function hashPw(pw){

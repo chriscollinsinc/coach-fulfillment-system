@@ -97,13 +97,14 @@ function render(){
   views.clients='Clients';
   views.availability='Availability';
   if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
+  if(r==='coach' && D.user.coach_id) views.myprofile='My Profile';
   if(r==='admin') views.admin='Admin';
-  if(!views[st.view] && st.view!=='clientprofile') st.view = Object.keys(views)[0];
+  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile') st.view = Object.keys(views)[0];
   app.innerHTML = `
   <header>
     <img class="logo" src="https://chriscollinsinc.com/wp-content/uploads/2020/03/logo-1.png" onerror="this.style.display='none'" alt="">
     <h1>Coach Fulfillment</h1>
-    <nav>${Object.entries(views).map(([k,v])=>`<button class="${(st.view===k||(k==='clients'&&st.view==='clientprofile'))?'active':''}" onclick="go('${k}')">${v}</button>`).join('')}</nav>
+    <nav>${Object.entries(views).map(([k,v])=>`<button class="${(st.view===k||(k==='clients'&&st.view==='clientprofile')||(k==='myprofile'&&st.view==='coachprofile'&&st.coachId===D.user.coach_id))?'active':''}" onclick="${k==='myprofile'?`openCoachProfile('${D.user.coach_id}')`:`go('${k}')`}">${v}</button>`).join('')}</nav>
     <div class="userchip">${esc(D.user.name)} · ${D.user.role}${D.user.team?' · '+D.user.team:''}<br>
       <a onclick="pwDlg()">password</a> · <a onclick="logout()">sign out</a></div>
   </header>
@@ -115,9 +116,10 @@ function render(){
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
   if(st.view==='clients'){ m.innerHTML=clientsView(); loadClients(); }
   if(st.view==='clientprofile'){ m.innerHTML='<div class="panel">Loading…</div>'; loadClientProfile(st.clientId); }
+  if(st.view==='coachprofile'){ m.innerHTML='<div class="panel">Loading…</div>'; loadCoachProfile(st.coachId); }
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
-  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); loadDeletedClients(); loadRevenueHistory(); }
+  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); loadDeletedClients(); loadRevenueHistory(); loadFormerCoaches(); }
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
 async function logout(){ await api('POST','/api/logout'); D=null; render(); }
@@ -841,6 +843,76 @@ function clientProfileView(data, notes){
   </div>`;
   return html;
 }
+function openCoachProfile(id){ st.view='coachprofile'; st.coachId=id; render(); }
+async function loadCoachProfile(id){
+  const data = await api('GET', '/api/coaches/'+id+'/profile');
+  $('#main').innerHTML = coachProfileView(data);
+}
+function coachProfileView(data){
+  const { coach, assignedClients, stats, visitHistory, upcoming, notes } = data;
+  const isSelf = D.user.role==='coach';
+  let html = `<div class="panel">
+    <div class="controls">
+      ${!isSelf ? `<button class="btn tiny" onclick="go('admin')">← Admin</button>` : ''}
+      <span style="flex:1"></span>
+      ${(!isSelf && coach.active) ? `<button class="btn tiny danger" onclick="removeCoach('${coach.id}','${esc(coach.name).replace(/'/g,"\\'")}')">Deactivate coach</button>` : ''}
+    </div>
+    <h2 style="margin-top:8px">${esc(coach.name)} <span class="small">— Team ${esc(coach.team)}</span>
+      ${coach.active ? '' : '<span class="pill p-over">inactive</span>'}
+    </h2>
+    <div class="cards" style="margin-top:12px">
+      <div class="card"><div class="k">${stats.assignedStores}</div><div class="l">Assigned stores</div></div>
+      <div class="card"><div class="k">${stats.completedThisYear}</div><div class="l">Visits completed this year</div></div>
+      <div class="card"><div class="k">${stats.allTimeCompleted}</div><div class="l">Visits completed, all-time</div></div>
+      <div class="card"><div class="k">${stats.upcomingCount}</div><div class="l">On the calendar now</div></div>
+    </div>
+  </div>`;
+
+  html += `<div class="panel"><h2>Assigned stores</h2>` +
+    (assignedClients.length ? `<table><tr><th>Client</th><th>Status</th></tr>` +
+      assignedClients.map(c=>`<tr><td><a onclick="openClientProfile(${c.id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a></td>
+        <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}</td></tr>`).join('') + `</table>`
+      : `<p class="small">No stores currently assigned.</p>`) + `</div>`;
+
+  if(upcoming.length){
+    html += `<div class="panel"><h2>On the calendar</h2><table><tr><th>Client</th><th>Program</th><th>Due</th><th>Scheduled week</th></tr>` +
+      upcoming.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td>
+        <td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td><td class="mono">${fmtW(v.cal_week)}</td></tr>`).join('') + `</table></div>`;
+  }
+
+  html += `<div class="panel"><h2>Visit history</h2>
+    <p class="small" style="margin-bottom:8px">Every visit ${esc(coach.name)} has completed, credited to them permanently regardless of any later reassignment.</p>` +
+    (visitHistory.length ? `<table><tr><th>Client</th><th>Program</th><th>Completed</th></tr>` +
+      visitHistory.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td>
+        <td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.completed_on)}</td></tr>`).join('') + `</table>`
+      : `<p class="small">No completed visits on record yet.</p>`) + `</div>`;
+
+  html += `<div class="panel"><h2>Notes</h2>
+    <p class="small" style="margin-bottom:8px">Notes ${esc(coach.name)} has logged, across all their stores.</p>` +
+    (notes.length ? notes.map(n=>`<div class="duecard">
+      <div class="meta"><b>${fmt(n.note_date)} — ${esc(n.note_type)}</b> · <a onclick="openClientProfile(${n.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(n.client_name)}</a>${n.source==='keap'?' <span class="pill" style="background:#e2f0f0;color:#2a6a6a">via Keap</span>':''}</div>
+      <div style="margin-top:4px;white-space:pre-wrap">${esc(n.body)}</div>
+    </div>`).join('') : `<p class="small">No notes logged yet.</p>`) + `</div>`;
+  return html;
+}
+function coachDeactivateDlg(id, name){
+  const teammates = D.coaches.filter(c=>c.id!==id);
+  openDlg(`<h3>Deactivate ${esc(name)}?</h3>
+    <p class="small">Their completed visit history stays intact and stays credited to them — nothing there changes.
+    Choose what happens to their current stores and any future scheduled visits:</p>
+    <label>Reassign stores &amp; upcoming visits to</label>
+    <select id="reassignTo"><option value="">— leave unassigned instead —</option>
+      ${teammates.map(c=>`<option value="${c.id}">${esc(c.name)} (${c.team})</option>`).join('')}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary danger" onclick="doDeactivateCoach('${id}','${esc(name).replace(/'/g,"\\'")}')">Deactivate</button></div>`);
+}
+async function doDeactivateCoach(id, name){
+  const reassignToCoachId = $('#reassignTo').value || undefined;
+  const r = await api('DELETE','/api/coaches/'+id, reassignToCoachId ? { reassignToCoachId } : undefined);
+  closeDlg(); await refresh();
+  toast(`${name} deactivated${r.storesMoved ? ` — ${r.storesMoved} store(s) ${reassignToCoachId?'reassigned':'unassigned'}` : ''}`);
+  if(st.view==='coachprofile') go('admin');
+}
 async function saveAssignedCoach(clientId, coachId){
   await api('PATCH','/api/clients/'+clientId, { assigned_coach_id: coachId || null });
   toast('Coach assignment saved');
@@ -968,13 +1040,16 @@ function adminView(){
     html+=`<h3>Team ${t} (${members.length})</h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th></th></tr>`;
     members.forEach(c=>{
       const fv=D.visits.filter(v=>!v.completed&&v.cal_coach===c.id&&v.cal_week>=TODAY).length;
-      html+=`<tr><td><b>${esc(c.name)}</b></td><td class="num">${fv}</td>
+      html+=`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline"><b>${esc(c.name)}</b></a></td><td class="num">${fv}</td>
         <td><select onchange="moveCoach('${c.id}',this.value)"><option></option>${D.teams.filter(x=>x!==t).map(x=>`<option>${x}</option>`).join('')}</select></td>
-        <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')">Remove</button></td></tr>`;
+        <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')">Deactivate</button></td></tr>`;
     });
     html+=`</table>`;
   }
-  html+=`</div><div class="panel"><h2>Users</h2>
+  html+=`</div><div class="panel"><h2>Former coaches</h2>
+  <p class="small" style="margin-bottom:8px">Deactivated coaches — their profile, visit history, and notes stay fully browsable, they're just no longer scheduled for new work.</p>
+  <div id="formerCoachesOut" class="small">Loading…</div></div>`;
+  html+=`<div class="panel"><h2>Users</h2>
     <div class="controls"><button class="btn primary" onclick="userDlg()">＋ Add user</button></div>
     <table><tr><th>Name</th><th>Email</th><th>Role</th><th>Team</th><th>Coach link</th><th>Status</th><th></th></tr>`;
   (D.users||[]).forEach(u=>{
@@ -1009,6 +1084,15 @@ function adminView(){
   <div id="clientHistoryOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Audit log</h2><div id="auditOut" class="small">Loading…</div></div>`;
   return html;
+}
+async function loadFormerCoaches(){
+  try{
+    const rows = await api('GET','/api/coaches/inactive');
+    $('#formerCoachesOut').innerHTML = rows.length ?
+      `<table><tr><th>Coach</th><th>Team</th></tr>` +
+      rows.map(c=>`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a></td><td>${esc(c.team)}</td></tr>`).join('') +
+      `</table>` : `<p>None.</p>`;
+  }catch(e){ $('#formerCoachesOut').innerHTML = '<p>Could not load.</p>'; }
 }
 async function loadCancelledContracts(){
   try{
@@ -1049,10 +1133,7 @@ function coachDlg(){
 async function saveCoach(){ const n=$('#kName').value.trim(); if(!n){alert('Name required');return;}
   await api('POST','/api/coaches',{name:n,team:$('#kTeam').value}); closeDlg(); await refresh(); toast(n+' added — their weeks are open capacity'); }
 async function moveCoach(id,team){ if(!team) return; await api('PATCH','/api/coaches/'+id,{team}); await refresh(); toast('Moved'); }
-async function removeCoach(id,name){
-  if(!confirm(`Remove ${name}? Their scheduled visits return to the to-schedule list.`)) return;
-  await api('DELETE','/api/coaches/'+id); await refresh(); toast(name+' removed');
-}
+function removeCoach(id,name){ coachDeactivateDlg(id,name); }
 function teamDlg(){
   openDlg(`<h3>Add team</h3><label>Team name</label><input id="tName">
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
