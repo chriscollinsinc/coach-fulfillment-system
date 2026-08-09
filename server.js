@@ -250,7 +250,10 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
   const out = {
     user,
     teams: JSON.parse(getMeta('teams') || '[]'),
-    coaches: db.prepare('SELECT * FROM coaches WHERE active=1 ORDER BY team,name').all(),
+    coaches: db.prepare(`SELECT c.*,
+      (SELECT COUNT(*) FROM clients WHERE assigned_coach_id=c.id AND deleted_at IS NULL) AS assigned_stores,
+      (SELECT COUNT(*) FROM visits WHERE cal_coach=c.id AND completed=0) AS upcoming_count
+      FROM coaches c WHERE c.active=1 ORDER BY c.team,c.name`).all(),
     blocks: db.prepare('SELECT * FROM blocks').all(),
     visits: db.prepare(`SELECT v.*, cl.assigned_coach_id AS client_assigned_coach_id
       FROM visits v LEFT JOIN clients cl ON cl.id = v.client_id`).all(),
@@ -401,6 +404,11 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
     db.prepare('UPDATE coaches SET team=? WHERE id=?').run(body.team, c.id);
     db.prepare('UPDATE visits SET team=? WHERE cal_coach=? AND completed=0').run(body.team, c.id);
   }
+  if(body.phone !== undefined) db.prepare('UPDATE coaches SET phone=? WHERE id=?').run(String(body.phone||'').trim(), c.id);
+  if(body.start_date !== undefined){
+    if(body.start_date && !/^\d{4}-\d{2}-\d{2}$/.test(body.start_date)) return err(res, 400, 'bad start date');
+    db.prepare('UPDATE coaches SET start_date=? WHERE id=?').run(body.start_date || null, c.id);
+  }
   log(user.email, 'coach.edit', { id: c.id, ...body });
   send(res, 200, { ok: true });
 });
@@ -454,11 +462,28 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
     FROM client_notes n JOIN clients cl ON cl.id = n.client_id
     WHERE n.author_email IN (SELECT email FROM users WHERE coach_id=?)
     ORDER BY n.note_date DESC LIMIT 200`).all(c.id);
+  // Quick-glance to-do: everything currently in this coach's court, worked out fresh
+  // on every load rather than stored, so it's always accurate.
+  const todayIso = new Date().toISOString().slice(0,10);
+  const in14 = new Date(Date.now() + 14*24*60*60*1000).toISOString().slice(0,10);
+  const openWork = db.prepare(`
+    SELECT v.id, v.client, v.client_id, v.due, v.program
+    FROM visits v LEFT JOIN clients cl ON cl.id = v.client_id
+    WHERE v.completed=0 AND (v.cal_coach=? OR cl.assigned_coach_id=?)
+    ORDER BY v.due`).all(c.id, c.id);
+  const overdue = openWork.filter(v => v.due && v.due < todayIso);
+  const dueSoon = openWork.filter(v => v.due && v.due >= todayIso && v.due <= in14);
+  const missingNotes = db.prepare(`
+    SELECT v.id, v.client, v.client_id, v.completed_on
+    FROM visits v
+    WHERE v.completed_by_coach_id=? AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL)
+    ORDER BY v.completed_on DESC LIMIT 50`).all(c.id);
   send(res, 200, {
     coach: c,
     assignedClients,
     stats: { assignedStores: assignedClients.length, completedThisYear, allTimeCompleted: visitHistory.length, upcomingCount: upcoming.length },
     visitHistory, upcoming, notes,
+    todo: { overdue, dueSoon, missingNotes },
   });
 });
 route('POST', /^\/api\/teams$/, ['admin'], (req, res, m, body, user) => {
@@ -489,6 +514,12 @@ route('PATCH', /^\/api\/users\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
     log(user.email, 'user.password', { id: target });
   }
   if(user.role === 'admin'){
+    if(body.email !== undefined){
+      const newEmail = String(body.email).toLowerCase().trim();
+      if(!/^\S+@\S+\.\S+$/.test(newEmail)) return err(res, 400, 'bad email');
+      try{ db.prepare('UPDATE users SET email=? WHERE id=?').run(newEmail, target); }
+      catch(e){ return err(res, 400, 'that email is already in use'); }
+    }
     for(const k of ['name','role','team','coach_id']) if(body[k] !== undefined)
       db.prepare(`UPDATE users SET ${k}=? WHERE id=?`).run(body[k], target);
     if(body.active !== undefined) db.prepare('UPDATE users SET active=? WHERE id=?').run(body.active ? 1 : 0, target);

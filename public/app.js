@@ -14,6 +14,16 @@ const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID
 const PROGRAMS = Object.keys(CYCLE_LEN);
 const BLOCKKINDS = {home:'Home',off:'Off / Vacation',training:'Training',bootcamp:'Bootcamp',event:'Event (Top Dog / Virtual)',truck:'TRUCK',travel:'Travel',mag:'Mills (M.A.G.)',launch_open:'Launch slot held',not_hired:'Not hired yet',shadow:'Shadow',meeting:'Meeting',blocked:'Blocked',visit:'Legacy visit (from sheet)',visit_legacy:'Legacy visit (from sheet)'};
 
+/* Avatar — initials on a color derived from the team name, so every coach on a team
+   reads as visually related without needing an upload/storage pipeline. */
+const AVATAR_PALETTE = ['#F15F43','#1d4f91','#c77d0a','#1e8e5a','#7a4fb5','#2a8a8a','#b93c22','#5a6a8a'];
+function avatarColor(team){ let h=0; for(const ch of String(team||'')) h=(h*31+ch.charCodeAt(0))>>>0; return AVATAR_PALETTE[h%AVATAR_PALETTE.length]; }
+function initials(name){ const parts=String(name||'').trim().split(/\s+/); return ((parts[0]?.[0]||'')+(parts[parts.length-1]?.[0]||'')).toUpperCase() || '?'; }
+function avatarHtml(name, team, size){
+  size = size || 32;
+  return `<span style="display:inline-flex;align-items:center;justify-content:center;width:${size}px;height:${size}px;border-radius:50%;background:${avatarColor(team)};color:#fff;font-family:var(--head);font-weight:600;font-size:${Math.round(size*0.4)}px;flex:none;line-height:1">${esc(initials(name))}</span>`;
+}
+
 /* Mondays helpers */
 function mondayOf(d){ const x=new Date(d); const dow=(x.getDay()+6)%7; x.setDate(x.getDate()-dow); return x.toISOString().slice(0,10); }
 function addDays(iso,n){ const d=new Date(iso+'T12:00:00'); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
@@ -105,8 +115,10 @@ function render(){
     <img class="logo" src="https://chriscollinsinc.com/wp-content/uploads/2020/03/logo-1.png" onerror="this.style.display='none'" alt="">
     <h1>Coach Fulfillment</h1>
     <nav>${Object.entries(views).map(([k,v])=>`<button class="${(st.view===k||(k==='clients'&&st.view==='clientprofile')||(k==='myprofile'&&st.view==='coachprofile'&&st.coachId===D.user.coach_id))?'active':''}" onclick="${k==='myprofile'?`openCoachProfile('${D.user.coach_id}')`:`go('${k}')`}">${v}</button>`).join('')}</nav>
-    <div class="userchip">${esc(D.user.name)} · ${D.user.role}${D.user.team?' · '+D.user.team:''}<br>
-      <a onclick="pwDlg()">password</a> · <a onclick="logout()">sign out</a></div>
+    <div class="userchip" style="display:flex;align-items:center;gap:8px">
+      ${avatarHtml(D.user.name, D.user.team, 30)}
+      <span>${esc(D.user.name)} · ${D.user.role}${D.user.team?' · '+D.user.team:''}<br>
+      <a onclick="pwDlg()">password</a> · <a onclick="logout()">sign out</a></span></div>
   </header>
   <main id="main"></main>`;
   const m=$('#main');
@@ -849,17 +861,21 @@ async function loadCoachProfile(id){
   $('#main').innerHTML = coachProfileView(data);
 }
 function coachProfileView(data){
-  const { coach, assignedClients, stats, visitHistory, upcoming, notes } = data;
+  const { coach, assignedClients, stats, visitHistory, upcoming, notes, todo } = data;
   const isSelf = D.user.role==='coach';
+  const canManage = D.user.role==='admin' || D.user.role==='lead';
   let html = `<div class="panel">
     <div class="controls">
       ${!isSelf ? `<button class="btn tiny" onclick="go('admin')">← Admin</button>` : ''}
       <span style="flex:1"></span>
-      ${(!isSelf && coach.active) ? `<button class="btn tiny danger" onclick="removeCoach('${coach.id}','${esc(coach.name).replace(/'/g,"\\'")}')">Deactivate coach</button>` : ''}
+      ${canManage ? `<button class="btn tiny" onclick="editCoachDlg('${coach.id}')">Edit profile</button>` : ''}
+      ${(canManage && coach.active) ? `<button class="btn tiny danger" onclick="removeCoach('${coach.id}','${esc(coach.name).replace(/'/g,"\\'")}')">Deactivate coach</button>` : ''}
     </div>
-    <h2 style="margin-top:8px">${esc(coach.name)} <span class="small">— Team ${esc(coach.team)}</span>
-      ${coach.active ? '' : '<span class="pill p-over">inactive</span>'}
+    <h2 style="margin-top:8px;display:flex;align-items:center;gap:10px">${avatarHtml(coach.name,coach.team,40)}
+      <span>${esc(coach.name)} <span class="small">— Team ${esc(coach.team)}</span>
+      ${coach.active ? '' : '<span class="pill p-over">inactive</span>'}</span>
     </h2>
+    <p class="small" style="margin-top:6px">${coach.phone?`Phone: ${esc(coach.phone)} · `:''}${coach.start_date?`Start date: ${fmt(coach.start_date)}`:''}${(!coach.phone&&!coach.start_date)?'No phone or start date on file yet.':''}</p>
     <div class="cards" style="margin-top:12px">
       <div class="card"><div class="k">${stats.assignedStores}</div><div class="l">Assigned stores</div></div>
       <div class="card"><div class="k">${stats.completedThisYear}</div><div class="l">Visits completed this year</div></div>
@@ -867,6 +883,20 @@ function coachProfileView(data){
       <div class="card"><div class="k">${stats.upcomingCount}</div><div class="l">On the calendar now</div></div>
     </div>
   </div>`;
+
+  const todoTotal = (todo.overdue.length + todo.dueSoon.length + todo.missingNotes.length);
+  html += `<div class="panel"><h2>To-do${todoTotal?` (${todoTotal})`:''}</h2>`;
+  if(!todoTotal){
+    html += `<p class="small">Nothing outstanding — no overdue stores, nothing due in the next 2 weeks, and every completed visit has a note.</p>`;
+  } else {
+    if(todo.overdue.length) html += `<h3 style="color:var(--bad)">Overdue (${todo.overdue.length})</h3><table><tr><th>Client</th><th>Program</th><th>Was due</th></tr>` +
+      todo.overdue.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('') + `</table>`;
+    if(todo.dueSoon.length) html += `<h3>Due within 2 weeks (${todo.dueSoon.length})</h3><table><tr><th>Client</th><th>Program</th><th>Due</th></tr>` +
+      todo.dueSoon.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('') + `</table>`;
+    if(todo.missingNotes.length) html += `<h3>Completed visits missing a note (${todo.missingNotes.length})</h3><table><tr><th>Client</th><th>Completed</th></tr>` +
+      todo.missingNotes.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td class="mono">${fmt(v.completed_on)}</td></tr>`).join('') + `</table>`;
+  }
+  html += `</div>`;
 
   html += `<div class="panel"><h2>Assigned stores</h2>` +
     (assignedClients.length ? `<table><tr><th>Client</th><th>Status</th></tr>` +
@@ -896,15 +926,55 @@ function coachProfileView(data){
   return html;
 }
 function coachDeactivateDlg(id, name){
-  const teammates = D.coaches.filter(c=>c.id!==id);
+  const leaving = D.coaches.find(c=>c.id===id);
+  const teammates = D.coaches.filter(c=>c.id!==id && (!leaving || c.team===leaving.team))
+    .sort((a,b)=>(a.assigned_stores||0)-(b.assigned_stores||0)); // lightest-loaded first
   openDlg(`<h3>Deactivate ${esc(name)}?</h3>
     <p class="small">Their completed visit history stays intact and stays credited to them — nothing there changes.
-    Choose what happens to their current stores and any future scheduled visits:</p>
+    Choose what happens to their ${leaving?.assigned_stores||0} current store(s) and ${leaving?.upcoming_count||0} upcoming visit(s):</p>
+    <h3>Current workload — Team ${esc(leaving?.team||'')}</h3>
+    <table style="margin-bottom:10px"><tr><th>Coach</th><th class="num">Stores</th><th class="num">Upcoming</th></tr>
+      ${teammates.map(c=>`<tr><td>${esc(c.name)}</td><td class="num">${c.assigned_stores||0}</td><td class="num">${c.upcoming_count||0}</td></tr>`).join('') || '<tr><td colspan="3" class="small">No other coaches on this team.</td></tr>'}
+    </table>
     <label>Reassign stores &amp; upcoming visits to</label>
     <select id="reassignTo"><option value="">— leave unassigned instead —</option>
-      ${teammates.map(c=>`<option value="${c.id}">${esc(c.name)} (${c.team})</option>`).join('')}</select>
+      ${teammates.map(c=>`<option value="${c.id}">${esc(c.name)} (${c.assigned_stores||0} stores, ${c.upcoming_count||0} upcoming)</option>`).join('')}</select>
+    <p class="small" style="margin-top:4px">Lightest-loaded teammates are listed first. All of this coach's stores go to a single pick — split manually afterward from each client's profile if you'd rather divide the book across two or three people.</p>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary danger" onclick="doDeactivateCoach('${id}','${esc(name).replace(/'/g,"\\'")}')">Deactivate</button></div>`);
+}
+function editCoachDlg(id){
+  const c = D.coaches.find(x=>x.id===id) || st.coachProfileCoach;
+  openDlg(`<h3>Edit profile</h3>
+    <label>Name</label><input id="ecName" value="${esc(c.name)}">
+    <label>Team</label><select id="ecTeam">${teamOpts(c.team)}</select>
+    <label>Phone</label><input id="ecPhone" value="${esc(c.phone||'')}" placeholder="(555) 555-5555">
+    <label>Start date</label><input type="date" id="ecStart" value="${c.start_date||''}">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveCoachEdit('${id}')">Save</button></div>`);
+}
+async function saveCoachEdit(id){
+  const name = $('#ecName').value.trim(); if(!name){ alert('Name required'); return; }
+  await api('PATCH','/api/coaches/'+id, { name, team: $('#ecTeam').value, phone: $('#ecPhone').value.trim(), start_date: $('#ecStart').value || null });
+  closeDlg(); await refresh(); toast('Profile updated');
+  if(st.view==='coachprofile') await loadCoachProfile(st.coachId);
+}
+function editUserDlg(id){
+  const u = (D.users||[]).find(x=>x.id===id); if(!u) return;
+  openDlg(`<h3>Edit user</h3>
+    <label>Name</label><input id="euName" value="${esc(u.name)}">
+    <label>Email</label><input id="euEmail" value="${esc(u.email)}" autocomplete="off">
+    <label>Role</label><select id="euRole"><option ${u.role==='admin'?'selected':''}>admin</option><option ${u.role==='lead'?'selected':''}>lead</option><option ${u.role==='sales'?'selected':''}>sales</option><option ${u.role==='coach'?'selected':''}>coach</option></select>
+    <label>Team</label><select id="euTeam">${teamOpts(u.team)}</select>
+    <label>Coach link (for coach role)</label><select id="euCoach"><option value="">—</option>${D.coaches.map(c=>`<option value="${c.id}" ${u.coach_id===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveUserEdit(${u.id})">Save</button></div>`);
+}
+async function saveUserEdit(id){
+  const name = $('#euName').value.trim(); const email = $('#euEmail').value.trim();
+  if(!name || !email){ alert('Name and email required'); return; }
+  await api('PATCH','/api/users/'+id, { name, email, role: $('#euRole').value, team: $('#euTeam').value, coach_id: $('#euCoach').value || null });
+  closeDlg(); await refresh(); toast('User updated');
 }
 async function doDeactivateCoach(id, name){
   const reassignToCoachId = $('#reassignTo').value || undefined;
@@ -1040,7 +1110,7 @@ function adminView(){
     html+=`<h3>Team ${t} (${members.length})</h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th></th></tr>`;
     members.forEach(c=>{
       const fv=D.visits.filter(v=>!v.completed&&v.cal_coach===c.id&&v.cal_week>=TODAY).length;
-      html+=`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline"><b>${esc(c.name)}</b></a></td><td class="num">${fv}</td>
+      html+=`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--ink);text-decoration:none;display:flex;align-items:center;gap:8px">${avatarHtml(c.name,c.team,26)}<b style="text-decoration:underline;color:var(--primary)">${esc(c.name)}</b></a></td><td class="num">${fv}</td>
         <td><select onchange="moveCoach('${c.id}',this.value)"><option></option>${D.teams.filter(x=>x!==t).map(x=>`<option>${x}</option>`).join('')}</select></td>
         <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')">Deactivate</button></td></tr>`;
     });
@@ -1056,7 +1126,8 @@ function adminView(){
     html+=`<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${u.role}</td><td>${esc(u.team||'—')}</td>
       <td class="small">${esc(coach(u.coach_id)?.name||'—')}</td>
       <td>${u.active?'<span class="pill p-done">active</span>':'<span class="pill p-over">disabled</span>'}</td>
-      <td><button class="btn tiny" onclick="resetPwDlg(${u.id},'${esc(u.name)}')">Reset pw</button>
+      <td><button class="btn tiny" onclick="editUserDlg(${u.id})">Edit</button>
+      <button class="btn tiny" onclick="resetPwDlg(${u.id},'${esc(u.name)}')">Reset pw</button>
       ${u.id!==D.user.id?`<button class="btn tiny danger" onclick="toggleUser(${u.id},${u.active?0:1})">${u.active?'Disable':'Enable'}</button>`:''}</td></tr>`;
   });
   html+=`</table></div>

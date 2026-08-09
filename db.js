@@ -186,6 +186,10 @@ db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ucn_keap_note ON client_notes(keap_no
    or a coach leaving, never rewrites who really did the historical work. */
 ensureColumn('visits', 'completed_by_coach_id', 'TEXT');
 ensureColumn('visits', 'completed_by_email', 'TEXT');
+/* Basic profile fields for a coach as a person, not just as a scheduling id —
+   shown on their profile page, editable by admins/leads. */
+ensureColumn('coaches', 'phone', 'TEXT');
+ensureColumn('coaches', 'start_date', 'TEXT');
 
 /* ---------- helpers ---------- */
 function hashPw(pw){
