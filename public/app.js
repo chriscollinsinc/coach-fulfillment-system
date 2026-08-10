@@ -129,7 +129,7 @@ function render(){
   const views = {};
   const r = D.user.role;
   const hasPending = (r==='admin'||r==='lead');
-  if(r!=='coach'){ views.dashboard='Dashboard'; }
+  views.dashboard='Today';
   if(hasPending) views.board='Schedule Board';
   views.inventory = r==='coach' ? 'My Visits' : 'LID Inventory';
   views.clients='Clients'; // dropdown for admin/lead (Active Clients + Unassigned Clients); plain link otherwise
@@ -174,7 +174,7 @@ function render(){
   </header>
   <main id="main"></main>`;
   const m=$('#main');
-  if(st.view==='dashboard') m.innerHTML=dashboard();
+  if(st.view==='dashboard'){ m.innerHTML=dashboard(); loadToday(); }
   if(st.view==='board') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
@@ -323,37 +323,128 @@ function capacity(team,y,m){
   }
   return {booked,open,launch,weeks:weeks.length*members.length};
 }
+/* Today — a role-aware action queue, not a report. Every number is clickable,
+   every row carries the one button that fixes it. */
 function dashboard(){
-  const act=D.visits.filter(v=>!v.completed);
-  const n=k=>act.filter(v=>status(v)===k).length;
-  const done=D.visits.filter(v=>v.completed).length;
+  return `<div id="todayOut"><div class="panel">Loading your day…</div></div>`;
+}
+async function loadToday(){
+  let t;
+  try{ t = await api('GET','/api/today'); }
+  catch(e){ $('#todayOut').innerHTML = '<div class="panel">Could not load — refresh to try again.</div>'; return; }
+  $('#todayOut').innerHTML = D.user.role==='coach' ? todayCoachView(t) : todayTeamView(t);
+}
+const invJump = f => `st.invFilter='${f}';st.invSel=new Set();go('inventory')`;
+const placeJump = v => `st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()`;
+function todayRows(list, maxN, rowFn){
+  return list.slice(0,maxN).map(rowFn).join('') +
+    (list.length>maxN?`<tr><td colspan="9" class="small">…and ${list.length-maxN} more</td></tr>`:'');
+}
+function todayTeamView(t){
+  const odDays = d => Math.floor(dayDiff(TODAY,d));
   let html=`<div class="cards">
-    <div class="card"><div class="k">${done}</div><div class="l">Visits completed</div></div>
-    <div class="card ${n('overdue')?'bad':'ok'}"><div class="k">${n('overdue')}</div><div class="l">Overdue</div></div>
-    <div class="card ${n('needs_scheduling')?'warn':'ok'}"><div class="k">${n('needs_scheduling')}</div><div class="l">Needs scheduling</div></div>
-    <div class="card"><div class="k">${n('on_calendar')}</div><div class="l">On calendar</div></div>
+    <div class="card ${t.overdueNoPlan.length?'bad':'ok'}" style="cursor:pointer" onclick="${invJump('overdue')};st.invFilter='attention'"><div class="k">${t.overdueNoPlan.length}</div><div class="l">Overdue — no plan</div></div>
+    <div class="card" style="cursor:pointer" onclick="${invJump('oncal')}"><div class="k">${t.lateOnCalendar}</div><div class="l">Late but on calendar</div></div>
+    <div class="card ${t.dueSoonUnscheduled.length?'warn':'ok'}" style="cursor:pointer" onclick="${invJump('needs')}"><div class="k">${t.dueSoonUnscheduled.length}</div><div class="l">Due in 30 days, unscheduled</div></div>
+    <div class="card ok"><div class="k">${t.completedThisMonth}</div><div class="l">Completed this month${t.team?' — Team '+esc(t.team):''}</div></div>
   </div>`;
-  if((D.pendingClientCount||0) > 0 && ['admin','lead'].includes(D.user.role)){
-    html += `<div class="panel" style="border-left:4px solid var(--primary)">
-      <b>${D.pendingClientCount} new Keap subscription${D.pendingClientCount>1?'s':''}</b> waiting for a team assignment.
-      <button class="btn tiny primary" onclick="go('pending')">Review →</button></div>`;
+  if(t.pendingCount) html+=`<div class="panel" style="border-left:4px solid var(--primary);padding:10px 14px">
+    <b>${t.pendingCount} new Keap subscription${t.pendingCount>1?'s':''}</b> waiting for assignment.
+    <button class="btn tiny primary" style="margin-left:8px" onclick="go('pending')">Review →</button></div>`;
+
+  html+=`<div class="panel"><h2>Fix first — overdue with no plan (${t.overdueNoPlan.length})</h2>`;
+  html+= t.overdueNoPlan.length ? `<table><tr><th>Client</th><th>Visit</th><th>Was due</th><th>How late</th><th></th></tr>`+
+    todayRows(t.overdueNoPlan, 10, v=>`<tr>
+      <td><b>${v.client_id?`<a style="cursor:pointer;color:var(--primary);text-decoration:underline" onclick="openClientProfile(${v.client_id})">${esc(v.client)}</a>`:esc(v.client)}</b></td>
+      <td>${esc(v.cycle)} ${esc(v.program)} · ${esc(v.team||'?')}</td><td class="mono">${fmt(v.due)}</td>
+      <td><span class="pill p-over">${odDays(v.due)} days</span></td>
+      <td>${v.team?`<button class="btn tiny primary" onclick="${placeJump(v)}">Place on calendar</button>`:''}
+      <button class="btn tiny" onclick="visitDrawer(${v.id})">Details</button></td></tr>`)+`</table>`
+    : `<p class="small">Nothing — every overdue visit has a calendar slot. ✔</p>`;
+  html+=`</div>`;
+
+  html+=`<div class="panel"><h2>Schedule next — due within 30 days (${t.dueSoonUnscheduled.length})</h2>`;
+  html+= t.dueSoonUnscheduled.length ? `<table><tr><th>Client</th><th>Visit</th><th>Due</th><th></th></tr>`+
+    todayRows(t.dueSoonUnscheduled, 10, v=>`<tr>
+      <td><b>${v.client_id?`<a style="cursor:pointer;color:var(--primary);text-decoration:underline" onclick="openClientProfile(${v.client_id})">${esc(v.client)}</a>`:esc(v.client)}</b></td>
+      <td>${esc(v.cycle)} ${esc(v.program)} · ${esc(v.team||'?')}</td><td class="mono">${fmt(v.due)}</td>
+      <td>${v.team?`<button class="btn tiny primary" onclick="${placeJump(v)}">Place on calendar</button>`:''}</td></tr>`)+`</table>`
+    : `<p class="small">Nothing coming due unscheduled in the next 30 days. ✔</p>`;
+  html+=`</div>`;
+
+  if(t.atRisk.length){
+    html+=`<div class="panel"><h2>At-risk clients (${t.atRisk.length})</h2>
+    <p class="small" style="margin-bottom:8px">Active, paying visit-clients with no completed visit in 60+ days and nothing on the calendar — the ones most likely to churn quietly.</p>
+    <table><tr><th>Client</th><th>Assigned coach</th><th></th></tr>`+
+    todayRows(t.atRisk, 8, c=>`<tr><td><b><a style="cursor:pointer;color:var(--primary);text-decoration:underline" onclick="openClientProfile(${c.id})">${esc(c.name)}</a></b></td>
+      <td>${esc(coach(c.assigned_coach_id)?.name||'— unassigned —')}</td>
+      <td><button class="btn tiny" onclick="openClientProfile(${c.id})">Open profile</button></td></tr>`)+`</table></div>`;
   }
-  html+=`<div class="panel"><h2>Capacity vs. LIDs due — next 12 months</h2>`;
-  for(const t of myTeams()){
-    html+=`<h3>Team ${t}</h3><table><tr><th>Month</th><th class="num">Booked</th><th class="num">Open</th><th class="num">LIDs due</th><th>Load</th><th></th></tr>`;
-    for(const [y,m] of rolling12()){
-      const c=capacity(t,y,m);
-      const due=D.visits.filter(v=>!v.completed&&v.team===t&&v.due&&+v.due.slice(0,4)===y&&+v.due.slice(5,7)===m+1).length;
+
+  if(t.missingNotes.length){
+    html+=`<div class="panel"><h2>Completed without a note (${t.missingNotes.length})</h2>
+    <p class="small" style="margin-bottom:8px">Visits marked done in the last 30 days with no write-up — undocumented work is invisible work.</p>
+    <table><tr><th>Client</th><th>Completed</th><th>Coach</th><th></th></tr>`+
+    todayRows(t.missingNotes, 8, v=>`<tr><td><b>${esc(v.client)}</b></td><td class="mono">${fmt(v.completed_on)}</td>
+      <td>${esc(coach(v.completed_by_coach_id)?.name||'—')}</td>
+      <td>${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Add note</button>`:''}</td></tr>`)+`</table></div>`;
+  }
+
+  if(t.holdsExpiring.length){
+    html+=`<div class="panel"><h2>Soft-pencil holds expiring soon (${t.holdsExpiring.length})</h2>
+    <table><tr><th>Prospect</th><th>Coach</th><th>Expires</th><th></th></tr>`+
+    t.holdsExpiring.map(h=>`<tr><td><b>${esc(h.name)}</b></td><td>${esc(coach(h.coach_id)?.name||h.coach_id)}</td>
+      <td><span class="pill p-over">${fmt(h.expires)}</span></td>
+      <td><button class="btn tiny" onclick="go('availability')">Manage →</button></td></tr>`).join('')+`</table></div>`;
+  }
+
+  // Capacity planning — still here, but collapsed and trimmed to the actionable horizon.
+  html+=`<details class="panel" style="display:block"><summary style="cursor:pointer;font-family:var(--head);font-size:16px;letter-spacing:1px;text-transform:uppercase">Capacity planning — next 6 months</summary><div style="margin-top:10px">`;
+  for(const tm of myTeams()){
+    html+=`<h3>Team ${tm}</h3><table><tr><th>Month</th><th class="num">Booked</th><th class="num">Open</th><th class="num">LIDs due</th><th>Load</th><th></th></tr>`;
+    for(const [y,m] of rolling12().slice(0,6)){
+      const c=capacity(tm,y,m);
+      const due=D.visits.filter(v=>!v.completed&&v.team===tm&&v.due&&+v.due.slice(0,4)===y&&+v.due.slice(5,7)===m+1).length;
       const cap=c.booked+c.open, pct=cap?Math.round(c.booked/cap*100):0;
       const verdict=due>cap?`<span class="pill p-over">${due-cap} over</span>`
         : c.open>0?`<span class="pill p-done">${c.open} open</span>`:`<span class="pill p-due">full</span>`;
       html+=`<tr><td>${MO[m]} ${String(y).slice(2)}</td><td class="num">${c.booked}</td><td class="num">${c.open}</td><td class="num">${due}</td>
         <td><div class="bar"><div style="width:${pct}%;background:var(--primary)"></div><div style="width:${100-pct}%;background:var(--open)"></div></div></td>
-        <td>${verdict} <button class="btn tiny" onclick="st.view='board';st.boardTeam='${t}';st.boardY=${y};st.boardM=${m};render()">Open →</button></td></tr>`;
+        <td>${verdict} <button class="btn tiny" onclick="st.view='board';st.boardTeam='${tm}';st.boardY=${y};st.boardM=${m};render()">View that month's board →</button></td></tr>`;
     }
     html+=`</table>`;
   }
-  html+=`<p class="small" style="margin-top:8px">Weeks with nothing scheduled or blocked count as open. Months beyond the imported 2026 plan will read fully open until leads fill them in.</p></div>`;
+  html+=`<p class="small" style="margin-top:8px">Weeks with nothing scheduled or blocked count as open. For the full 12-month view, use Availability.</p></div></details>`;
+  return html;
+}
+function todayCoachView(t){
+  let html='';
+  html+=`<div class="panel" style="border-left:4px solid var(--primary)"><h2>Your next visit</h2>`;
+  html+= t.nextVisit ? `<p style="font-size:15px"><b>${esc(t.nextVisit.client)}</b> — week of ${fmtW(t.nextVisit.cal_week)} · ${esc(t.nextVisit.cycle)} ${esc(t.nextVisit.program)}</p>
+    <div class="btnrow" style="margin-top:8px">
+      ${t.nextVisit.client_id?`<button class="btn tiny" onclick="openClientProfile(${t.nextVisit.client_id})">Client profile &amp; notes</button>`:''}
+      <button class="btn tiny primary" onclick="completeVisitDlg(${t.nextVisit.id})">Complete it</button></div>`
+    : `<p class="small">Nothing on your calendar yet — check My Schedule or ask your lead.</p>`;
+  html+=`</div>`;
+  const sec=(title,list,empty)=>{
+    let h=`<div class="panel"><h2>${title} (${list.length})</h2>`;
+    h+= list.length ? `<table><tr><th>Client</th><th>Visit</th><th>Due</th><th></th></tr>`+
+      todayRows(list, 10, v=>`<tr><td><b>${esc(v.client)}</b></td><td>${esc(v.cycle||'')} ${esc(v.program||'')}</td>
+        <td class="mono">${fmt(v.due||v.completed_on)}</td>
+        <td>${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open client</button>`:''}
+        ${!v.completed_on?`<button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Complete</button>`:''}</td></tr>`)+`</table>`
+      : `<p class="small">${empty}</p>`;
+    return h+`</div>`;
+  };
+  html+=sec('Overdue from you', t.overdueMine, 'Nothing overdue. ✔');
+  html+=sec('Due from you in the next 30 days', t.dueSoonMine, 'Nothing due soon. ✔');
+  if(t.missingNotes.length){
+    html+=`<div class="panel"><h2>You owe a note (${t.missingNotes.length})</h2>
+    <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up.</p>
+    <table><tr><th>Client</th><th>Completed</th><th></th></tr>`+
+    t.missingNotes.map(v=>`<tr><td><b>${esc(v.client)}</b></td><td class="mono">${fmt(v.completed_on)}</td>
+      <td>${v.client_id?`<button class="btn tiny primary" onclick="openClientProfile(${v.client_id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
+  }
   return html;
 }
 
@@ -583,8 +674,8 @@ function inventory(){
     const sched=v.completed?(v.sched_hist||(v.cal_week?'wk of '+fmtW(v.cal_week):'—'))
       : v.cal_week?`wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}`:'—';
     const pill=v.completed?'<span class="pill p-done">Completed</span>'
-      :s==='overdue'?`<span class="pill p-over">Overdue${od>=30?` · ${od}d`:''}</span>`
-      :s==='on_calendar'?'<span class="pill p-cal">On calendar</span>'
+      :s==='overdue'?`<span class="pill p-over">Overdue — no plan${od>=30?` · ${od}d`:''}</span>`
+      :s==='on_calendar'?(v.due&&v.due<TODAY?'<span class="pill p-due">Late — on calendar</span>':'<span class="pill p-cal">On calendar</span>')
       :s==='needs_scheduling'?'<span class="pill p-due">Needs scheduling</span>':'<span class="pill p-fut">—</span>';
     html+=`<tr style="cursor:pointer" onclick="visitDrawer(${v.id})">
       ${showChecks?`<td onclick="event.stopPropagation()"><input type="checkbox" ${sel.has(v.id)?'checked':''} onclick="toggleInvSel(${v.id},this.checked)"></td>`:''}

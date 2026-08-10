@@ -466,6 +466,62 @@ function sweepProspectHolds(){
   return { expired: expired.map(h => h.name), expiring: expiring.map(h => `${h.name} (${h.expires})`) };
 }
 
+/* ----- Today: the role-aware action queue the dashboard is built from -----
+   One place that answers "what needs a person right now", computed fresh from
+   the DB on every load. Ordering inside each list is worst-first. */
+route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
+  const today = new Date().toISOString().slice(0,10);
+  const plus30 = new Date(Date.now()+30*24*60*60*1000).toISOString().slice(0,10);
+  const plus14 = new Date(Date.now()+14*24*60*60*1000).toISOString().slice(0,10);
+  const cut60 = new Date(Date.now()-60*24*60*60*1000).toISOString().slice(0,10);
+  const cut30 = new Date(Date.now()-30*24*60*60*1000).toISOString().slice(0,10);
+
+  if(user.role === 'coach'){
+    const mine = `(v.cal_coach=? OR EXISTS(SELECT 1 FROM clients cl WHERE cl.id=v.client_id AND cl.assigned_coach_id=?))`;
+    const nextVisit = db.prepare(`SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
+      FROM visits v WHERE v.completed=0 AND v.cal_coach=? AND v.cal_week>=? ORDER BY v.cal_week LIMIT 1`).get(user.coach_id, today);
+    const overdueMine = db.prepare(`SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
+      FROM visits v WHERE v.completed=0 AND v.due<? AND ${mine} ORDER BY v.due LIMIT 20`).all(today, user.coach_id, user.coach_id);
+    const dueSoonMine = db.prepare(`SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
+      FROM visits v WHERE v.completed=0 AND v.due>=? AND v.due<=? AND ${mine} ORDER BY v.due LIMIT 20`).all(today, plus30, user.coach_id, user.coach_id);
+    const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.completed_on
+      FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id=? AND COALESCE(v.completed_on, v.due)>=?
+      AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL) ORDER BY v.completed_on DESC LIMIT 20`).all(user.coach_id, cut30);
+    return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes });
+  }
+
+  const teamFilter = user.role === 'lead' ? user.team : null;
+  const tf = teamFilter ? ` AND v.team=?` : '';
+  const tArgs = teamFilter ? [teamFilter] : [];
+  // Overdue with NO plan — the actual fires. Late-but-scheduled is a separate, calmer list.
+  const overdueNoPlan = db.prepare(`SELECT v.id, v.client, v.client_id, v.team, v.program, v.cycle, v.due
+    FROM visits v WHERE v.completed=0 AND v.cal_week IS NULL AND v.due<?${tf} ORDER BY v.due LIMIT 100`).all(today, ...tArgs);
+  const lateOnCalendar = db.prepare(`SELECT COUNT(*) c FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND v.due<?${tf}`).get(today, ...tArgs).c;
+  const dueSoonUnscheduled = db.prepare(`SELECT v.id, v.client, v.client_id, v.team, v.program, v.cycle, v.due
+    FROM visits v WHERE v.completed=0 AND v.cal_week IS NULL AND v.due>=? AND v.due<=?${tf} ORDER BY v.due LIMIT 100`).all(today, plus30, ...tArgs);
+  // At-risk: active paying visit-clients with nothing recent and nothing planned.
+  let atRisk = db.prepare(`SELECT cl.id, cl.name, cl.assigned_coach_id
+    FROM clients cl WHERE cl.status='active' AND cl.deleted_at IS NULL
+    AND EXISTS(SELECT 1 FROM contracts k WHERE k.client_id=cl.id AND k.status='active' AND k.program!='Coaching Only')
+    AND NOT EXISTS(SELECT 1 FROM visits v WHERE v.client_id=cl.id AND v.completed=1 AND COALESCE(v.completed_on, v.due)>=?)
+    AND NOT EXISTS(SELECT 1 FROM visits v WHERE v.client_id=cl.id AND v.completed=0 AND v.cal_week IS NOT NULL)
+    ORDER BY cl.name LIMIT 50`).all(cut60);
+  if(teamFilter){
+    const teamCoachIds = new Set(db.prepare('SELECT id FROM coaches WHERE team=?').all(teamFilter).map(r=>r.id));
+    atRisk = atRisk.filter(c => c.assigned_coach_id && teamCoachIds.has(c.assigned_coach_id));
+  }
+  const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.completed_on, v.completed_by_coach_id
+    FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id IS NOT NULL AND COALESCE(v.completed_on, v.due)>=?${tf}
+    AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL) ORDER BY v.completed_on DESC LIMIT 50`).all(cut30, ...tArgs);
+  const holdsExpiring = db.prepare(`SELECT id, name, coach_id, expires FROM prospect_holds
+    WHERE status='active' AND expires IS NOT NULL AND expires<=? ORDER BY expires LIMIT 20`).all(plus14)
+    .filter(h => { if(!teamFilter) return true; const c = getCoach(h.coach_id); return c && c.team === teamFilter; });
+  const pendingCount = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending'").get().c;
+  const completedThisMonth = db.prepare(`SELECT COUNT(*) c FROM visits v WHERE v.completed=1 AND COALESCE(v.completed_on,v.due) LIKE ?${tf}`)
+    .get(today.slice(0,7)+'%', ...tArgs).c;
+  send(res, 200, { role: user.role, team: teamFilter, overdueNoPlan, lateOnCalendar, dueSoonUnscheduled, atRisk, missingNotes, holdsExpiring, pendingCount, completedThisMonth });
+});
+
 /* ----- coaches & teams ----- */
 route('POST', /^\/api\/coaches$/, ['admin','lead'], (req, res, m, body, user) => {
   if(!body.name) return err(res, 400, 'name required');
