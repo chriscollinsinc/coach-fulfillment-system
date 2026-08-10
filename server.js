@@ -601,6 +601,7 @@ async function takeBackupAndEmail(actorEmail){
     }catch(e){ results.push({ to, ok: false, error: e.message }); }
   }
   const anyOk = results.some(r => r.ok);
+  if(anyOk) setMeta('last_backup_at', new Date().toISOString());
   log(actorEmail, 'backup.sent', { sizeBytes: gz.length, results });
   return { ok: anyOk, sizeBytes: gz.length, results };
 }
@@ -608,6 +609,26 @@ route('POST', /^\/api\/admin\/backup-now$/, ['admin'], (req, res, m, body, user)
   takeBackupAndEmail(user.email)
     .then(r => send(res, 200, r))
     .catch(e => err(res, 500, 'Backup failed: ' + e.message));
+});
+/* Direct download — a second, independent recovery path that doesn't depend on
+   email deliverability (spam filters, a wrong/missing GMAIL_APP_PASSWORD, etc).
+   Same raw file the emailed backup contains, gzipped, streamed straight down. */
+route('GET', /^\/api\/admin\/backup-download$/, ['admin'], (req, res, m, body, user) => {
+  let raw;
+  try{ raw = fs.readFileSync(DB_PATH); }
+  catch(e){ return err(res, 500, 'Could not read database file: ' + e.message); }
+  const gz = zlib.gzipSync(raw);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  log(user.email, 'backup.downloaded', { sizeBytes: gz.length });
+  res.writeHead(200, {
+    'Content-Type': 'application/gzip',
+    'Content-Disposition': `attachment; filename="coach-fulfillment-backup-${dateStr}.db.gz"`,
+    'Content-Length': gz.length,
+  });
+  res.end(gz);
+});
+route('GET', /^\/api\/admin\/backup-status$/, ['admin'], (req, res, m, body, user) => {
+  send(res, 200, { lastBackupAt: getMeta('last_backup_at') || null, dbPath: DB_PATH });
 });
 
 /* Soft-deleted clients older than this are purged for real — cascades through
@@ -1171,8 +1192,39 @@ server.listen(PORT, () => console.log(`Coach Fulfillment System running → http
 setInterval(() => { try{ ensureCurrentMonthSnapshot(); }catch(e){ console.error('monthly snapshot check failed:', e); } }, 24 * 60 * 60 * 1000);
 
 // Nightly: Keap sync, revenue snapshot, soft-delete purge, DB backup email, admin digest.
-// Runs 24h after boot and every 24h after that — deliberately not pinned to a clock time
-// (no scheduler dependency), which means it'll drift across a restart but always still
-// runs about once a day. Each piece is independently try/caught inside runNightlyMaintenance
-// so one failure (e.g. Keap unreachable) doesn't skip the backup or the others.
-setInterval(() => { runNightlyMaintenance('system.nightly').catch(e => console.error('nightly maintenance failed:', e)); }, 24 * 60 * 60 * 1000);
+// Anchored to a fixed UTC hour rather than "24h after whenever the process happened to
+// boot" — a plain setInterval(24h) can drift for days on a host that redeploys often,
+// since it never actually fires unless the process stays up a full 24h stretch. This
+// recomputes the next occurrence of NIGHTLY_HOUR_UTC on every server start, so a backup
+// runs at roughly the same time daily regardless of how many times the app restarts.
+// Each piece is independently try/caught inside runNightlyMaintenance so one failure
+// (e.g. Keap unreachable) doesn't skip the backup or the others.
+const NIGHTLY_HOUR_UTC = 8; // ~3-4am US Eastern — low traffic
+function msUntilNextNightlyRun(){
+  const now = new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), NIGHTLY_HOUR_UTC, 0, 0));
+  if(next <= now) next.setUTCDate(next.getUTCDate() + 1);
+  return next - now;
+}
+function scheduleNightly(){
+  setTimeout(() => {
+    runNightlyMaintenance('system.nightly').catch(e => console.error('nightly maintenance failed:', e));
+    scheduleNightly();
+  }, msUntilNextNightlyRun());
+}
+scheduleNightly();
+
+// Startup catch-up: if the last successful backup is missing or more than 36 hours old
+// (covers a redeploy that happened to land near the scheduled time and pushed it back a
+// day), send one immediately instead of silently going up to a full day without a fresh
+// backup on record.
+(async () => {
+  const last = getMeta('last_backup_at');
+  const staleMs = 36 * 60 * 60 * 1000;
+  if(!last || (Date.now() - new Date(last).getTime()) > staleMs){
+    try{
+      const r = await takeBackupAndEmail('system.startup_catchup');
+      console.log('Startup catch-up backup:', r.ok ? `sent (${Math.round((r.sizeBytes||0)/1024)} KB)` : 'FAILED — ' + (r.error||'see results'));
+    }catch(e){ console.error('Startup catch-up backup failed:', e.message); }
+  }
+})();

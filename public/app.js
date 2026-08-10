@@ -97,25 +97,37 @@ function render(){
   }
   const views = {};
   const r = D.user.role;
+  const hasPending = (r==='admin'||r==='lead');
   if(r!=='coach'){ views.dashboard='Dashboard'; }
-  if(r==='admin'||r==='lead'){
-    views.board='Schedule Board';
-    const n=D.pendingClientCount||0;
-    views.pending = 'Unassigned Clients' + (n?` (${n})`:'');
-  }
+  if(hasPending) views.board='Schedule Board';
   views.inventory = r==='coach' ? 'My Visits' : 'LID Inventory';
-  views.clients='Clients';
+  views.clients='Clients'; // dropdown for admin/lead (Active Clients + Unassigned Clients); plain link otherwise
   views.availability='Availability';
   if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
   if(r==='coach' && D.user.coach_id) views.myprofile='My Profile';
   if(r==='admin') views.admin='Admin';
   views.faq='FAQ';
-  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile') st.view = Object.keys(views)[0];
+  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && !(st.view==='pending'&&hasPending)) st.view = Object.keys(views)[0];
+  const pendingN = D.pendingClientCount||0;
+  const navHtml = Object.entries(views).map(([k,v])=>{
+    if(k==='clients' && hasPending){
+      const open = st.view==='clients'||st.view==='clientprofile'||st.view==='pending';
+      return `<div class="navdrop${open?' open':''}">
+        <button class="${open?'active':''}" onclick="toggleNavDrop(event)">Clients ▾</button>
+        <div class="navdrop-menu">
+          <a onclick="closeNavDrop();go('clients')">Active Clients</a>
+          <a onclick="closeNavDrop();go('pending')">Unassigned Clients${pendingN?` (${pendingN})`:''}</a>
+        </div>
+      </div>`;
+    }
+    const active = st.view===k||(k==='clients'&&st.view==='clientprofile')||(k==='myprofile'&&st.view==='coachprofile'&&st.coachId===D.user.coach_id);
+    return `<button class="${active?'active':''}" onclick="${k==='myprofile'?`openCoachProfile('${D.user.coach_id}')`:`go('${k}')`}">${v}</button>`;
+  }).join('');
   app.innerHTML = `
   <header>
     <img class="logo" src="https://chriscollinsinc.com/wp-content/uploads/2020/03/logo-1.png" onerror="this.style.display='none'" alt="">
     <h1>Coach Fulfillment</h1>
-    <nav>${Object.entries(views).map(([k,v])=>`<button class="${(st.view===k||(k==='clients'&&st.view==='clientprofile')||(k==='myprofile'&&st.view==='coachprofile'&&st.coachId===D.user.coach_id))?'active':''}" onclick="${k==='myprofile'?`openCoachProfile('${D.user.coach_id}')`:`go('${k}')`}">${v}</button>`).join('')}</nav>
+    <nav>${navHtml}</nav>
     <div class="userchip" style="display:flex;align-items:center;gap:8px">
       ${avatarHtml(D.user.name, D.user.team, 30)}
       <span>${esc(D.user.name)} · ${D.user.role}${D.user.team?' · '+D.user.team:''}<br>
@@ -132,10 +144,13 @@ function render(){
   if(st.view==='coachprofile'){ m.innerHTML='<div class="panel">Loading…</div>'; loadCoachProfile(st.coachId); }
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
-  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); loadDeletedClients(); loadRevenueHistory(); loadFormerCoaches(); }
+  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); loadDeletedClients(); loadRevenueHistory(); loadFormerCoaches(); loadBackupStatus(); }
   if(st.view==='faq') m.innerHTML=faqView();
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
+function toggleNavDrop(e){ e.stopPropagation(); const el=e.currentTarget.parentElement; document.querySelectorAll('.navdrop.open').forEach(x=>{ if(x!==el) x.classList.remove('open'); }); el.classList.toggle('open'); }
+function closeNavDrop(){ document.querySelectorAll('.navdrop.open').forEach(x=>x.classList.remove('open')); }
+document.addEventListener('click', closeNavDrop);
 async function logout(){ await api('POST','/api/logout'); D=null; render(); }
 function pwDlg(){
   openDlg(`<h3>Change password</h3>
@@ -1131,7 +1146,7 @@ const FAQ = [
     { q: 'Can I change someone\'s login email later?', a: `Yes — Admin → Users → Edit lets you change name, email, role, team, and coach link after the account exists. Changing the email only changes how they log in; it doesn't rewrite anything already recorded under their old address in notes, audit logs, or Keap sync history.` },
   ]},
   { cat: 'Backups & data', roles: ['admin'], items: [
-    { q: 'Is the database backed up automatically?', a: `Yes — a nightly job emails a backup attachment to admins, alongside a Keap sync pass and the day's revenue snapshot. You can also trigger it on demand from Admin → Backups & nightly maintenance.` },
+    { q: 'Is the database backed up automatically, and where is it saved?', a: `Yes — every night (~3-4am Eastern) the app emails every admin a gzipped copy of the actual database file, alongside a Keap sync pass and the day's revenue snapshot. There's no separate storage location on the server itself (the hosting disk isn't persistent across deploys), so that emailed file — or the "Download backup now" button on Admin → Backups & nightly maintenance — is the real backup. Save a copy somewhere you control (a shared drive, etc.) if you want a copy that doesn't depend on email. To restore: gunzip it and replace the running server's database file, then restart the app. Admin → Backups shows the timestamp of the last successful backup so you can confirm at a glance it's actually running.` },
     { q: 'Where can I see revenue trending over time, not just today\'s snapshot?', a: `Admin → Revenue history — one row per day captured automatically, so drift toward or away from Keap shows up as a trend rather than a single point-in-time number.` },
     { q: 'Can I export the client/inventory list?', a: `Yes — the LID Inventory page has a CSV export that respects whatever filters you currently have applied.` },
   ]},
@@ -1187,10 +1202,13 @@ function adminView(){
   board on purpose — clear or reassign them from the Inventory screen once you've confirmed.</p>
   <div id="cancelledOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Backups &amp; nightly maintenance</h2>
-  <p class="small" style="margin-bottom:12px">Every night the app checks Keap-linked contracts for drift, snapshots the revenue total, purges any client past its 30-day
-  delete window, and emails every admin a full database backup plus a summary — overdue visits, stale Pending Clients items, and whether the backup went out.
-  Use the button below to run all of that right now instead of waiting for it, or just to get a backup on demand.</p>
-  <div class="controls"><button class="btn" id="backupNowBtn" onclick="backupNow()">Backup now</button>
+  <p class="small" style="margin-bottom:12px">Every night (around 3-4am Eastern) the app checks Keap-linked contracts for drift, snapshots the revenue total, purges any client past its 30-day
+  delete window, and emails every admin a full database backup (a gzipped copy of the actual database file) plus a summary — overdue visits, stale Pending Clients items, and whether the backup went out.
+  There's no separate storage location — the emailed attachment (or a direct download below) <b>is</b> the backup; save a copy of it somewhere you control if you want a copy outside of email.
+  To restore: gunzip the file and replace the running server's database file, then restart the app.</p>
+  <p class="small" id="lastBackupOut">Checking last backup time…</p>
+  <div class="controls"><button class="btn" id="backupNowBtn" onclick="backupNow()">Email backup now</button>
+  <button class="btn" onclick="window.location='/api/admin/backup-download'">Download backup now</button>
   <button class="btn" id="nightlyNowBtn" onclick="runNightlyNow()">Run full nightly check now</button></div>
   <div id="maintenanceOut" class="small"></div></div>
   <div class="panel"><h2>Revenue history</h2>
@@ -1291,6 +1309,14 @@ async function loadAudit(){
       rows.map(r=>`<tr><td class="mono small">${r.ts.slice(0,16).replace('T',' ')}</td><td>${esc(r.user)}</td><td>${esc(r.action)}</td><td class="small">${esc(r.detail).slice(0,120)}</td></tr>`).join('')+`</table>`;
   }catch(e){}
 }
+async function loadBackupStatus(){
+  try{
+    const r = await api('GET','/api/admin/backup-status');
+    $('#lastBackupOut').innerHTML = r.lastBackupAt
+      ? `Last successful backup: <b>${r.lastBackupAt.slice(0,16).replace('T',' ')} UTC</b>`
+      : `<span style="color:var(--bad)">No successful backup on record yet.</span>`;
+  }catch(e){ $('#lastBackupOut').textContent = 'Could not check last backup time.'; }
+}
 async function backupNow(){
   const btn=$('#backupNowBtn'); if(btn){btn.disabled=true;btn.textContent='Sending…';}
   try{
@@ -1298,8 +1324,9 @@ async function backupNow(){
     $('#maintenanceOut').innerHTML = r.ok
       ? `<p>Backup sent (${Math.round((r.sizeBytes||0)/1024)} KB) to: ${esc((r.results||[]).filter(x=>x.ok).map(x=>x.to).join(', ')||'—')}</p>`
       : `<p>Backup failed: ${esc(r.error||(r.results||[]).map(x=>x.error).filter(Boolean).join('; ')||'unknown error')}</p>`;
+    await loadBackupStatus();
   }catch(e){ $('#maintenanceOut').innerHTML = `<p>Backup failed: ${esc(e.message||e)}</p>`; }
-  finally{ if(btn){btn.disabled=false;btn.textContent='Backup now';} }
+  finally{ if(btn){btn.disabled=false;btn.textContent='Email backup now';} }
 }
 async function runNightlyNow(){
   const btn=$('#nightlyNowBtn'); if(btn){btn.disabled=true;btn.textContent='Running…';}
@@ -1313,7 +1340,7 @@ async function runNightlyNow(){
       `Digest emailed to ${r.digestSentTo||0} of ${r.digestAttempted||0} admin(s).`,
     ];
     $('#maintenanceOut').innerHTML = `<ul style="margin:0;padding-left:18px">${lines.map(l=>`<li>${l}</li>`).join('')}</ul>`;
-    await loadRevenueHistory(); await loadDeletedClients();
+    await loadRevenueHistory(); await loadDeletedClients(); await loadBackupStatus();
   }catch(e){ $('#maintenanceOut').innerHTML = `<p>Run failed: ${esc(e.message||e)}</p>`; }
   finally{ if(btn){btn.disabled=false;btn.textContent='Run full nightly check now';} }
 }
