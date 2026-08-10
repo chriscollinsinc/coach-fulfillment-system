@@ -579,7 +579,6 @@ function availabilityView(){
       <input type="checkbox" id="aFar" style="width:auto" ${st.due2027?'checked':''}> include unplanned months (2027+)</label>
     <button class="btn primary" onclick="runAvail()">Check availability</button>
   </div><div id="aOut"></div></div>
-  <div class="panel" id="previewPanel" style="display:none"></div>
   <div class="panel"><h2>Open capacity by month</h2><div id="capOut"></div></div>
   <div class="panel"><h2>Active soft-pencil holds</h2>
   <p class="small" style="margin-bottom:8px">Tentative launch-date placeholders — reserve a coach's calendar for a prospect before the contract's signed, so nobody double-books that window. Release a hold to free those weeks back up.</p>
@@ -629,7 +628,7 @@ function runAvail(){
   }
   html+=`<p class="small" style="margin-top:8px">Planning horizon: through ${fmt(horizon)}. ${st.due2027?'Months past the current plan read as fully open — treat those as estimates.':'Check the box above to look into 2027 (not yet planned).'}</p>`;
   $('#aOut').innerHTML=html;
-  $('#previewPanel').style.display='none';
+  closePreviewOverlay();
   loadSoftHolds();
   let cb='';
   for(const [y,m] of rolling12()){
@@ -652,11 +651,17 @@ function previewAvailCoach(i){
   const r = (st.availResults||[])[i]; if(!r) return;
   st.previewResult = r; st.previewDays = st.previewDays || 90;
   renderPreviewPanel();
+  $('#previewOverlay').classList.add('show');
+  document.body.style.overflow='hidden';
+}
+function closePreviewOverlay(){
+  const ov = $('#previewOverlay'); if(ov) ov.classList.remove('show');
+  document.body.style.overflow='';
 }
 function setPreviewWindow(days){ st.previewDays = days; renderPreviewPanel(); }
 function renderPreviewPanel(){
   const r = st.previewResult; if(!r) return;
-  const panel = $('#previewPanel'); panel.style.display='';
+  const panel = $('#previewOverlay');
   const { coach, plan } = r;
   const lastSeqWeek = plan.seq[plan.seq.length-1];
   const minEnd = addDays(plan.start, st.previewDays);
@@ -679,12 +684,16 @@ function renderPreviewPanel(){
     }
     rows+=`<tr><td class="mono">${fmtW(w)}</td><td><div class="${cls}" style="min-height:36px;padding:4px 8px">${label}</div></td><td class="small">${detail}</td></tr>`;
   });
-  panel.innerHTML = `<h2>${esc(coach.name)}'s calendar — Team ${esc(coach.team)}</h2>
+  panel.innerHTML = `<div class="previewbar">
+      <button class="btn tiny" onclick="closePreviewOverlay()">← Back to results</button>
+      <h2>${esc(coach.name)}'s calendar — Team ${esc(coach.team)}</h2>
+      <span class="small" style="margin-left:auto">Showing ${fmt(weeks[0])} – ${fmt(weeks[weeks.length-1])}</span>
+    </div>
+    <div class="previewbody">
     <div class="controls" style="margin-bottom:8px">
       <label style="margin:0">Window</label>
       <button class="btn tiny ${st.previewDays===60?'primary':''}" onclick="setPreviewWindow(60)">60 days</button>
       <button class="btn tiny ${st.previewDays===90?'primary':''}" onclick="setPreviewWindow(90)">90 days</button>
-      <span class="small" style="margin-left:auto">Showing ${fmt(weeks[0])} – ${fmt(weeks[weeks.length-1])}</span>
     </div>
     <div class="legend" style="margin-bottom:8px">
       <span><i style="background:#fffaf0;border:1px dashed var(--gold)"></i>Suggested visit</span>
@@ -692,12 +701,14 @@ function renderPreviewPanel(){
       <span><i style="background:var(--open);border:1px dashed var(--openb)"></i>Open</span>
       <span><i style="background:#fdf6e3;border:1px dashed var(--gold)"></i>Soft pencil hold</span>
     </div>
-    <div style="max-height:60vh;overflow-y:auto"><table><tr><th>Week of</th><th>Status</th><th>Detail</th></tr>${rows}</table></div>
-    <div class="controls" style="margin-top:12px">
+    <div class="panel"><table><tr><th>Week of</th><th>Status</th><th>Detail</th></tr>${rows}</table></div>
+    <div class="panel">
+    <div class="controls">
       <label style="margin:0">Prospect / launch label</label><input id="softHoldLabel" placeholder="e.g. Acme Motors — Launch" style="min-width:220px">
       <button class="btn primary" onclick="placeSoftHold(${(st.availResults||[]).indexOf(r)})">Place soft pencil hold</button>
     </div>
-    <p class="small" style="margin-top:6px">Reserves ${esc(coach.name)}'s ${plan.seq.length} suggested week(s) as tentative — visible to everyone on the Schedule Board, and blocked from being double-booked — without creating a real client or contract. Once the deal actually signs, release the hold (Availability → Active soft-pencil holds) for those weeks, then place the real visit on the Schedule Board.</p>`;
+    <p class="small" style="margin-top:6px">Reserves ${esc(coach.name)}'s ${plan.seq.length} suggested week(s) as tentative — visible to everyone on the Schedule Board, and blocked from being double-booked — without creating a real client or contract. Once the deal actually signs, use "Convert to client" from Availability → Active soft-pencil holds to open the New Contract form pre-filled, then place the real visits on the freed-up weeks.</p>
+    </div></div>`;
 }
 async function placeSoftHold(i){
   const r = (st.availResults||[])[i]; if(!r) return;
@@ -727,7 +738,8 @@ function loadSoftHolds(){
     list.map(h=>{ const c=coach(h.coachId); const sorted=h.weeks.slice().sort();
       return `<tr><td><b>${esc(h.label||'(no label)')}</b></td><td>${esc(c?c.name:h.coachId)}</td><td>${esc(c?c.team:'—')}</td>
       <td>${sorted.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td>
-      <td><button class="btn tiny danger" onclick="releaseSoftHold('${h.coachId}','${esc(h.label).replace(/'/g,"\\'")}')">Release</button></td></tr>`;
+      <td><button class="btn tiny primary" onclick="convertHoldToClient('${h.coachId}','${esc(h.label).replace(/'/g,"\\'")}')">Convert to client</button>
+      <button class="btn tiny danger" onclick="releaseSoftHold('${h.coachId}','${esc(h.label).replace(/'/g,"\\'")}')">Release</button></td></tr>`;
     }).join('') + `</table>` : `<p class="small">No soft-pencil holds currently placed.</p>`;
 }
 async function releaseSoftHold(coachId, label){
@@ -736,8 +748,30 @@ async function releaseSoftHold(coachId, label){
   for(const w of weeks){ await api('PUT','/api/blocks',{coach:coachId, week:w, kind:'open'}); }
   await refresh();
   loadSoftHolds();
-  if(st.view==='availability') renderPreviewPanel();
+  if(st.view==='availability' && st.previewResult) renderPreviewPanel();
   toast('Hold released — weeks are open again');
+}
+/* Turning a soft pencil into a "hard pencil": a soft-pencil hold is purely a calendar
+   placeholder — it never touches clients, contracts, or Keap. The actual conversion is
+   the same path every other new client takes: a real Keap subscription (via a webhook
+   landing in Unassigned Clients, or a manually-added contract here) creates the real
+   contract + visits, which is what makes it show up in LID Inventory and reconcile
+   against Keap the normal way. This just removes the placeholder and pre-fills that
+   normal New Contract form so the transition is one click instead of hunting down which
+   weeks were reserved. */
+async function convertHoldToClient(coachId, label){
+  const weeks = (D.blocks||[]).filter(b=>b.coach_id===coachId && b.kind==='soft_pencil' && (b.label||'')===label).map(b=>b.week).sort();
+  const c = coach(coachId);
+  if(!confirm(`Convert "${label}"? This releases ${weeks.length} held week(s) on ${c?c.name:coachId}'s calendar and opens the New Contract form pre-filled — you'll place the real visits on those freed-up weeks afterward from the Schedule Board.`)) return;
+  for(const w of weeks){ await api('PUT','/api/blocks',{coach:coachId, week:w, kind:'open'}); }
+  await refresh();
+  loadSoftHolds();
+  closePreviewOverlay();
+  contractDlg();
+  $('#cName').value = label;
+  if(c){ $('#cTeam').value = c.team; }
+  if(weeks.length) $('#cFirst').value = weeks[0];
+  toast(`${weeks.length} week(s) freed up on ${c?c.name:coachId}'s calendar — finish creating the contract, then place the visits on those same weeks.`);
 }
 
 /* ---------- pending clients (new Keap subscriptions awaiting team assignment) ---------- */
@@ -1228,6 +1262,12 @@ const FAQ = [
     { q: 'Who can mark a visit complete?', a: `Only the coach who scheduled it (they're listed as the calendar coach for that slot) or the coach permanently assigned to that client. An admin or lead can complete any visit on their team. This is checked on the server every time — a coach can't complete a visit for a store that isn't theirs, even by editing the request.` },
     { q: 'What happens to the note I add when completing a visit?', a: `It's saved to that client's Notes tab and tagged to the specific visit it documents — you'll see the visit's due date and program show up next to it automatically. That link is set only by the complete step itself, so it can't be edited onto a different visit later.` },
     { q: 'I completed a visit by mistake — can I undo it?', a: `Admins and leads can reopen a completed visit from the Inventory page, which clears its completed status. The note you logged (if any) stays on the client's record either way.` },
+  ]},
+  { cat: 'Availability & soft pencil holds', roles: ['admin','lead','sales'], items: [
+    { q: 'What is a soft pencil hold?', a: `A tentative calendar placeholder — nothing else. Placing one from the Availability page's "Preview calendar" reserves specific weeks on a coach's schedule for a prospect (before they've signed), so nobody else can double-book those weeks. It never creates a client, contract, or anything Keap sees. It's identical to the other calendar block types (Home, Off, Training, etc.) under the hood, just labeled with the prospect's name.` },
+    { q: 'Does a soft pencil hold show up in LID Inventory or get billed?', a: `No. It's calendar-only. Nothing appears in LID Inventory, no revenue is counted, and Keap never hears about it. That only happens once the deal actually signs and becomes a real contract.` },
+    { q: 'The deal signed — how do I turn a soft pencil into the real thing?', a: `From Availability → Active soft-pencil holds, click "Convert to client." That releases the held weeks and opens the same New Contract form used everywhere else in the app, pre-filled with the prospect's name and the coach's team. Finish the form the normal way (program, visit count, first visit date), then place the visits on the same weeks from the Schedule Board. From that point on it's a completely normal contract — reconciled against Keap exactly like any other client (see "Client notes & Keap" below), with no special soft-pencil residue anywhere.` },
+    { q: 'What if the deal falls through?', a: `Click "Release" instead of "Convert to client" on Active soft-pencil holds — the weeks go back to fully open, nothing else to clean up.` },
   ]},
   { cat: 'Client notes & Keap', roles: ['admin','lead'], items: [
     { q: 'Can I pull a client\'s historical notes out of Keap?', a: `Yes — open a client's profile and click "Import from Keap…" (only shows up if the client has a linked Keap company ID). It fetches that client's Keap notes, filters out system/sales noise automatically, and shows you the real candidates to review before anything is saved. You pick which ones actually come in; nothing imports without that review step.` },
