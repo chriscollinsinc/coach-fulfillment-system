@@ -1645,7 +1645,21 @@ function adminPeopleView(){
     });
     html+=`</table>`;
   }
-  html+=`</div><div class="panel"><h2>Former coaches</h2>
+  // Onboarding: which coaches can actually sign in? One row per active coach, with
+  // a one-click SSO account creator for the ones who can't yet.
+  html+=`</div><div class="panel"><h2>Coach sign-in accounts</h2>
+  <p class="small" style="margin-bottom:8px">Every coach needs a user account with their real work email before Google sign-in works for them.
+  Type the email and click Create — no password needed, they'll use the Google button. Their view of the app is automatically scoped to their own visits and stores.</p>
+  <table><tr><th>Coach</th><th>Team</th><th>Sign-in account</th><th></th></tr>`;
+  for(const c of D.coaches){
+    const u = (D.users||[]).find(u=>u.coach_id===c.id && u.active);
+    html += `<tr><td style="display:flex;align-items:center;gap:8px">${avatarHtml(c.name,c.team,24)}<b>${esc(c.name)}</b></td><td>${esc(c.team)}</td>` +
+      (u ? `<td><span class="pill p-done">✓</span> <span class="mono small">${esc(u.email)}</span></td><td></td>`
+         : `<td><input id="obEmail-${esc(c.id)}" placeholder="their @chriscollinsinc.com email" style="width:250px" onkeydown="if(event.key==='Enter')createCoachAccount('${esc(c.id)}')"></td>
+            <td><button class="btn tiny primary" onclick="createCoachAccount('${esc(c.id)}')">Create SSO account</button></td>`) + `</tr>`;
+  }
+  html+=`</table></div>`;
+  html+=`<div class="panel"><h2>Former coaches</h2>
   <p class="small" style="margin-bottom:8px">Deactivated coaches — their profile, visit history, and notes stay fully browsable, they're just no longer scheduled for new work.</p>
   <div id="formerCoachesOut" class="small">Loading…</div></div>`;
   html+=`<div class="panel"><h2>Users</h2>
@@ -1780,14 +1794,24 @@ function userDlg(){
     <label>Role</label><select id="uRole"><option>lead</option><option>sales</option><option>coach</option><option>admin</option></select>
     <label>Team (for leads)</label><select id="uTeam"><option value=""></option>${D.teams.map(t=>`<option>${t}</option>`).join('')}</select>
     <label>Coach link (for coach role)</label><select id="uCoach"><option value=""></option>${D.coaches.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
-    <label>Temporary password</label><input id="uPw" value="Welcome!${Math.floor(1000+Math.random()*9000)}">
+    <label>Temporary password — leave blank for Google sign-in only</label><input id="uPw" placeholder="blank = they sign in with the Google button">
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveUser()">Create</button></div>`);
 }
 async function saveUser(){
-  await api('POST','/api/users',{name:$('#uName').value,email:$('#uEmail').value,role:$('#uRole').value,
-    team:$('#uTeam').value||null,coach_id:$('#uCoach').value||null,password:$('#uPw').value});
-  closeDlg(); await refresh(); toast('User created — send them their temporary password');
+  const pw = $('#uPw').value;
+  const r = await api('POST','/api/users',{name:$('#uName').value,email:$('#uEmail').value,role:$('#uRole').value,
+    team:$('#uTeam').value||null,coach_id:$('#uCoach').value||null,password:pw||undefined});
+  closeDlg(); await refresh();
+  toast(r.ssoOnly ? 'Account created — they sign in with the Google button using that email' : 'User created — send them their temporary password');
+}
+async function createCoachAccount(coachId){
+  const c = D.coaches.find(x=>x.id===coachId); if(!c) return;
+  const email = ($('#obEmail-'+CSS.escape(coachId))||{value:''}).value.trim();
+  if(!email || !/^\S+@\S+\.\S+$/.test(email)){ uiAlert('Enter a valid email address first.'); return; }
+  await api('POST','/api/users',{ name: c.name, email, role: 'coach', team: c.team, coach_id: c.id });
+  await refresh();
+  toast(`${c.name} can now sign in with Google using ${email}`);
 }
 function resetPwDlg(id,name){
   openDlg(`<h3>Reset password — ${name}</h3><label>New password</label><input id="rPw" value="Welcome!${Math.floor(1000+Math.random()*9000)}">

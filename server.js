@@ -683,13 +683,18 @@ route('DELETE', /^\/api\/teams\/([^/]+)$/, ['admin'], (req, res, m, body, user) 
 /* ----- users (admin) ----- */
 route('POST', /^\/api\/users$/, ['admin'], (req, res, m, body, user) => {
   const { email, name, role, team, coach_id, password } = body;
-  if(!email || !name || !role || !password) return err(res, 400, 'email, name, role, password required');
+  if(!email || !name || !role) return err(res, 400, 'email, name, role required');
+  if(!/^\S+@\S+\.\S+$/.test(String(email))) return err(res, 400, 'bad email');
+  // Password is optional: leave it blank to create a Google-sign-in-only account.
+  // The stored sentinel can never match checkPw's salt:hash format, so password
+  // login is structurally impossible for these accounts until an admin sets one.
+  const pw = password ? hashPw(String(password)) : 'sso-only';
   try{
     db.prepare('INSERT INTO users(email,name,pw,role,team,coach_id) VALUES(?,?,?,?,?,?)')
-      .run(email.toLowerCase().trim(), name.trim(), hashPw(password), role, team || null, coach_id || null);
+      .run(email.toLowerCase().trim(), name.trim(), pw, role, team || null, coach_id || null);
   }catch(e){ return err(res, 400, 'email already exists'); }
-  log(user.email, 'user.add', { email, role, team });
-  send(res, 200, { ok: true });
+  log(user.email, 'user.add', { email, role, team, ssoOnly: !password });
+  send(res, 200, { ok: true, ssoOnly: !password });
 });
 route('PATCH', /^\/api\/users\/(\d+)$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const target = +m[1];
