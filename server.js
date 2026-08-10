@@ -630,6 +630,47 @@ route('POST', /^\/api\/teams$/, ['admin'], (req, res, m, body, user) => {
   log(user.email, 'team.add', t);
   send(res, 200, { ok: true });
 });
+/* Rename a team everywhere at once. Team names are plain strings on coaches,
+   visits, and users (there's no team id), so a rename has to cascade through all
+   three plus the meta list in one transaction — a partial rename would strand
+   coaches on a team that no longer exists in the list. */
+route('PATCH', /^\/api\/teams\/rename$/, ['admin'], (req, res, m, body, user) => {
+  const from = String(body.from || '').trim();
+  const to = String(body.to || '').trim();
+  const teams = JSON.parse(getMeta('teams') || '[]');
+  if(!teams.includes(from)) return err(res, 404, 'no such team');
+  if(!to) return err(res, 400, 'new name required');
+  if(teams.includes(to)) return err(res, 400, `"${to}" already exists — to merge two teams, move the coaches over and delete the empty one instead`);
+  db.exec('BEGIN');
+  try{
+    const nCoaches = db.prepare('UPDATE coaches SET team=? WHERE team=?').run(to, from).changes;
+    const nVisits = db.prepare('UPDATE visits SET team=? WHERE team=?').run(to, from).changes;
+    const nUsers = db.prepare('UPDATE users SET team=? WHERE team=?').run(to, from).changes;
+    setMeta('teams', JSON.stringify(teams.map(t => t === from ? to : t)));
+    db.exec('COMMIT');
+    log(user.email, 'team.rename', { from, to, nCoaches, nVisits, nUsers });
+    send(res, 200, { ok: true, nCoaches, nVisits, nUsers });
+  }catch(e){ db.exec('ROLLBACK'); err(res, 500, 'Rename failed: ' + e.message); }
+});
+/* Delete only ever allowed on an empty team — no coaches (active or former), no
+   users, no open visits. History on completed visits keeps the old team string,
+   which is correct: that's what the team was called when the work happened. */
+route('DELETE', /^\/api\/teams\/([^/]+)$/, ['admin'], (req, res, m, body, user) => {
+  const t = decodeURIComponent(m[1]);
+  const teams = JSON.parse(getMeta('teams') || '[]');
+  if(!teams.includes(t)) return err(res, 404, 'no such team');
+  const blockers = [];
+  const nCoaches = db.prepare('SELECT COUNT(*) c FROM coaches WHERE team=? AND active=1').get(t).c;
+  const nUsers = db.prepare('SELECT COUNT(*) c FROM users WHERE team=? AND active=1').get(t).c;
+  const nOpen = db.prepare('SELECT COUNT(*) c FROM visits WHERE team=? AND completed=0').get(t).c;
+  if(nCoaches) blockers.push(`${nCoaches} active coach(es)`);
+  if(nUsers) blockers.push(`${nUsers} active user(s)`);
+  if(nOpen) blockers.push(`${nOpen} open visit(s)`);
+  if(blockers.length) return err(res, 409, `Can't delete "${t}" — it still has ${blockers.join(', ')}. Move or deactivate them first.`);
+  setMeta('teams', JSON.stringify(teams.filter(x => x !== t)));
+  log(user.email, 'team.delete', t);
+  send(res, 200, { ok: true });
+});
 
 /* ----- users (admin) ----- */
 route('POST', /^\/api\/users$/, ['admin'], (req, res, m, body, user) => {

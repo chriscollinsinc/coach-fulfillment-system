@@ -1619,7 +1619,10 @@ function adminPeopleView(){
     <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
   for(const t of D.teams){
     const members=D.coaches.filter(c=>c.team===t);
-    html+=`<h3>Team ${t} (${members.length})</h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th></th></tr>`;
+    html+=`<h3 style="display:flex;align-items:center;gap:8px">Team ${esc(t)} (${members.length})
+      <button class="btn tiny" onclick="renameTeamDlg('${esc(t).replace(/'/g,"\\'")}')">Rename</button>
+      ${members.length?'':`<button class="btn tiny danger" onclick="deleteTeam('${esc(t).replace(/'/g,"\\'")}')">Delete</button>`}
+    </h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th></th></tr>`;
     members.forEach(c=>{
       const fv=D.visits.filter(v=>!v.completed&&v.cal_coach===c.id&&v.cal_week>=TODAY).length;
       html+=`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--ink);text-decoration:none;display:flex;align-items:center;gap:8px">${avatarHtml(c.name,c.team,26)}<b style="text-decoration:underline;color:var(--primary)">${esc(c.name)}</b></a></td><td class="num">${fv}</td>
@@ -1726,6 +1729,30 @@ async function saveCoach(){ const n=$('#kName').value.trim(); if(!n){uiAlert('Na
   await api('POST','/api/coaches',{name:n,team:$('#kTeam').value}); closeDlg(); await refresh(); toast(n+' added — their weeks are open capacity'); }
 async function moveCoach(id,team){ if(!team) return; await api('PATCH','/api/coaches/'+id,{team}); await refresh(); toast('Moved'); }
 function removeCoach(id,name){ coachDeactivateDlg(id,name); }
+function renameTeamDlg(from){
+  openDlg(`<h3>Rename Team ${esc(from)}</h3>
+    <p class="small">The new name replaces "${esc(from)}" everywhere at once — every coach, user, visit, and board reference moves with it. Nothing else changes.</p>
+    <label>New team name</label><input id="rtName" value="${esc(from)}">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="doRenameTeam('${esc(from).replace(/'/g,"\\'")}')">Rename</button></div>`);
+}
+async function doRenameTeam(from){
+  const to = $('#rtName').value.trim();
+  if(!to){ uiAlert('Enter the new team name.'); return; }
+  if(to === from){ closeDlg(); return; }
+  const r = await api('PATCH','/api/teams/rename',{ from, to });
+  closeDlg();
+  if(st.boardTeam === from) st.boardTeam = to;
+  await refresh();
+  toast(`Team renamed — ${r.nCoaches} coach(es), ${r.nUsers} user(s), and ${r.nVisits} visit(s) moved to "${to}"`);
+}
+async function deleteTeam(t){
+  if(!(await uiConfirm(`Delete Team ${t}? Only allowed while it's completely empty — the app will refuse if any coaches, users, or open visits still reference it.`,'Delete'))) return;
+  await api('DELETE','/api/teams/'+encodeURIComponent(t));
+  if(st.boardTeam === t) st.boardTeam = null;
+  await refresh();
+  toast(`Team ${t} deleted`);
+}
 function teamDlg(){
   openDlg(`<h3>Add team</h3><label>Team name</label><input id="tName">
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
