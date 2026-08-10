@@ -448,6 +448,11 @@ function todayCoachView(t){
   return html;
 }
 
+const healthDot = cid => {
+  const h = cid && D.clientHealth ? D.clientHealth[cid] : null;
+  return h==='at_risk' ? '<span title="Client at risk — see their profile" style="color:var(--bad);font-size:11px">● </span>'
+    : h==='behind' ? '<span title="Client behind — see their profile" style="color:var(--warn);font-size:11px">● </span>' : '';
+};
 /* ---------- schedule board ---------- */
 function board(){
   const t=st.boardTeam, y=st.boardY, m=st.boardM;
@@ -493,7 +498,7 @@ function board(){
         else if(canEdit() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= v.completed?' s-done':' s-visit';
-        inner=`<b>${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>`;
+        inner=`<b>${v.completed?'':healthDot(v.client_id)}${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>`;
         if(canEdit()) click=` onclick="st.detail=${v.id};st.placing=null;render()"`;
       } else {
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
@@ -509,7 +514,8 @@ function board(){
   <div class="legend"><span><i style="background:var(--visit)"></i>Visit</span><span><i style="background:var(--done)"></i>Completed</span>
     <span><i style="background:var(--open);border:1px dashed var(--openb)"></i>Open</span><span><i style="background:var(--launch)"></i>Launch slot</span>
     <span><i style="background:#e2f0f0"></i>Mills</span><span><i style="background:var(--offc)"></i>Blocked (home/off/etc.)</span></div>
-  <p class="small">Click a visit to manage it · click an open or blocked week to set Home/Off/Training/etc.</p>
+  <p class="small">Click a visit to manage it · click an open or blocked week to set Home/Off/Training/etc. ·
+  <span style="color:var(--bad)">●</span> client at risk · <span style="color:var(--warn)">●</span> client behind — hover a dot for details, open the client's profile for the full story.</p>
   </div>`;
 
   /* side rail */
@@ -530,7 +536,7 @@ function board(){
     if(!list.length) return '';
     let h=`<h2>${title} (${list.length})</h2>`;
     list.slice(0,40).forEach(v=>{
-      h+=`<div class="duecard ${v.due&&v.due<TODAY?'over':''}"><b>${esc(v.client)}</b>
+      h+=`<div class="duecard ${v.due&&v.due<TODAY?'over':''}"><b>${healthDot(v.client_id)}${esc(v.client)}</b>
         <div class="meta">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</div>
         <button class="btn tiny primary" onclick="st.placing=${v.id};st.detail=null;render()">Place on calendar</button></div>`;
     });

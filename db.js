@@ -199,6 +199,11 @@ ensureColumn('coaches', 'start_date', 'TEXT');
    blocks (kind='soft_pencil') are generated FROM these rows and removed when the
    hold is released/converted/expired; the hold row is the source of truth. */
 db.exec(`
+CREATE TABLE IF NOT EXISTS client_health_log(
+  date TEXT NOT NULL,
+  client_id INTEGER NOT NULL,
+  level TEXT NOT NULL,
+  PRIMARY KEY(date, client_id));
 CREATE TABLE IF NOT EXISTS prospect_holds(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,

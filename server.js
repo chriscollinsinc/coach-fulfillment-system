@@ -268,6 +268,7 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
     blocks: db.prepare('SELECT * FROM blocks').all(),
     visits: db.prepare(`SELECT v.*, cl.assigned_coach_id AS client_assigned_coach_id
       FROM visits v LEFT JOIN clients cl ON cl.id = v.client_id`).all(),
+    clientHealth: computeHealthMap(),
   };
   if(user.role === 'admin' || user.role === 'lead'){
     out.pendingClientCount = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending'").get().c;
@@ -825,6 +826,30 @@ function recordRevenueSnapshot(){
   return { totalRevenue, activeClients, keapLinked };
 }
 
+/* Record today's health per client and report movement against the previous
+   snapshot — "who dropped a tier" is the digest line leads actually act on. */
+const HEALTH_RANK = { on_track: 0, behind: 1, at_risk: 2, inactive: -1 };
+function snapshotClientHealth(){
+  const today = new Date().toISOString().slice(0,10);
+  const map = computeHealthMap();
+  const prevDate = db.prepare('SELECT MAX(date) d FROM client_health_log WHERE date < ?').get(today).d;
+  const prev = prevDate ? Object.fromEntries(db.prepare('SELECT client_id, level FROM client_health_log WHERE date=?').all(prevDate).map(r=>[r.client_id, r.level])) : {};
+  const names = Object.fromEntries(db.prepare('SELECT id, name FROM clients WHERE deleted_at IS NULL').all().map(r=>[r.id, r.name]));
+  const dropped = [], improved = [];
+  for(const [id, level] of Object.entries(map)){
+    const was = prev[id];
+    if(!was || was === level || level === 'inactive' || was === 'inactive') continue;
+    if(HEALTH_RANK[level] > HEALTH_RANK[was]) dropped.push(`${names[id] || id}: ${was.replace('_',' ')} → ${level.replace('_',' ')}`);
+    else improved.push(`${names[id] || id}: ${was.replace('_',' ')} → ${level.replace('_',' ')}`);
+  }
+  const ins = db.prepare('INSERT INTO client_health_log(date, client_id, level) VALUES(?,?,?) ON CONFLICT(date, client_id) DO UPDATE SET level=excluded.level');
+  for(const [id, level] of Object.entries(map)) ins.run(today, +id, level);
+  // Keep 90 days of history — enough for trend questions without unbounded growth
+  db.prepare('DELETE FROM client_health_log WHERE date < ?').run(new Date(Date.now()-90*24*60*60*1000).toISOString().slice(0,10));
+  const counts = {};
+  for(const level of Object.values(map)) counts[level] = (counts[level] || 0) + 1;
+  return { counts, dropped, improved, comparedTo: prevDate || null };
+}
 async function runNightlyMaintenance(actorEmail){
   const summary = { startedAt: new Date().toISOString() };
   try{ summary.sync = await keapSyncAllLinkedContracts(actorEmail); }
@@ -835,6 +860,8 @@ async function runNightlyMaintenance(actorEmail){
   catch(e){ summary.purge = { error: String(e && e.message || e) }; }
   try{ summary.holds = sweepProspectHolds(); }
   catch(e){ summary.holds = { error: String(e && e.message || e) }; }
+  try{ summary.health = snapshotClientHealth(); }
+  catch(e){ summary.health = { error: String(e && e.message || e) }; }
   try{ summary.backup = await takeBackupAndEmail(actorEmail); }
   catch(e){ summary.backup = { error: String(e && e.message || e) }; }
 
@@ -858,6 +885,12 @@ async function runNightlyMaintenance(actorEmail){
     if(summary.holds && !summary.holds.error){
       if(summary.holds.expired.length) lines.push(`Prospect holds auto-released (expired): ${summary.holds.expired.join(', ')}`);
       if(summary.holds.expiring.length) lines.push(`Prospect holds expiring within 7 days: ${summary.holds.expiring.join(', ')}`);
+    }
+    if(summary.health && !summary.health.error){
+      const h = summary.health;
+      lines.push('', `Client health: ${h.counts.on_track||0} on track · ${h.counts.behind||0} behind · ${h.counts.at_risk||0} at risk`);
+      if(h.dropped.length){ lines.push(`Dropped a tier since ${h.comparedTo}:`); h.dropped.slice(0,15).forEach(x => lines.push('  - ' + x)); if(h.dropped.length>15) lines.push(`  …and ${h.dropped.length-15} more`); }
+      if(h.improved.length) lines.push(`Improved: ${h.improved.length} client(s).`);
     }
     // Data integrity: things that are wrong in the data itself, not just late.
     try{
@@ -963,8 +996,19 @@ route('GET', /^\/api\/clients$/, ['admin','lead','sales','coach'], (req, res, m,
   const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active'").all();
   const byClient = {};
   for(const c of activeContracts) (byClient[c.client_id] ||= []).push(c);
-  // Set-based health per client — same tiers as the profile banner, so the list's
-  // colored pill and the profile's banner never disagree.
+  const healthMap = computeHealthMap();
+  for(const r of rows){
+    const cs = byClient[r.id] || [];
+    r.programs = [...new Set(cs.map(c => c.program).filter(Boolean))].join(', ');
+    r.revenue = cs.reduce((sum, c) => sum + (Number(c.price) || 0), 0);
+    r.health = healthMap[r.id] || 'inactive';
+  }
+  send(res, 200, rows);
+});
+/* Set-based health for EVERY non-deleted client in four grouped queries — same
+   tiers as the per-client clientHealth() banner, so no surface ever disagrees.
+   Used by the Clients list, /api/state (board tinting), and the nightly digest. */
+function computeHealthMap(){
   const today = new Date().toISOString().slice(0,10);
   const cut60 = new Date(Date.now()-60*24*60*60*1000).toISOString().slice(0,10);
   const plus30 = new Date(Date.now()+30*24*60*60*1000).toISOString().slice(0,10);
@@ -972,19 +1016,20 @@ route('GET', /^\/api\/clients$/, ['admin','lead','sales','coach'], (req, res, m,
   const mOverdueNoPlan = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND cal_week IS NULL AND due<? AND client_id IS NOT NULL GROUP BY client_id`, today);
   const mBehind = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND client_id IS NOT NULL AND ((cal_week IS NOT NULL AND due<?) OR (cal_week IS NULL AND due>=? AND due<=?)) GROUP BY client_id`, today, today, plus30);
   const mScheduled = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND cal_week>=? AND client_id IS NOT NULL GROUP BY client_id`, today);
-  const mLastDone = toMap(`SELECT client_id, MAX(COALESCE(completed_on,due)) v FROM visits WHERE completed=1 AND client_id IS NOT NULL GROUP BY client_id`, );
-  for(const r of rows){
-    const cs = byClient[r.id] || [];
-    r.programs = [...new Set(cs.map(c => c.program).filter(Boolean))].join(', ');
-    r.revenue = cs.reduce((sum, c) => sum + (Number(c.price) || 0), 0);
-    if(r.status !== 'active'){ r.health = 'inactive'; continue; }
-    const coachingOnly = cs.length > 0 && cs.every(c => c.program === 'Coaching Only');
-    if(coachingOnly){ r.health = r.assigned_coach_id ? 'on_track' : 'behind'; continue; }
+  const mLastDone = toMap(`SELECT client_id, MAX(COALESCE(completed_on,due)) v FROM visits WHERE completed=1 AND client_id IS NOT NULL GROUP BY client_id`);
+  const cs = db.prepare("SELECT client_id, program FROM contracts WHERE status='active'").all();
+  const progs = {};
+  for(const c of cs) (progs[c.client_id] ||= []).push(c.program);
+  const out = {};
+  for(const r of db.prepare('SELECT id, status, assigned_coach_id FROM clients WHERE deleted_at IS NULL').all()){
+    if(r.status !== 'active'){ out[r.id] = 'inactive'; continue; }
+    const p = progs[r.id] || [];
+    if(p.length && p.every(x => x === 'Coaching Only')){ out[r.id] = r.assigned_coach_id ? 'on_track' : 'behind'; continue; }
     const stale = (!mLastDone[r.id] || mLastDone[r.id] < cut60) && !mScheduled[r.id];
-    r.health = (mOverdueNoPlan[r.id] || stale) ? 'at_risk' : mBehind[r.id] ? 'behind' : 'on_track';
+    out[r.id] = (mOverdueNoPlan[r.id] || stale) ? 'at_risk' : mBehind[r.id] ? 'behind' : 'on_track';
   }
-  send(res, 200, rows);
-});
+  return out;
+}
 route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, res, m) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
