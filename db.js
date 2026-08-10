@@ -191,6 +191,48 @@ ensureColumn('visits', 'completed_by_email', 'TEXT');
 ensureColumn('coaches', 'phone', 'TEXT');
 ensureColumn('coaches', 'start_date', 'TEXT');
 
+/* ---------- prospect holds (soft pencil, done right) ----------
+   A hold is a real record of "we reserved these weeks on this coach's calendar for
+   a prospect who hasn't signed yet" — with its own identity, owner, program, and
+   expiry — instead of the earlier label-string-on-calendar-blocks approach, where a
+   typo in the label made two weeks read as two different prospects. The calendar
+   blocks (kind='soft_pencil') are generated FROM these rows and removed when the
+   hold is released/converted/expired; the hold row is the source of truth. */
+db.exec(`
+CREATE TABLE IF NOT EXISTS prospect_holds(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  coach_id TEXT NOT NULL,
+  program TEXT NOT NULL DEFAULT 'Quarterly',
+  weeks TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created TEXT NOT NULL,
+  expires TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','converted','released','expired')),
+  resolved TEXT);
+`);
+/* One-time: adopt any label-based soft_pencil blocks placed before this table
+   existed, grouping by coach+label so they keep working under the new system. */
+function migrateProspectHolds(){
+  if(getMeta('prospect_holds_migrated')) return;
+  const blocks = db.prepare("SELECT * FROM blocks WHERE kind='soft_pencil'").all();
+  const groups = {};
+  for(const b of blocks){
+    const key = b.coach_id + '|' + (b.label || '');
+    (groups[key] = groups[key] || { coach_id: b.coach_id, label: b.label || '(unlabeled hold)', weeks: [] }).weeks.push(b.week);
+  }
+  const now = new Date().toISOString();
+  for(const g of Object.values(groups)){
+    g.weeks.sort();
+    const lastWeek = g.weeks[g.weeks.length - 1];
+    const expires = new Date(new Date(lastWeek + 'T12:00:00').getTime() + 30*24*60*60*1000).toISOString().slice(0,10);
+    db.prepare(`INSERT INTO prospect_holds(name,coach_id,program,weeks,created_by,created,expires) VALUES(?,?,?,?,?,?,?)`)
+      .run(g.label, g.coach_id, 'Quarterly', JSON.stringify(g.weeks), 'migration', now, expires);
+  }
+  setMeta('prospect_holds_migrated', now);
+  if(Object.keys(groups).length) console.log(`Prospect holds migration: adopted ${Object.keys(groups).length} label-based hold(s).`);
+}
+
 /* ---------- helpers ---------- */
 function hashPw(pw){
   const salt = crypto.randomBytes(16).toString('hex');
@@ -1535,6 +1577,7 @@ reconcilePendingClients();
 deleteLegacyMagDuplicates();
 migrateKeapIdentityLink();
 migrateKeapRevenueSync();
+migrateProspectHolds();
 ensureCurrentMonthSnapshot();
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH };

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH } = require('./db.js');
+const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH } = require('./db.js');
 const { sendMail } = require('./mail.js');
 
 const PORT = process.env.PORT || 3000;
@@ -83,7 +83,7 @@ async function handleGoogleCallback(req, res, url){
     res.writeHead(302, {
       Location: '/',
       'Set-Cookie': [
-        `cfs=${encodeURIComponent(sign(String(u.id)))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+        sessionCookie(String(u.id)),
         'ssostate=; Path=/; Max-Age=0',
       ],
     });
@@ -124,12 +124,23 @@ async function keapPost(p, body){
 const sign = v => v + '.' + crypto.createHmac('sha256', SECRET).update(v).digest('hex').slice(0, 32);
 const unsign = t => { if(!t) return null; const i = t.lastIndexOf('.'); if(i < 0) return null;
   const v = t.slice(0, i); return sign(v) === t ? v : null; };
+/* Sessions carry an issued-at timestamp and expire after SESSION_IDLE_HOURS of
+   inactivity (default 24h) — activity slides the window via a refreshed cookie in
+   the dispatcher below. Pre-timestamp cookies (no '|') just force one re-login. */
+const SESSION_IDLE_MS = (parseFloat(process.env.SESSION_IDLE_HOURS) || 24) * 60 * 60 * 1000;
+const sessionCookie = id => `cfs=${encodeURIComponent(sign(id + '|' + Date.now()))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`;
 function currentUser(req){
   const m = /(?:^|;\s*)cfs=([^;]+)/.exec(req.headers.cookie || '');
-  const id = unsign(m && decodeURIComponent(m[1]));
-  if(!id) return null;
+  const v = unsign(m && decodeURIComponent(m[1]));
+  if(!v) return null;
+  const [id, issuedAt] = v.split('|');
+  if(!issuedAt) return null; // legacy cookie format — re-login once
+  const age = Date.now() - (+issuedAt || 0);
+  if(age > SESSION_IDLE_MS) return null;
   const u = db.prepare('SELECT id,email,name,role,team,coach_id,active FROM users WHERE id=?').get(+id);
-  return (u && u.active) ? u : null;
+  if(!u || !u.active) return null;
+  u._cookieAge = age;
+  return u;
 }
 
 /* ---------- tiny router ---------- */
@@ -219,7 +230,7 @@ route('POST', /^\/api\/login$/, null, (req, res, m, body) => {
   clearLoginFailures(email);
   log(u.email, 'login', '');
   send(res, 200, { ok: true, user: { id: u.id, email: u.email, name: u.name, role: u.role, team: u.team, coach_id: u.coach_id } },
-    { 'Set-Cookie': `cfs=${encodeURIComponent(sign(String(u.id)))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000` });
+    { 'Set-Cookie': sessionCookie(String(u.id)) });
 });
 route('POST', /^\/api\/logout$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   send(res, 200, { ok: true }, { 'Set-Cookie': 'cfs=; Path=/; Max-Age=0' });
@@ -387,6 +398,74 @@ route('PUT', /^\/api\/blocks$/, ['admin','lead'], (req, res, m, body, user) => {
   send(res, 200, { ok: true });
 });
 
+/* ----- prospect holds (soft pencil launch dates) ----- */
+const holdWeeks = h => JSON.parse(h.weeks || '[]');
+function removeHoldBlocks(h){
+  for(const w of holdWeeks(h)) db.prepare("DELETE FROM blocks WHERE coach_id=? AND week=? AND kind='soft_pencil'").run(h.coach_id, w);
+}
+function resolveHold(h, status, actorEmail){
+  db.prepare('UPDATE prospect_holds SET status=?, resolved=? WHERE id=?').run(status, new Date().toISOString(), h.id);
+  removeHoldBlocks(h);
+  log(actorEmail, 'hold.' + status, { holdId: h.id, name: h.name, coach: h.coach_id, weeks: holdWeeks(h).length });
+}
+route('GET', /^\/api\/prospect-holds$/, ['admin','lead','sales'], (req, res) => {
+  const rows = db.prepare("SELECT * FROM prospect_holds WHERE status='active' ORDER BY expires").all();
+  send(res, 200, rows.map(h => ({ ...h, weeks: holdWeeks(h) })));
+});
+route('POST', /^\/api\/prospect-holds$/, ['admin','lead'], (req, res, m, body, user) => {
+  const name = String(body.name || '').trim();
+  if(!name) return err(res, 400, 'prospect name required');
+  const c = getCoach(body.coachId); if(!c || !c.active) return err(res, 400, 'unknown coach');
+  if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  const weeks = [...new Set((body.weeks || []).filter(w => /^\d{4}-\d{2}-\d{2}$/.test(w)).map(snapMonday))].sort();
+  if(!weeks.length) return err(res, 400, 'at least one week required');
+  const taken = weeks.filter(w => !cellFree(c.id, w));
+  if(taken.length) return err(res, 409, `No longer open: ${taken.join(', ')} — re-run availability and try again`);
+  const program = String(body.program || 'Quarterly');
+  const lastWeek = weeks[weeks.length - 1];
+  const expires = /^\d{4}-\d{2}-\d{2}$/.test(body.expires || '') ? body.expires
+    : new Date(new Date(lastWeek + 'T12:00:00').getTime() + 30*24*60*60*1000).toISOString().slice(0,10);
+  const r = db.prepare(`INSERT INTO prospect_holds(name,coach_id,program,weeks,created_by,created,expires) VALUES(?,?,?,?,?,?,?)`)
+    .run(name, c.id, program, JSON.stringify(weeks), user.email, new Date().toISOString(), expires);
+  for(const w of weeks){
+    db.prepare(`INSERT INTO blocks(coach_id,week,kind,label) VALUES(?,?,'soft_pencil',?)
+      ON CONFLICT(coach_id,week) DO UPDATE SET kind='soft_pencil', label=excluded.label`).run(c.id, w, name);
+  }
+  log(user.email, 'hold.place', { holdId: Number(r.lastInsertRowid), name, coach: c.id, weeks });
+  send(res, 200, { ok: true, id: Number(r.lastInsertRowid), weeks, expires });
+});
+route('POST', /^\/api\/prospect-holds\/(\d+)\/release$/, ['admin','lead'], (req, res, m, body, user) => {
+  const h = db.prepare("SELECT * FROM prospect_holds WHERE id=? AND status='active'").get(+m[1]);
+  if(!h) return err(res, 404, 'not found or already resolved');
+  const c = getCoach(h.coach_id);
+  if(c && !canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  resolveHold(h, 'released', user.email);
+  send(res, 200, { ok: true });
+});
+/* Convert = the deal signed. Frees the calendar weeks and hands everything the
+   frontend needs to open the normal New Contract form pre-filled. The contract
+   itself is still created through the same route as every other client, so
+   Keap linking/reconciliation works identically — a converted hold leaves no
+   special residue anywhere. */
+route('POST', /^\/api\/prospect-holds\/(\d+)\/convert$/, ['admin','lead'], (req, res, m, body, user) => {
+  const h = db.prepare("SELECT * FROM prospect_holds WHERE id=? AND status='active'").get(+m[1]);
+  if(!h) return err(res, 404, 'not found or already resolved');
+  const c = getCoach(h.coach_id);
+  if(c && !canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  resolveHold(h, 'converted', user.email);
+  send(res, 200, { ok: true, name: h.name, program: h.program, weeks: holdWeeks(h), coachId: h.coach_id, team: c ? c.team : null });
+});
+/* Nightly upkeep: auto-release holds whose expiry has passed (the deal went quiet),
+   and surface soon-to-expire ones in the digest so a hold never silently rots. */
+function sweepProspectHolds(){
+  const today = new Date().toISOString().slice(0,10);
+  const soon = new Date(Date.now() + 7*24*60*60*1000).toISOString().slice(0,10);
+  const expired = db.prepare("SELECT * FROM prospect_holds WHERE status='active' AND expires IS NOT NULL AND expires < ?").all(today);
+  for(const h of expired) resolveHold(h, 'expired', 'system.nightly');
+  const expiring = db.prepare("SELECT * FROM prospect_holds WHERE status='active' AND expires IS NOT NULL AND expires <= ?").all(soon);
+  return { expired: expired.map(h => h.name), expiring: expiring.map(h => `${h.name} (${h.expires})`) };
+}
+
 /* ----- coaches & teams ----- */
 route('POST', /^\/api\/coaches$/, ['admin','lead'], (req, res, m, body, user) => {
   if(!body.name) return err(res, 400, 'name required');
@@ -529,8 +608,38 @@ route('PATCH', /^\/api\/users\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
 });
 
 /* ----- pending clients (Keap subscriptions awaiting team assignment) ----- */
+/* Fuzzy-match a new Keap subscription against active prospect holds: if sales
+   soft-penciled "Acme Motors — Launch" and Keap now fires a subscription for
+   "Acme Motors of Dallas", the Unassigned Clients row should say so, and offer
+   to convert the hold instead of making someone connect the dots by memory.
+   Token-overlap on normalized names: every meaningful word of the shorter name
+   appearing in the longer one counts as a match. */
+function matchHoldForName(name){
+  const target = normName(name);
+  if(!target) return null;
+  const targetTokens = new Set(target.split(' ').filter(t => t.length > 1));
+  const holds = db.prepare("SELECT * FROM prospect_holds WHERE status='active'").all();
+  let best = null;
+  for(const h of holds){
+    // Strip decoration like "— Launch" that sales adds to labels
+    const hn = normName(h.name.replace(/\b(launch|hold|prospect)\b/gi, ''));
+    if(!hn) continue;
+    const holdTokens = hn.split(' ').filter(t => t.length > 1);
+    if(!holdTokens.length || !targetTokens.size) continue;
+    const smaller = holdTokens.length <= targetTokens.size ? holdTokens : [...targetTokens];
+    const larger = new Set(holdTokens.length <= targetTokens.size ? [...targetTokens] : holdTokens);
+    const hits = smaller.filter(t => larger.has(t)).length;
+    const score = hits / smaller.length;
+    if(score >= 0.6 && (!best || score > best.score)) best = { score, hold: h };
+  }
+  if(!best) return null;
+  const c = getCoach(best.hold.coach_id);
+  return { id: best.hold.id, name: best.hold.name, program: best.hold.program, weeks: holdWeeks(best.hold),
+    coachId: best.hold.coach_id, coachName: c ? c.name : best.hold.coach_id, team: c ? c.team : null };
+}
 route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, user) => {
-  send(res, 200, db.prepare("SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all());
+  const rows = db.prepare("SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all();
+  send(res, 200, rows.map(r => ({ ...r, hold_match: matchHoldForName(r.company_name || r.contact_name || '') })));
 });
 route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req, res, m, body, user) => {
   const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
@@ -668,6 +777,8 @@ async function runNightlyMaintenance(actorEmail){
   catch(e){ summary.revenue = { error: String(e && e.message || e) }; }
   try{ summary.purge = purgeOldSoftDeletes(); }
   catch(e){ summary.purge = { error: String(e && e.message || e) }; }
+  try{ summary.holds = sweepProspectHolds(); }
+  catch(e){ summary.holds = { error: String(e && e.message || e) }; }
   try{ summary.backup = await takeBackupAndEmail(actorEmail); }
   catch(e){ summary.backup = { error: String(e && e.message || e) }; }
 
@@ -688,6 +799,23 @@ async function runNightlyMaintenance(actorEmail){
       `Overdue visits (not yet completed, past due): ${overdue}`,
       `Pending Clients queue items older than 7 days: ${stalePending}`,
     ];
+    if(summary.holds && !summary.holds.error){
+      if(summary.holds.expired.length) lines.push(`Prospect holds auto-released (expired): ${summary.holds.expired.join(', ')}`);
+      if(summary.holds.expiring.length) lines.push(`Prospect holds expiring within 7 days: ${summary.holds.expiring.join(', ')}`);
+    }
+    // Data integrity: things that are wrong in the data itself, not just late.
+    try{
+      const noTeam = db.prepare("SELECT COUNT(*) c FROM visits WHERE completed=0 AND (team IS NULL OR team='' OR team='?')").get().c;
+      const orphanVisits = db.prepare('SELECT COUNT(*) c FROM visits WHERE completed=0 AND client_id IS NULL').get().c;
+      const noPriceContracts = db.prepare("SELECT COUNT(*) c FROM contracts WHERE status='active' AND (price IS NULL OR price=0)").get().c;
+      const noKeapClients = db.prepare("SELECT COUNT(*) c FROM clients WHERE status='active' AND deleted_at IS NULL AND (keap_id IS NULL OR keap_id='')").get().c;
+      const integrity = [];
+      if(noTeam) integrity.push(`${noTeam} open visit(s) with no team assigned`);
+      if(orphanVisits) integrity.push(`${orphanVisits} open visit(s) not linked to any client record`);
+      if(noPriceContracts) integrity.push(`${noPriceContracts} active contract(s) with no price (excluding intentional $0 revenue-owner setups, review these)`);
+      if(noKeapClients) integrity.push(`${noKeapClients} active client(s) with no Keap company id linked`);
+      if(integrity.length){ lines.push('', 'Data integrity — worth a cleanup pass:'); integrity.forEach(x => lines.push('  - ' + x)); }
+    }catch(e){ lines.push('Data integrity check failed: ' + e.message); }
     if(overdue > 0 || stalePending > 0 || syncErrors > 0 || !summary.backup.ok) lines.push('', 'One or more of the above needs a look.');
     const admins = ADMIN_EMAILS();
     let digestSent = 0;
@@ -1134,6 +1262,8 @@ const server = http.createServer((req, res) => {
           user = currentUser(req);
           if(!user) return err(res, 401, 'Please sign in');
           if(!r.roles.includes(user.role)) return err(res, 403, 'Insufficient permissions');
+          // Sliding idle window: refresh the cookie timestamp once it's over an hour old
+          if(user._cookieAge > 60*60*1000) res.setHeader('Set-Cookie', sessionCookie(String(user.id)));
         }
         try{ return r.fn(req, res, m, body, user); }
         catch(e){ console.error(e); return err(res, 500, 'Server error'); }

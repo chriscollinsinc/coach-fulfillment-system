@@ -42,7 +42,7 @@ let st = {
   view:'dashboard', boardTeam:null,
   boardY:+TODAY.slice(0,4), boardM:+TODAY.slice(5,7)-1,
   placing:null, detail:null,
-  invFilter:'active', invSearch:'',
+  invFilter:'attention', invSearch:'',
   due2027:false,
 };
 let occ = null; // occupancy map coach|week -> {type:'visit'|'block', ...}
@@ -51,11 +51,18 @@ async function api(method, url, body){
   const r = await fetch(url,{method, headers:{'Content-Type':'application/json'}, body:body?JSON.stringify(body):undefined});
   const j = await r.json().catch(()=>({}));
   if(r.status===401){ D=null; render(); throw new Error('signed out'); }
-  if(!r.ok){ toast(j.error||'Error'); throw new Error(j.error||'error'); }
+  if(!r.ok){
+    const msg = j.error || (r.status===409 ? 'Someone else just changed this — refresh and try again'
+      : r.status===403 ? "You don't have permission to do that"
+      : r.status>=500 ? 'Something went wrong on the server — try again in a moment'
+      : 'That didn\'t work — check the form and try again');
+    toast(msg); throw new Error(msg);
+  }
   return j;
 }
 async function refresh(){
   D = await api('GET','/api/state');
+  _gsClients = null; // stale after any data change — refetched on next search keystroke
   occ = {};
   for(const b of D.blocks) occ[b.coach_id+'|'+b.week] = {type:'block', kind:b.kind, label:b.label};
   for(const v of D.visits) if(v.cal_coach && v.cal_week)
@@ -86,6 +93,30 @@ function toast(msg, undo){
 async function undoAction(){ if(window._undo){ const f=window._undo; window._undo=null; $('#toast').classList.remove('show'); await f(); await refresh(); toast('Undone'); } }
 function openDlg(html){ const d=$('#dlg'); d.innerHTML=html; d.showModal(); }
 function closeDlg(){ $('#dlg').close(); }
+/* Styled stand-ins for window.alert/confirm — same look as the rest of the app,
+   stack safely on top of an already-open dialog (#dlg2 over #dlg). */
+function uiAlert(msg){
+  return new Promise(res=>{
+    const d=$('#dlg2');
+    d.innerHTML=`<p style="font-size:13.5px;white-space:pre-wrap">${esc(msg)}</p>
+      <div class="dlgrow"><button class="btn primary" id="ua-ok">OK</button></div>`;
+    d.showModal();
+    $('#ua-ok').onclick=()=>{ d.close(); res(); };
+    $('#ua-ok').focus();
+  });
+}
+function uiConfirm(msg, yesLabel){
+  return new Promise(res=>{
+    const d=$('#dlg2');
+    d.innerHTML=`<p style="font-size:13.5px;white-space:pre-wrap">${esc(msg)}</p>
+      <div class="dlgrow"><button class="btn" id="uc-no">Cancel</button>
+      <button class="btn primary ${/delete|release/i.test(yesLabel||'')?'danger':''}" id="uc-yes">${esc(yesLabel||'Confirm')}</button></div>`;
+    d.showModal();
+    $('#uc-no').onclick=()=>{ d.close(); res(false); };
+    $('#uc-yes').onclick=()=>{ d.close(); res(true); };
+    d.oncancel=()=>res(false);
+  });
+}
 
 /* ---------- shell ---------- */
 function render(){
@@ -107,7 +138,10 @@ function render(){
   if(r==='coach' && D.user.coach_id) views.myprofile='My Profile';
   if(r==='admin') views.admin='Admin';
   views.faq='FAQ';
-  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && !(st.view==='pending'&&hasPending)) st.view = Object.keys(views)[0];
+  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && !(st.view==='pending'&&hasPending)){
+    // First landing: leads live on the Schedule Board day-to-day, not the capacity dashboard
+    st.view = r==='lead' ? 'board' : Object.keys(views)[0];
+  }
   const pendingN = D.pendingClientCount||0;
   const navHtml = Object.entries(views).map(([k,v])=>{
     if(k==='clients' && hasPending){
@@ -128,6 +162,11 @@ function render(){
     <img class="logo" src="https://chriscollinsinc.com/wp-content/uploads/2020/03/logo-1.png" onerror="this.style.display='none'" alt="">
     <h1>Coach Fulfillment</h1>
     <nav>${navHtml}</nav>
+    <div class="gsearch">
+      <input id="gSearch" placeholder="Find a client or coach…" autocomplete="off"
+        oninput="globalSearch(this.value)" onfocus="globalSearch(this.value)" onkeydown="if(event.key==='Escape'){this.value='';$('#gsResults').innerHTML='';this.blur()}">
+      <div id="gsResults" class="gsearch-results"></div>
+    </div>
     <div class="userchip" style="display:flex;align-items:center;gap:8px">
       ${avatarHtml(D.user.name, D.user.team, 30)}
       <span>${esc(D.user.name)} · ${D.user.role}${D.user.team?' · '+D.user.team:''}<br>
@@ -144,10 +183,42 @@ function render(){
   if(st.view==='coachprofile'){ m.innerHTML='<div class="panel">Loading…</div>'; loadCoachProfile(st.coachId); }
   if(st.view==='availability'){ m.innerHTML=availabilityView(); runAvail(); }
   if(st.view==='mysched') m.innerHTML=mySchedule();
-  if(st.view==='admin'){ m.innerHTML=adminView(); loadAudit(); loadCancelledContracts(); loadClientHistoryPeriods(); loadDeletedClients(); loadRevenueHistory(); loadFormerCoaches(); loadBackupStatus(); }
+  if(st.view==='admin'){
+    m.innerHTML=adminView();
+    const tab = st.adminTab || 'people';
+    if(tab==='people'){ loadFormerCoaches(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); }
+    if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
+  }
   if(st.view==='faq') m.innerHTML=faqView();
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
+/* ---------- global search: type any dealership or coach name from anywhere ---------- */
+let _gsClients = null; // fetched once per session, on first keystroke
+async function globalSearch(q){
+  const out = $('#gsResults'); if(!out) return;
+  q = norm(q);
+  if(q.length < 2){ out.innerHTML=''; return; }
+  if(!_gsClients){
+    _gsClients = [];
+    try{ _gsClients = await api('GET','/api/clients'); }catch(e){}
+  }
+  const canSeeCoaches = ['admin','lead'].includes(D.user.role);
+  const clientHits = _gsClients.filter(c=>norm(c.name).includes(q)).slice(0,6);
+  const coachHits = canSeeCoaches ? D.coaches.filter(c=>norm(c.name).includes(q)).slice(0,4) : [];
+  if(!clientHits.length && !coachHits.length){ out.innerHTML = `<div class="gs-empty">No matches</div>`; return; }
+  out.innerHTML =
+    clientHits.map(c=>`<a onclick="gsGo('client',${c.id})"><b>${esc(c.name)}</b><span class="small"> · client${c.status==='active'?'':' · '+esc(c.status)}</span></a>`).join('') +
+    coachHits.map(c=>`<a onclick="gsGo('coach','${c.id}')">${avatarHtml(c.name,c.team,18)} <b>${esc(c.name)}</b><span class="small"> · coach · ${esc(c.team)}</span></a>`).join('');
+}
+function gsGo(kind, id){
+  $('#gSearch').value=''; $('#gsResults').innerHTML='';
+  if(kind==='client') openClientProfile(id); else openCoachProfile(id);
+}
+document.addEventListener('click', e => {
+  const out = $('#gsResults');
+  if(out && !e.target.closest('.gsearch')) out.innerHTML='';
+});
 function toggleNavDrop(e){ e.stopPropagation(); const el=e.currentTarget.parentElement; document.querySelectorAll('.navdrop.open').forEach(x=>{ if(x!==el) x.classList.remove('open'); }); el.classList.toggle('open'); }
 function closeNavDrop(){ document.querySelectorAll('.navdrop.open').forEach(x=>x.classList.remove('open')); }
 document.addEventListener('click', closeNavDrop);
@@ -158,7 +229,7 @@ function pwDlg(){
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="savePw()">Save</button></div>`);
 }
-async function savePw(){ const p=$('#pw1').value; if(p.length<8){alert('Use at least 8 characters');return;}
+async function savePw(){ const p=$('#pw1').value; if(p.length<8){uiAlert('Use at least 8 characters');return;}
   await api('PATCH','/api/users/'+D.user.id,{password:p}); closeDlg(); toast('Password changed'); }
 
 /* ---------- login ---------- */
@@ -407,7 +478,7 @@ async function doCompleteV(id){
   const note = ($('#cvNote')||{}).value || '';
   try{
     await api('POST',`/api/visits/${id}/complete`, note.trim() ? { note: note.trim() } : {});
-  }catch(e){ closeDlg(); alert(e.message||'Could not complete that visit'); return; }
+  }catch(e){ closeDlg(); uiAlert(e.message||'Could not complete that visit'); return; }
   closeDlg(); st.detail=null; await refresh();
   toast('Marked complete', async()=>api('POST',`/api/visits/${id}/reopen`));
 }
@@ -427,11 +498,12 @@ async function saveCell(cid,w){
 }
 
 /* ---------- inventory ---------- */
+const hint = t => `<span title="${esc(t)}" style="cursor:help;color:var(--muted);border-bottom:1px dotted var(--muted)">?</span>`;
 const INV_COLS = [
   { key:'client', label:'Client', get:v=>v.client||'' },
   { key:'team', label:'Team', get:v=>v.team||'' },
-  { key:'program', label:'Program', get:v=>v.program||'' },
-  { key:'cycle', label:'Cycle', get:v=>v.cycle||'' },
+  { key:'program', label:'Program '+hint('How often this client gets visited — Quarterly means 4 visits per year, Semi-Monthly means 6, etc.'), get:v=>v.program||'' },
+  { key:'cycle', label:'Cycle '+hint('Which visit this is within the contract — "3 of 4" means the 3rd of 4 contracted visits.'), get:v=>v.cycle||'' },
   { key:'due', label:'Due', get:v=>v.due||'' },
   { key:'scheduled', label:'Scheduled', get:v=>v.cal_week||'' },
   { key:'status', label:'Status', get:v=>status(v) },
@@ -442,14 +514,23 @@ function sortInventory(key){
   else st.invSort = { key, dir:'asc' };
   render();
 }
+/* Overdue aging: debt from months/years back shouldn't bury this month's work. */
+const daysOverdue = v => (!v.completed && v.due && v.due < TODAY) ? Math.floor(dayDiff(TODAY, v.due)) : 0;
+const isStale = v => daysOverdue(v) >= 90;
 function inventory(){
   if(!st.invSort) st.invSort = { key:'due', dir:'asc' };
   const f=st.invFilter,q=norm(st.invSearch);
   const isCoach = D.user.role==='coach';
   let rows=D.visits.slice();
-  const stf={active:v=>!v.completed,overdue:v=>status(v)==='overdue',needs:v=>status(v)==='needs_scheduling',
-    oncal:v=>status(v)==='on_calendar',completed:v=>!!v.completed,all:()=>true};
-  rows=rows.filter(stf[f]||stf.all);
+  const stf={
+    attention:v=>!v.completed&&!isStale(v),
+    active:v=>!v.completed,
+    overdue:v=>status(v)==='overdue'&&!isStale(v),
+    stale:v=>isStale(v),
+    needs:v=>status(v)==='needs_scheduling',
+    oncal:v=>status(v)==='on_calendar',
+    completed:v=>!!v.completed,all:()=>true};
+  rows=rows.filter(stf[f]||stf.attention);
   if(D.user.role==='lead') rows=rows.filter(v=>!v.team||v.team===D.user.team);
   // Coaches only ever see their own visits here — this page is where they complete
   // work, not a company-wide client roster.
@@ -464,42 +545,103 @@ function inventory(){
   });
   const base = isCoach ? D.visits.filter(ownsVisit) : D.visits;
   const count=fn=>base.filter(fn).length;
+  const staleCount = count(isStale);
   const arrow = k => st.invSort.key===k ? (st.invSort.dir==='asc'?' ▲':' ▼') : '';
   const th = c => `<th style="cursor:pointer;user-select:none" onclick="sortInventory('${c.key}')">${c.label}<span class="small">${arrow(c.key)}</span></th>`;
+  const sel = st.invSel || (st.invSel = new Set());
+  const showChecks = canEdit();
   let html=`<div class="controls">
     ${canEdit() ? `<button class="btn primary" onclick="contractDlg()">＋ New contract</button>
     <button class="btn" onclick="visitDlg(0)">＋ Single visit</button>` : ''}
-    <select onchange="st.invFilter=this.value;render()">
-      <option value="active" ${f==='active'?'selected':''}>Active — ${count(v=>!v.completed)}</option>
-      <option value="overdue" ${f==='overdue'?'selected':''}>Overdue — ${count(v=>status(v)==='overdue')}</option>
-      <option value="needs" ${f==='needs'?'selected':''}>Needs scheduling — ${count(v=>status(v)==='needs_scheduling')}</option>
-      <option value="oncal" ${f==='oncal'?'selected':''}>On calendar — ${count(v=>status(v)==='on_calendar')}</option>
-      <option value="completed" ${f==='completed'?'selected':''}>Completed — ${count(v=>!!v.completed)}</option>
+    <select onchange="st.invFilter=this.value;st.invSel=new Set();render()">
+      <option value="attention" ${f==='attention'||!stf[f]?'selected':''}>Needs attention — ${count(stf.attention)}</option>
+      <option value="overdue" ${f==='overdue'?'selected':''}>Overdue (last 90 days) — ${count(stf.overdue)}</option>
+      <option value="stale" ${f==='stale'?'selected':''}>Stale (overdue 90+ days) — ${staleCount}</option>
+      <option value="needs" ${f==='needs'?'selected':''}>Needs scheduling — ${count(stf.needs)}</option>
+      <option value="oncal" ${f==='oncal'?'selected':''}>On calendar — ${count(stf.oncal)}</option>
+      <option value="active" ${f==='active'?'selected':''}>All active — ${count(stf.active)}</option>
+      <option value="completed" ${f==='completed'?'selected':''}>Completed — ${count(stf.completed)}</option>
       <option value="all" ${f==='all'?'selected':''}>Everything — ${base.length}</option></select>
     <input placeholder="Search client or coach…" value="${esc(st.invSearch)}" oninput="st.invSearch=this.value;render()" style="width:230px">
-    <span class="small">${rows.length} rows</span></div>
-  <div class="panel" style="overflow-x:auto"><table><tr>${INV_COLS.map(th).join('')}<th style="width:245px"></th></tr>`;
+    <span class="small">${rows.length} rows</span></div>`;
+  if(f!=='stale' && staleCount && !q){
+    html+=`<div class="panel" style="border-left:4px solid var(--warn);padding:10px 14px;margin-bottom:12px">
+      <span class="small"><b>${staleCount} visit(s) are 90+ days overdue</b> — old debt kept out of this view so current work stays visible.
+      <a style="color:var(--primary);cursor:pointer;text-decoration:underline" onclick="st.invFilter='stale';st.invSel=new Set();render()">Review stale visits →</a></span></div>`;
+  }
+  if(showChecks && sel.size){
+    html+=`<div class="panel" style="border-left:4px solid var(--primary);padding:10px 14px;margin-bottom:12px">
+      <b>${sel.size} selected</b>
+      <button class="btn tiny" style="margin-left:10px" onclick="bulkCompleteVisits()">Mark completed</button>
+      <button class="btn tiny danger" onclick="bulkDeleteVisits()">Delete</button>
+      <button class="btn tiny" onclick="st.invSel=new Set();render()">Clear selection</button></div>`;
+  }
+  html+=`<div class="panel" style="overflow-x:auto"><table class="invtable"><tr>${showChecks?`<th style="width:26px"><input type="checkbox" ${rows.length&&rows.slice(0,400).every(v=>sel.has(v.id))?'checked':''} onclick="toggleInvAll(this.checked)"></th>`:''}${INV_COLS.map(th).join('')}<th style="width:60px"></th></tr>`;
   rows.slice(0,400).forEach(v=>{
     const s=status(v);
+    const od=daysOverdue(v);
     const sched=v.completed?(v.sched_hist||(v.cal_week?'wk of '+fmtW(v.cal_week):'—'))
       : v.cal_week?`wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}`:'—';
     const pill=v.completed?'<span class="pill p-done">Completed</span>'
-      :s==='overdue'?'<span class="pill p-over">Overdue</span>'
+      :s==='overdue'?`<span class="pill p-over">Overdue${od>=30?` · ${od}d`:''}</span>`
       :s==='on_calendar'?'<span class="pill p-cal">On calendar</span>'
       :s==='needs_scheduling'?'<span class="pill p-due">Needs scheduling</span>':'<span class="pill p-fut">—</span>';
-    let act='';
-    if(canEdit()){
-      act=`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>`;
-      if(!v.completed&&!v.cal_week&&v.team) act+=`<button class="btn tiny" onclick="st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()">Place</button>`;
-    }
-    if(!v.completed && (canEdit() || ownsVisit(v))) act+=`<button class="btn tiny" onclick="completeVisitDlg(${v.id})">Complete</button>`;
-    if(canEdit()) act+=`<button class="btn tiny danger" onclick="delVisit(${v.id})">✕</button>`;
-    html+=`<tr><td>${esc(v.client)}</td><td>${esc(v.team||'?')}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
-      <td class="mono">${fmt(v.due)}</td><td class="small">${sched}</td><td>${pill}</td><td class="actions-nowrap">${act}</td></tr>`;
+    html+=`<tr style="cursor:pointer" onclick="visitDrawer(${v.id})">
+      ${showChecks?`<td onclick="event.stopPropagation()"><input type="checkbox" ${sel.has(v.id)?'checked':''} onclick="toggleInvSel(${v.id},this.checked)"></td>`:''}
+      <td><b>${esc(v.client)}</b></td><td>${esc(v.team||'?')}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
+      <td class="mono">${fmt(v.due)}</td><td class="small">${sched}</td><td>${pill}</td>
+      <td class="small" style="color:var(--muted)">Open ›</td></tr>`;
   });
-  if(rows.length>400) html+=`<tr><td colspan="8" class="small">…first 400 of ${rows.length}</td></tr>`;
+  if(rows.length>400) html+=`<tr><td colspan="10" class="small">…first 400 of ${rows.length}</td></tr>`;
   html+=`</table></div>`;
   return html;
+}
+function toggleInvSel(id, on){ if(on) st.invSel.add(id); else st.invSel.delete(id); render(); }
+function toggleInvAll(on){
+  const f=st.invFilter,q=norm(st.invSearch);
+  // Re-derive the visible rows the same way inventory() does, capped at the same 400
+  const stf={attention:v=>!v.completed&&!isStale(v),active:v=>!v.completed,overdue:v=>status(v)==='overdue'&&!isStale(v),stale:v=>isStale(v),needs:v=>status(v)==='needs_scheduling',oncal:v=>status(v)==='on_calendar',completed:v=>!!v.completed,all:()=>true};
+  let rows=D.visits.filter(stf[f]||stf.attention);
+  if(D.user.role==='lead') rows=rows.filter(v=>!v.team||v.team===D.user.team);
+  if(q) rows=rows.filter(v=>norm(v.client).includes(q)||norm(v.coach_hist).includes(q));
+  st.invSel = on ? new Set(rows.slice(0,400).map(v=>v.id)) : new Set();
+  render();
+}
+/* One place for everything about a visit — replaces the old four-buttons-per-row,
+   which put Delete a pixel away from Complete. */
+function visitDrawer(id){
+  const v = D.visits.find(x=>x.id===id); if(!v) return;
+  const s = status(v); const od = daysOverdue(v);
+  const canDo = canEdit();
+  openDlg(`<h3>${esc(v.client)}</h3>
+    <p class="small" style="margin-bottom:10px">${esc(v.cycle)} ${esc(v.program)} · Team ${esc(v.team||'?')}<br>
+    Due ${fmt(v.due)}${od?` — <b style="color:var(--bad)">${od} days overdue</b>`:''}<br>
+    ${v.completed?`Completed ${fmt(v.completed_on)}`:v.cal_week?`On calendar: wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}`:'Not scheduled yet'}</p>
+    <div class="btnrow">
+      ${v.client_id?`<button class="btn tiny" onclick="closeDlg();openClientProfile(${v.client_id})">View client</button>`:''}
+      ${canDo?`<button class="btn tiny" onclick="closeDlg();visitDlg(${v.id})">Edit</button>`:''}
+      ${canDo&&!v.completed&&!v.cal_week&&v.team?`<button class="btn tiny" onclick="closeDlg();st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()">Place on calendar</button>`:''}
+      ${!v.completed&&(canDo||ownsVisit(v))?`<button class="btn tiny primary" onclick="closeDlg();completeVisitDlg(${v.id})">Complete</button>`:''}
+      ${canDo&&v.completed?`<button class="btn tiny" onclick="closeDlg();reopenVisit(${v.id})">Reopen</button>`:''}
+    </div>
+    <div class="dlgrow" style="justify-content:space-between;margin-top:16px">
+      ${canDo?`<button class="btn tiny danger" onclick="closeDlg();delVisit(${v.id})">Delete visit</button>`:'<span></span>'}
+      <button class="btn" onclick="closeDlg()">Close</button></div>`);
+}
+async function reopenVisit(id){ await api('POST',`/api/visits/${id}/reopen`); await refresh(); toast('Visit reopened'); }
+async function bulkCompleteVisits(){
+  const ids=[...st.invSel];
+  if(!(await uiConfirm(`Mark ${ids.length} visit(s) completed? Use this for cleanup of old already-done work — no notes get attached.`,'Mark completed'))) return;
+  let ok=0;
+  for(const id of ids){ try{ await api('POST',`/api/visits/${id}/complete`,{}); ok++; }catch(e){} }
+  st.invSel=new Set(); await refresh(); toast(`${ok} of ${ids.length} marked completed`);
+}
+async function bulkDeleteVisits(){
+  const ids=[...st.invSel];
+  if(!(await uiConfirm(`Delete ${ids.length} visit(s)? This can't be undone.`,'Delete'))) return;
+  let ok=0;
+  for(const id of ids){ try{ await api('DELETE',`/api/visits/${id}`); ok++; }catch(e){} }
+  st.invSel=new Set(); await refresh(); toast(`${ok} of ${ids.length} deleted`);
 }
 const clientNames=()=>[...new Set(D.visits.map(v=>v.client))].sort();
 const teamOpts=sel=>myTeams().map(t=>`<option ${t===sel?'selected':''}>${t}</option>`).join('');
@@ -530,11 +672,11 @@ function onContractProgramChange(){
 }
 async function saveContract(){
   const client = $('#cName').value.trim();
-  if(!client){alert('Client name required');return;}
+  if(!client){uiAlert('Client name required');return;}
   const program = $('#cProg').value;
   if(program==='Coaching Only'){
     const coachId = $('#cCoach').value;
-    if(!coachId){ alert('Pick a coach'); return; }
+    if(!coachId){ uiAlert('Pick a coach'); return; }
     const coach = D.coaches.find(c=>c.id===coachId);
     await api('POST','/api/contracts',{client, program, n:0, first:null, team:coach.team, coachId});
     closeDlg(); await refresh(); toast(`${client} added — Coaching Only, assigned to ${coach.name}`);
@@ -557,13 +699,13 @@ function visitDlg(id){
 }
 async function saveVisit(id){
   const b={client:$('#vName').value.trim(),program:$('#vProg').value,cycle:$('#vCycle').value.trim(),due:$('#vDue').value||null,team:$('#vTeam').value};
-  if(!b.client){alert('Client name required');return;}
+  if(!b.client){uiAlert('Client name required');return;}
   if(id) await api('PATCH','/api/visits/'+id,b); else await api('POST','/api/visits',b);
   closeDlg(); await refresh(); toast('Saved');
 }
 async function delVisit(id){
   const v=D.visits.find(x=>x.id===id);
-  if(!confirm(`Delete ${v.client} — ${v.cycle} ${v.program}?`)) return;
+  if(!(await uiConfirm(`Delete ${v.client} — ${v.cycle} ${v.program}?`,'Delete'))) return;
   await api('DELETE','/api/visits/'+id); await refresh(); toast('Deleted');
 }
 
@@ -712,66 +854,64 @@ function renderPreviewPanel(){
 }
 async function placeSoftHold(i){
   const r = (st.availResults||[])[i]; if(!r) return;
-  const label = ($('#softHoldLabel').value||'').trim();
-  if(!label){ alert('Enter a prospect/launch label so this hold is identifiable later.'); return; }
+  const name = ($('#softHoldLabel').value||'').trim();
+  if(!name){ uiAlert('Enter the prospect\'s name so this hold is identifiable later.'); return; }
   const { coach, plan } = r;
-  const openWeeks = plan.seq.filter(w=>!occ[coach.id+'|'+w]);
-  const skipped = plan.seq.length - openWeeks.length;
-  for(const w of openWeeks){
-    await api('PUT','/api/blocks',{coach:coach.id, week:w, kind:'soft_pencil', label});
-  }
-  await refresh();
-  renderPreviewPanel();
-  loadSoftHolds();
-  toast(`Placed ${openWeeks.length} soft-pencil week(s) for ${label}${skipped?` (${skipped} week(s) skipped — no longer open)`:''}`);
+  try{
+    const resp = await api('POST','/api/prospect-holds',{ name, coachId: coach.id, program: st.availProg || 'Quarterly', weeks: plan.seq });
+    await refresh();
+    renderPreviewPanel();
+    loadSoftHolds();
+    toast(`Held ${resp.weeks.length} week(s) for ${name} — auto-releases ${fmt(resp.expires)} unless converted or extended`);
+  }catch(e){ /* api() already toasted the error (e.g. a week was just taken) */ }
 }
-function loadSoftHolds(){
-  const holds = {};
-  for(const b of (D.blocks||[])){
-    if(b.kind!=='soft_pencil') continue;
-    const key = b.coach_id+'|'+(b.label||'');
-    if(!holds[key]) holds[key] = { coachId:b.coach_id, label:b.label, weeks:[] };
-    holds[key].weeks.push(b.week);
-  }
-  const list = Object.values(holds).sort((a,b)=>Math.min(...a.weeks.map(w=>+new Date(w)))-Math.min(...b.weeks.map(w=>+new Date(w))));
-  $('#softHoldsOut').innerHTML = list.length ? `<table><tr><th>Label</th><th>Coach</th><th>Team</th><th>Weeks held</th><th></th></tr>` +
-    list.map(h=>{ const c=coach(h.coachId); const sorted=h.weeks.slice().sort();
-      return `<tr><td><b>${esc(h.label||'(no label)')}</b></td><td>${esc(c?c.name:h.coachId)}</td><td>${esc(c?c.team:'—')}</td>
-      <td>${sorted.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td>
-      <td><button class="btn tiny primary" onclick="convertHoldToClient('${h.coachId}','${esc(h.label).replace(/'/g,"\\'")}')">Convert to client</button>
-      <button class="btn tiny danger" onclick="releaseSoftHold('${h.coachId}','${esc(h.label).replace(/'/g,"\\'")}')">Release</button></td></tr>`;
+async function loadSoftHolds(){
+  const out = $('#softHoldsOut'); if(!out) return;
+  let holds = [];
+  try{ holds = await api('GET','/api/prospect-holds'); }catch(e){ out.innerHTML='<p class="small">Could not load.</p>'; return; }
+  st.holdList = holds;
+  out.innerHTML = holds.length ? `<table><tr><th>Prospect</th><th>Coach</th><th>Program</th><th>Weeks held</th><th>Expires</th><th>Placed by</th><th></th></tr>` +
+    holds.map(h=>{ const c=coach(h.coach_id);
+      const daysLeft = h.expires ? Math.ceil((new Date(h.expires+'T12:00:00') - new Date())/864e5) : null;
+      const expBadge = daysLeft===null ? '—'
+        : daysLeft <= 7 ? `<span class="pill p-over">${fmt(h.expires)} · ${daysLeft}d left</span>`
+        : `<span class="pill p-fut">${fmt(h.expires)}</span>`;
+      return `<tr><td><b>${esc(h.name)}</b></td><td>${esc(c?c.name:h.coach_id)}${c?` <span class="small">(${esc(c.team)})</span>`:''}</td>
+      <td>${esc(h.program)}</td>
+      <td>${h.weeks.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td>
+      <td>${expBadge}</td>
+      <td class="small">${esc((h.created_by||'').split('@')[0])} · ${fmt(h.created.slice(0,10))}</td>
+      <td class="actions-nowrap"><button class="btn tiny primary" onclick="convertHold(${h.id})">Convert to client</button>
+      <button class="btn tiny danger" onclick="releaseHold(${h.id})">Release</button></td></tr>`;
     }).join('') + `</table>` : `<p class="small">No soft-pencil holds currently placed.</p>`;
 }
-async function releaseSoftHold(coachId, label){
-  if(!confirm(`Release the soft-pencil hold "${label}"? Those weeks go back to open.`)) return;
-  const weeks = (D.blocks||[]).filter(b=>b.coach_id===coachId && b.kind==='soft_pencil' && (b.label||'')===label).map(b=>b.week);
-  for(const w of weeks){ await api('PUT','/api/blocks',{coach:coachId, week:w, kind:'open'}); }
+async function releaseHold(id){
+  const h = (st.holdList||[]).find(x=>x.id===id);
+  if(!(await uiConfirm(`Release the hold for "${h?h.name:'this prospect'}"? Those weeks go back to open.`,'Release'))) return;
+  await api('POST',`/api/prospect-holds/${id}/release`);
   await refresh();
   loadSoftHolds();
   if(st.view==='availability' && st.previewResult) renderPreviewPanel();
   toast('Hold released — weeks are open again');
 }
-/* Turning a soft pencil into a "hard pencil": a soft-pencil hold is purely a calendar
-   placeholder — it never touches clients, contracts, or Keap. The actual conversion is
-   the same path every other new client takes: a real Keap subscription (via a webhook
-   landing in Unassigned Clients, or a manually-added contract here) creates the real
-   contract + visits, which is what makes it show up in LID Inventory and reconcile
-   against Keap the normal way. This just removes the placeholder and pre-fills that
-   normal New Contract form so the transition is one click instead of hunting down which
-   weeks were reserved. */
-async function convertHoldToClient(coachId, label){
-  const weeks = (D.blocks||[]).filter(b=>b.coach_id===coachId && b.kind==='soft_pencil' && (b.label||'')===label).map(b=>b.week).sort();
-  const c = coach(coachId);
-  if(!confirm(`Convert "${label}"? This releases ${weeks.length} held week(s) on ${c?c.name:coachId}'s calendar and opens the New Contract form pre-filled — you'll place the real visits on those freed-up weeks afterward from the Schedule Board.`)) return;
-  for(const w of weeks){ await api('PUT','/api/blocks',{coach:coachId, week:w, kind:'open'}); }
+/* Turning a soft pencil into the real thing: the server releases the held weeks and
+   returns the hold's details; the contract itself is then created through the exact
+   same New Contract form/route as every other client, so LID Inventory and Keap
+   reconciliation work identically — a converted hold leaves no special residue. */
+async function convertHold(id, prefillName){
+  const h = (st.holdList||[]).find(x=>x.id===id);
+  if(!(await uiConfirm(`Convert "${h?h.name:'this hold'}"? This frees the held week(s) and opens the New Contract form pre-filled — you'll place the real visits on those freed-up weeks afterward from the Schedule Board.`,'Convert'))) return;
+  const r = await api('POST',`/api/prospect-holds/${id}/convert`);
   await refresh();
   loadSoftHolds();
   closePreviewOverlay();
   contractDlg();
-  $('#cName').value = label;
-  if(c){ $('#cTeam').value = c.team; }
-  if(weeks.length) $('#cFirst').value = weeks[0];
-  toast(`${weeks.length} week(s) freed up on ${c?c.name:coachId}'s calendar — finish creating the contract, then place the visits on those same weeks.`);
+  $('#cName').value = prefillName || r.name;
+  $('#cProg').value = PROGRAMS.includes(r.program) ? r.program : 'Quarterly';
+  onContractProgramChange();
+  if(r.team) $('#cTeam').value = r.team;
+  if(r.weeks && r.weeks.length) $('#cFirst').value = r.weeks[0];
+  toast(`${(r.weeks||[]).length} week(s) freed up — finish creating the contract, then place the visits on those same weeks.`);
 }
 
 /* ---------- pending clients (new Keap subscriptions awaiting team assignment) ---------- */
@@ -797,11 +937,19 @@ async function loadPending(){
     const rows = await api('GET','/api/pending-clients');
     st.pendingList = rows;
     $('#pendingOut').innerHTML = rows.length ? `<table><tr><th>Company</th><th>Contact</th><th class="num">Amount</th><th>Billing</th><th>Started</th><th></th></tr>` +
-      rows.map(r=>`<tr><td><b>${esc(r.company_name||'(unknown)')}</b></td><td class="small">${esc(r.contact_name||'—')}</td>
+      rows.map(r=>{
+        const hm = r.hold_match;
+        const matchRow = hm ? `<tr><td colspan="6" style="background:#fdf6e3;border-left:4px solid var(--gold);padding:8px 12px">
+          <b>Looks like your soft-pencil hold:</b> "${esc(hm.name)}" with ${esc(hm.coachName)}${hm.team?` (Team ${esc(hm.team)})`:''} —
+          ${hm.weeks.length} week(s) reserved starting ${fmtW(hm.weeks[0])}, ${esc(hm.program)}.
+          <button class="btn tiny primary" style="margin-left:8px" onclick="assignPendingDlg(${r.id}, ${hm.id})">Use this hold</button>
+        </td></tr>` : '';
+        return `<tr><td><b>${esc(r.company_name||'(unknown)')}</b></td><td class="small">${esc(r.contact_name||'—')}</td>
         <td class="num">${r.billing_amount?'$'+r.billing_amount:'—'}</td><td class="small">${esc(r.billing_cycle||'—')} ×${r.billing_frequency||1}</td>
         <td class="small">${esc(r.start_date||'—')}</td>
         <td><button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
-        <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button></td></tr>`).join('') + `</table>`
+        <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button></td></tr>` + matchRow;
+      }).join('') + `</table>`
       : `<p class="small">Nothing waiting — you're all caught up.</p>`;
   }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
 }
@@ -809,16 +957,19 @@ function coachOptsFor(team){
   const list = D.coaches.filter(c=>!team||c.team===team);
   return `<option value="">— select —</option>` + list.map(c=>`<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`).join('');
 }
-function assignPendingDlg(id){
+function assignPendingDlg(id, holdId){
   const r = (st.pendingList||[]).find(x=>x.id===id); if(!r) return;
-  const guessed = guessProgram(r.billing_cycle, r.billing_frequency);
+  const hm = holdId && r.hold_match && r.hold_match.id===holdId ? r.hold_match : null;
+  st._pendingHoldId = hm ? hm.id : null;
+  const guessed = hm && PROGRAMS.includes(hm.program) ? hm.program : guessProgram(r.billing_cycle, r.billing_frequency);
   openDlg(`<h3>Assign — ${esc(r.company_name||'(unknown)')}</h3>
+    ${hm ? `<p class="small" style="background:#fdf6e3;padding:6px 10px;border-left:4px solid var(--gold)">Pre-filled from your hold "${esc(hm.name)}" — creating this contract will release the ${hm.weeks.length} reserved week(s) on ${esc(hm.coachName)}'s calendar so you can place the real visits there.</p>` : ''}
     <label>Client name</label><input id="pClient" value="${esc(r.company_name||r.contact_name||'')}">
     <label>Program</label><select id="pProg" onchange="onPendingProgramChange()">${PROGRAMS.map(p=>`<option ${p===guessed?'selected':''}>${p}</option>`).join('')}</select>
     <div id="pVisitFields">
       <label>Number of visits</label><input id="pN" type="number" value="${CYCLE_LEN[guessed]||4}">
-      <label>First visit due</label><input id="pFirst" type="date" value="${r.start_date||TODAY}">
-      <label>Team</label><select id="pTeam">${teamOpts()}</select>
+      <label>First visit due</label><input id="pFirst" type="date" value="${(hm&&hm.weeks[0])||r.start_date||TODAY}">
+      <label>Team</label><select id="pTeam">${teamOpts(hm?hm.team:undefined)}</select>
     </div>
     <div id="pCoachFields" style="display:none">
       <label>Assigned coach</label><select id="pCoach" onchange="onPendingCoachChange()">${coachOptsFor()}</select>
@@ -837,24 +988,37 @@ function onPendingCoachChange(){
   const sel = $('#pCoach'); const opt = sel.options[sel.selectedIndex];
   st._pendingCoachTeam = opt ? opt.dataset.team : null;
 }
+/* If the assign came from a hold-match banner, converting the hold happens after the
+   contract creation succeeds — freeing the coach's reserved weeks so the newly-created
+   visits can be placed exactly there from the Schedule Board. */
+async function finishPendingHold(){
+  const holdId = st._pendingHoldId; st._pendingHoldId = null;
+  if(!holdId) return '';
+  try{
+    const r = await api('POST',`/api/prospect-holds/${holdId}/convert`);
+    return ` — ${(r.weeks||[]).length} reserved week(s) freed on ${esc(coach(r.coachId)?.name||'the coach')}'s calendar, place the visits there`;
+  }catch(e){ return ' (could not auto-release the hold — release it from Availability)'; }
+}
 async function saveAssignPending(id){
-  const client=$('#pClient').value.trim(); if(!client){alert('Client name required');return;}
+  const client=$('#pClient').value.trim(); if(!client){uiAlert('Client name required');return;}
   const program=$('#pProg').value;
   if(program==='Coaching Only'){
     const coachId = $('#pCoach').value;
-    if(!coachId){ alert('Pick a coach'); return; }
+    if(!coachId){ uiAlert('Pick a coach'); return; }
     const coach = D.coaches.find(c=>c.id===coachId);
     await api('POST',`/api/pending-clients/${id}/assign`,{client, program, n:0, first:null, team:coach.team, coachId});
-    closeDlg(); await refresh(); toast(client+' added — Coaching Only, assigned to '+coach.name);
+    const extra = await finishPendingHold();
+    closeDlg(); await refresh(); toast(client+' added — Coaching Only, assigned to '+coach.name+extra);
     return;
   }
   const n=+$('#pN').value, first=$('#pFirst').value, team=$('#pTeam').value;
-  if(!first||!(n>0)||!team){alert('Program visit count, first due date and team are required');return;}
+  if(!first||!(n>0)||!team){uiAlert('Program visit count, first due date and team are required');return;}
   await api('POST',`/api/pending-clients/${id}/assign`,{client,program,n,first,team});
-  closeDlg(); await refresh(); toast(client+' added — contract created');
+  const extra = await finishPendingHold();
+  closeDlg(); await refresh(); toast(client+' added — contract created'+extra);
 }
 async function ignorePending(id){
-  if(!confirm("Ignore this subscription? It won't be added to the LID Inventory.")) return;
+  if(!(await uiConfirm("Ignore this subscription? It won't be added to the LID Inventory.","Ignore"))) return;
   await api('POST',`/api/pending-clients/${id}/ignore`,{}); await refresh(); toast('Ignored');
 }
 
@@ -890,10 +1054,10 @@ async function syncWithKeap(){
       r.errors && r.errors.length ? `Errors: ${r.errors.length}\n  ${r.errors.slice(0,5).join('\n  ')}` : '',
       typeof r.totalRevenue==='number' ? `\nCurrent active revenue total: ${fmtMoney(r.totalRevenue)} across ${r.activeClients} active client(s).` : '',
     ].filter(Boolean).join('\n');
-    alert(lines);
+    uiAlert(lines);
     await loadClients();
   }catch(e){
-    alert('Sync failed: ' + (e.message||e));
+    uiAlert('Sync failed: ' + (e.message||e));
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = 'Sync with Keap'; }
   }
@@ -1110,7 +1274,7 @@ function editCoachDlg(id){
     <button class="btn primary" onclick="saveCoachEdit('${id}')">Save</button></div>`);
 }
 async function saveCoachEdit(id){
-  const name = $('#ecName').value.trim(); if(!name){ alert('Name required'); return; }
+  const name = $('#ecName').value.trim(); if(!name){ uiAlert('Name required'); return; }
   await api('PATCH','/api/coaches/'+id, { name, team: $('#ecTeam').value, phone: $('#ecPhone').value.trim(), start_date: $('#ecStart').value || null });
   closeDlg(); await refresh(); toast('Profile updated');
   if(st.view==='coachprofile') await loadCoachProfile(st.coachId);
@@ -1128,7 +1292,7 @@ function editUserDlg(id){
 }
 async function saveUserEdit(id){
   const name = $('#euName').value.trim(); const email = $('#euEmail').value.trim();
-  if(!name || !email){ alert('Name and email required'); return; }
+  if(!name || !email){ uiAlert('Name and email required'); return; }
   await api('PATCH','/api/users/'+id, { name, email, role: $('#euRole').value, team: $('#euTeam').value, coach_id: $('#euCoach').value || null });
   closeDlg(); await refresh(); toast('User updated');
 }
@@ -1152,7 +1316,7 @@ function deleteClientDlg(clientId, clientName){
     <button class="btn primary danger" onclick="doDeleteClient(${clientId},'${esc(clientName).replace(/'/g,"\\'")}')">Delete</button></div>`);
 }
 async function doDeleteClient(clientId, clientName){
-  if($('#delConfirm').value.trim() !== clientName){ alert('Name does not match — nothing was deleted.'); return; }
+  if($('#delConfirm').value.trim() !== clientName){ uiAlert('Name does not match — nothing was deleted.'); return; }
   await api('DELETE','/api/clients/'+clientId);
   closeDlg(); toast(clientName+' deleted');
   go('clients');
@@ -1202,14 +1366,14 @@ async function keapNotesPreviewDlg(clientId){
 }
 async function doImportKeapNotes(clientId){
   const noteIds = Array.from(document.querySelectorAll('.knImport:checked')).map(x=>x.value);
-  if(!noteIds.length){ alert('Select at least one note to import.'); return; }
+  if(!noteIds.length){ uiAlert('Select at least one note to import.'); return; }
   const r = await api('POST', '/api/clients/'+clientId+'/keap-notes-import', { noteIds });
   closeDlg(); toast(`Imported ${r.imported} note(s) from Keap`);
   await loadClientProfile(clientId);
 }
 async function saveClientNote(clientId){
   const body = $('#cliNoteBody').value.trim();
-  if(!body){ alert('Note cannot be empty'); return; }
+  if(!body){ uiAlert('Note cannot be empty'); return; }
   const note_date = $('#cliNoteDate').value || TODAY;
   const note_type = $('#cliNoteType').value;
   await api('POST','/api/clients/'+clientId+'/notes', { body, note_date, note_type });
@@ -1227,13 +1391,13 @@ function editNoteDlg(clientId, noteId){
 }
 async function saveEditedNote(clientId, noteId){
   const body = $('#enBody').value.trim();
-  if(!body){ alert('Note cannot be empty'); return; }
+  if(!body){ uiAlert('Note cannot be empty'); return; }
   await api('PATCH',`/api/clients/${clientId}/notes/${noteId}`, { body, note_date: $('#enDate').value, note_type: $('#enType').value });
   closeDlg(); toast('Note updated');
   await loadClientProfile(clientId);
 }
 async function deleteClientNote(clientId, noteId){
-  if(!confirm('Delete this note? This cannot be undone.')) return;
+  if(!(await uiConfirm('Delete this note? This cannot be undone.','Delete'))) return;
   await api('DELETE',`/api/clients/${clientId}/notes/${noteId}`);
   toast('Note deleted');
   await loadClientProfile(clientId);
@@ -1264,9 +1428,10 @@ const FAQ = [
     { q: 'I completed a visit by mistake — can I undo it?', a: `Admins and leads can reopen a completed visit from the Inventory page, which clears its completed status. The note you logged (if any) stays on the client's record either way.` },
   ]},
   { cat: 'Availability & soft pencil holds', roles: ['admin','lead','sales'], items: [
-    { q: 'What is a soft pencil hold?', a: `A tentative calendar placeholder — nothing else. Placing one from the Availability page's "Preview calendar" reserves specific weeks on a coach's schedule for a prospect (before they've signed), so nobody else can double-book those weeks. It never creates a client, contract, or anything Keap sees. It's identical to the other calendar block types (Home, Off, Training, etc.) under the hood, just labeled with the prospect's name.` },
+    { q: 'What is a soft pencil hold?', a: `A tentative reservation of specific weeks on a coach's schedule for a prospect who hasn't signed yet, placed from the Availability page's "Preview calendar." It records the prospect's name, program, who placed it and when — and it blocks those weeks from being double-booked. It never creates a client, contract, or anything Keap sees. Every hold has an expiry date (30 days after its last held week by default): if the deal goes quiet, the nightly job warns admins a week ahead, then auto-releases the weeks so they don't rot on the calendar.` },
+    { q: 'The prospect signed in Keap — do I have to reconnect it to the hold by hand?', a: `No. When the new subscription lands in Unassigned Clients, the app automatically checks it against your active holds by name and shows a banner on that row: "Looks like your soft-pencil hold with [coach]." Click "Use this hold" and the assign form opens pre-filled with the hold's program, team, and first reserved week — creating the contract then automatically frees the reserved weeks so you can place the real visits right where they were penciled in.` },
     { q: 'Does a soft pencil hold show up in LID Inventory or get billed?', a: `No. It's calendar-only. Nothing appears in LID Inventory, no revenue is counted, and Keap never hears about it. That only happens once the deal actually signs and becomes a real contract.` },
-    { q: 'The deal signed — how do I turn a soft pencil into the real thing?', a: `From Availability → Active soft-pencil holds, click "Convert to client." That releases the held weeks and opens the same New Contract form used everywhere else in the app, pre-filled with the prospect's name and the coach's team. Finish the form the normal way (program, visit count, first visit date), then place the visits on the same weeks from the Schedule Board. From that point on it's a completely normal contract — reconciled against Keap exactly like any other client (see "Client notes & Keap" below), with no special soft-pencil residue anywhere.` },
+    { q: 'The deal signed — how do I turn a soft pencil into the real thing?', a: `Two ways. Preferred: wait for the Keap subscription to land in Unassigned Clients and click "Use this hold" on the automatic match banner (see above). Manual: from Availability → Active soft-pencil holds, click "Convert to client" — it frees the held weeks and opens the New Contract form pre-filled with the prospect's name, program, team, and first reserved week. Either way, from that point on it's a completely normal contract — reconciled against Keap exactly like any other client, with no special soft-pencil residue anywhere.` },
     { q: 'What if the deal falls through?', a: `Click "Release" instead of "Convert to client" on Active soft-pencil holds — the weeks go back to fully open, nothing else to clean up.` },
   ]},
   { cat: 'Client notes & Keap', roles: ['admin','lead'], items: [
@@ -1312,7 +1477,19 @@ function faqView(){
 }
 
 /* ---------- admin ---------- */
+/* Split into three sub-tabs — the old single page had backups buried under a
+   full scroll of roster history, which non-technical admins simply never found. */
+const ADMIN_TABS = [['people','Team & Users'],['data','Data & Backups'],['history','History & Audit']];
+function setAdminTab(t){ st.adminTab=t; render(); }
 function adminView(){
+  const tab = st.adminTab || 'people';
+  let html = `<div class="controls" style="margin-bottom:14px">` +
+    ADMIN_TABS.map(([k,l])=>`<button class="btn ${tab===k?'primary':''}" onclick="setAdminTab('${k}')">${l}</button>`).join('') + `</div>`;
+  if(tab==='people') return html + adminPeopleView();
+  if(tab==='data') return html + adminDataView();
+  return html + adminHistoryView();
+}
+function adminPeopleView(){
   let html=`<div class="panel"><h2>Teams &amp; coaches</h2>
     <div class="controls"><button class="btn primary" onclick="coachDlg()">＋ Add coach</button>
     <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
@@ -1341,8 +1518,11 @@ function adminView(){
       <button class="btn tiny" onclick="resetPwDlg(${u.id},'${esc(u.name)}')">Reset pw</button>
       ${u.id!==D.user.id?`<button class="btn tiny danger" onclick="toggleUser(${u.id},${u.active?0:1})">${u.active?'Disable':'Enable'}</button>`:''}</td></tr>`;
   });
-  html+=`</table></div>
-  <div class="panel"><h2>Recently cancelled via Keap</h2>
+  html+=`</table></div>`;
+  return html;
+}
+function adminDataView(){
+  let html=`<div class="panel"><h2>Recently cancelled via Keap</h2>
   <p class="small" style="margin-bottom:12px">Auto-flagged when Keap reports a subscription cancelled. Future visits are left on the
   board on purpose — clear or reassign them from the Inventory screen once you've confirmed.</p>
   <div id="cancelledOut" class="small">Loading…</div></div>
@@ -1361,8 +1541,11 @@ function adminView(){
   <div id="revenueHistoryOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Recently deleted</h2>
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
-  <div id="deletedOut" class="small">Loading…</div></div>
-  <div class="panel"><h2>Client roster history</h2>
+  <div id="deletedOut" class="small">Loading…</div></div>`;
+  return html;
+}
+function adminHistoryView(){
+  let html=`<div class="panel"><h2>Client roster history</h2>
   <p class="small" style="margin-bottom:12px">A frozen snapshot of every client's status is captured automatically at the start of each month,
   so you can look back at who was active in any given month, not just today.</p>
   <div class="controls"><select id="chPeriod" onchange="loadClientHistory(this.value)"></select></div>
@@ -1415,7 +1598,7 @@ function coachDlg(){
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveCoach()">Add</button></div>`);
 }
-async function saveCoach(){ const n=$('#kName').value.trim(); if(!n){alert('Name required');return;}
+async function saveCoach(){ const n=$('#kName').value.trim(); if(!n){uiAlert('Name required');return;}
   await api('POST','/api/coaches',{name:n,team:$('#kTeam').value}); closeDlg(); await refresh(); toast(n+' added — their weeks are open capacity'); }
 async function moveCoach(id,team){ if(!team) return; await api('PATCH','/api/coaches/'+id,{team}); await refresh(); toast('Moved'); }
 function removeCoach(id,name){ coachDeactivateDlg(id,name); }

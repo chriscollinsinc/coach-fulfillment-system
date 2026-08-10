@@ -21,6 +21,14 @@ nav button:hover:not(.active){background:rgba(255,255,255,.12)}
 .navdrop.open .navdrop-menu{display:flex}
 .navdrop-menu a{display:block;padding:9px 14px;font-family:var(--head);text-transform:uppercase;letter-spacing:.6px;font-size:11.5px;color:#d9d9de;cursor:pointer;white-space:nowrap}
 .navdrop-menu a:hover{background:rgba(255,255,255,.12);color:#fff}
+.gsearch{position:relative;margin-left:10px}
+.gsearch input{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);color:#fff;padding:6px 12px;font-size:12.5px;width:190px;border-radius:0}
+.gsearch input::placeholder{color:#9a9aa2}
+.gsearch input:focus{outline:none;border-color:var(--gold);background:rgba(255,255,255,.16)}
+.gsearch-results{position:absolute;top:100%;right:0;min-width:290px;background:#fff;border:1px solid var(--line);border-top:3px solid var(--primary);box-shadow:0 10px 30px rgba(0,0,0,.25);z-index:80;max-height:380px;overflow-y:auto}
+.gsearch-results a{display:flex;align-items:center;gap:7px;padding:9px 13px;color:var(--ink);cursor:pointer;font-size:13px;border-bottom:1px solid var(--line)}
+.gsearch-results a:hover{background:#faf6f0}
+.gsearch-results .gs-empty{padding:10px 13px;font-size:12.5px;color:var(--muted)}
 .userchip{font-size:11.5px;color:#aaa;text-align:right;line-height:1.3;white-space:nowrap}
 .userchip a{color:var(--gold);cursor:pointer;text-decoration:none}
 main{padding:18px 20px;max-width:1560px;margin:0 auto}
@@ -36,6 +44,8 @@ table{border-collapse:collapse;width:100%;font-size:13px}
 th{font-family:var(--head);font-size:10.5px;font-weight:500;text-transform:uppercase;letter-spacing:1px;color:var(--muted);text-align:left;padding:6px 8px;border-bottom:2px solid var(--secondary);white-space:nowrap}
 td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
 td.actions-nowrap{white-space:nowrap}
+.invtable th{position:sticky;top:54px;background:var(--panel);z-index:5}
+.invtable tr:hover td{background:#faf6f0}
 td.actions-nowrap .btn{margin-right:4px}
 td.actions-nowrap .btn:last-child{margin-right:0}
 tr:hover td{background:#fafbfd}
@@ -132,3 +142,30 @@ dialog select,dialog input{width:100%}
 .toast{position:fixed;bottom:20px;right:20px;background:var(--secondary);color:#fff;padding:10px 16px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .3s;z-index:99;border-left:4px solid var(--gold)}
 .toast.show{opacity:1;pointer-events:auto}
 .toast button{margin-left:12px;background:var(--gold);border:0;color:var(--secondary);font-weight:700;padding:3px 10px;cursor:pointer;font-family:var(--head);text-transform:uppercase;font-size:11px}
+
+/* ---------- mobile (coaches completing visits from the field) ---------- */
+@media(max-width:760px){
+  header{flex-wrap:wrap;padding:8px 10px;gap:8px}
+  header h1{font-size:14px}
+  header img.logo{height:24px}
+  nav{order:3;width:100%;margin-left:0;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  nav button{padding:8px 10px;font-size:11.5px;white-space:nowrap}
+  .gsearch{margin-left:auto}
+  .gsearch input{width:120px}
+  .gsearch-results{right:auto;left:0}
+  .userchip{display:none !important}
+  main{padding:10px}
+  .cards{grid-template-columns:repeat(2,1fr);gap:8px}
+  .card .k{font-size:22px}
+  .panel{padding:10px}
+  .panel table{display:block;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .invtable th{top:0}
+  .controls{gap:6px}
+  .controls input,.controls select{font-size:16px} /* 16px prevents iOS zoom-on-focus */
+  dialog{min-width:0;width:calc(100vw - 30px);max-width:calc(100vw - 30px)}
+  textarea{font-size:16px}
+  .boardlayout{grid-template-columns:1fr}
+  .sidebox{position:static;max-height:none}
+  .previewbody{padding:10px}
+  .previewbar{padding:10px;flex-wrap:wrap}
+}
