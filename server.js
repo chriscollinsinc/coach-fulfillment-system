@@ -963,10 +963,25 @@ route('GET', /^\/api\/clients$/, ['admin','lead','sales','coach'], (req, res, m,
   const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active'").all();
   const byClient = {};
   for(const c of activeContracts) (byClient[c.client_id] ||= []).push(c);
+  // Set-based health per client — same tiers as the profile banner, so the list's
+  // colored pill and the profile's banner never disagree.
+  const today = new Date().toISOString().slice(0,10);
+  const cut60 = new Date(Date.now()-60*24*60*60*1000).toISOString().slice(0,10);
+  const plus30 = new Date(Date.now()+30*24*60*60*1000).toISOString().slice(0,10);
+  const toMap = (sql, ...args) => Object.fromEntries(db.prepare(sql).all(...args).map(r => [r.client_id, r.v]));
+  const mOverdueNoPlan = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND cal_week IS NULL AND due<? AND client_id IS NOT NULL GROUP BY client_id`, today);
+  const mBehind = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND client_id IS NOT NULL AND ((cal_week IS NOT NULL AND due<?) OR (cal_week IS NULL AND due>=? AND due<=?)) GROUP BY client_id`, today, today, plus30);
+  const mScheduled = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND cal_week>=? AND client_id IS NOT NULL GROUP BY client_id`, today);
+  const mLastDone = toMap(`SELECT client_id, MAX(COALESCE(completed_on,due)) v FROM visits WHERE completed=1 AND client_id IS NOT NULL GROUP BY client_id`, );
   for(const r of rows){
     const cs = byClient[r.id] || [];
     r.programs = [...new Set(cs.map(c => c.program).filter(Boolean))].join(', ');
     r.revenue = cs.reduce((sum, c) => sum + (Number(c.price) || 0), 0);
+    if(r.status !== 'active'){ r.health = 'inactive'; continue; }
+    const coachingOnly = cs.length > 0 && cs.every(c => c.program === 'Coaching Only');
+    if(coachingOnly){ r.health = r.assigned_coach_id ? 'on_track' : 'behind'; continue; }
+    const stale = (!mLastDone[r.id] || mLastDone[r.id] < cut60) && !mScheduled[r.id];
+    r.health = (mOverdueNoPlan[r.id] || stale) ? 'at_risk' : mBehind[r.id] ? 'behind' : 'on_track';
   }
   send(res, 200, rows);
 });
@@ -984,8 +999,55 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
     assignedCoach,
     contracts, visits,
     visitProgress: { year, total: visitsThisYear.length, completed: completedThisYear },
+    health: clientHealth(cl, contracts, visits, assignedCoach),
   });
 });
+/* One computed answer to "is this client okay?" — shown as the banner at the top
+   of every client profile. level: on_track | behind | at_risk | inactive.
+   reasons[] explains WHY in plain language; fixes[] hints at the next action. */
+function clientHealth(cl, contracts, visits, assignedCoach){
+  const today = new Date().toISOString().slice(0,10);
+  const cut60 = new Date(Date.now()-60*24*60*60*1000).toISOString().slice(0,10);
+  const plus30 = new Date(Date.now()+30*24*60*60*1000).toISOString().slice(0,10);
+  const reasons = [], warnings = [];
+  if(cl.status !== 'active'){
+    return { level:'inactive', label: cl.status === 'cancelled' ? 'Cancelled' : 'Inactive',
+      reasons: ['No active contracts — history is preserved below.'], warnings: [] };
+  }
+  const activeCs = contracts.filter(c => c.status === 'active');
+  const coachingOnly = activeCs.length > 0 && activeCs.every(c => c.program === 'Coaching Only');
+  if(!assignedCoach) warnings.push('No coach assigned — nobody owns this relationship.');
+  if(!cl.keap_id) warnings.push('No Keap company linked — billing can\'t be reconciled automatically.');
+  if(coachingOnly){
+    return { level: assignedCoach ? 'on_track' : 'behind', label: assignedCoach ? 'On track — Coaching Only' : 'Needs attention',
+      reasons: assignedCoach ? [`Remote coaching with ${assignedCoach.name}; no LID visits owed.`] : ['Coaching Only client with no coach assigned.'], warnings };
+  }
+  const open = visits.filter(v => !v.completed);
+  const overdueNoPlan = open.filter(v => v.due && v.due < today && !v.cal_week);
+  const lateOnCal = open.filter(v => v.due && v.due < today && v.cal_week);
+  const dueSoonUnsched = open.filter(v => v.due && v.due >= today && v.due <= plus30 && !v.cal_week);
+  const nextScheduled = open.filter(v => v.cal_week && v.cal_week >= today).sort((a,b)=>a.cal_week.localeCompare(b.cal_week))[0] || null;
+  const completed = visits.filter(v => v.completed);
+  const lastDone = completed.map(v => v.completed_on || v.due).filter(Boolean).sort().pop() || null;
+  const staleRelationship = (!lastDone || lastDone < cut60) && !nextScheduled;
+
+  if(overdueNoPlan.length){
+    const oldest = overdueNoPlan[0];
+    const days = Math.floor((new Date(today) - new Date(oldest.due)) / 864e5);
+    reasons.push(`${overdueNoPlan.length} overdue visit${overdueNoPlan.length>1?'s':''} with no calendar slot — oldest is ${days} days late (${oldest.cycle} ${oldest.program}).`);
+  }
+  if(staleRelationship) reasons.push(lastDone ? `No completed visit since ${lastDone} and nothing on the calendar.` : 'No visit has ever been completed and nothing is on the calendar.');
+  if(lateOnCal.length) reasons.push(`${lateOnCal.length} visit${lateOnCal.length>1?'s are':' is'} past due but already scheduled — late, not lost.`);
+  if(dueSoonUnsched.length) reasons.push(`${dueSoonUnsched.length} visit${dueSoonUnsched.length>1?'s':''} due within 30 days, not yet scheduled.`);
+  if(nextScheduled) reasons.push(`Next visit: week of ${nextScheduled.cal_week} (${nextScheduled.cycle} ${nextScheduled.program}).`);
+  if(lastDone) reasons.push(`Last completed visit: ${lastDone}.`);
+
+  const level = (overdueNoPlan.length || staleRelationship) ? 'at_risk'
+    : (lateOnCal.length || dueSoonUnsched.length) ? 'behind'
+    : 'on_track';
+  const label = level === 'at_risk' ? 'At risk' : level === 'behind' ? 'Behind — recoverable' : 'On track';
+  return { level, label, reasons, warnings };
+}
 route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');

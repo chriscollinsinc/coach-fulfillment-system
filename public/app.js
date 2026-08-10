@@ -1116,6 +1116,7 @@ async function ignorePending(id){
 /* ---------- clients (profiles) ---------- */
 const CLIENT_COLS = [
   { key:'name', label:'Client', type:'string' },
+  { key:'health', label:'Health', type:'string' },
   { key:'status', label:'Status', type:'string' },
   { key:'programs', label:'Product type', type:'string' },
   { key:'revenue', label:'Revenue', type:'num' },
@@ -1163,6 +1164,11 @@ function sortClients(key){
   renderClientTable();
 }
 function fmtMoney(n){ return (n||n===0) ? '$'+Number(n).toLocaleString(undefined,{maximumFractionDigits:0}) : '—'; }
+const healthPill = h =>
+  h==='at_risk' ? '<span class="pill p-over">At risk</span>'
+  : h==='behind' ? '<span class="pill p-due">Behind</span>'
+  : h==='on_track' ? '<span class="pill p-done">On track</span>'
+  : '<span class="pill p-fut">—</span>';
 function renderClientTable(){
   const box = $('#clientsOut'); if(!box) return;
   const q = norm(st.cliSearch||'');
@@ -1181,13 +1187,14 @@ function renderClientTable(){
   const th = c => `<th class="${c.type==='num'?'num':''}" style="cursor:pointer;user-select:none" onclick="sortClients('${c.key}')">${c.label}<span class="small">${arrow(c.key)}</span></th>`;
   box.innerHTML = `<table><tr>${CLIENT_COLS.map(th).join('')}<th></th></tr>` +
     rows.map(c=>`<tr><td><b>${esc(c.name)}</b></td>
+      <td>${healthPill(c.health)}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}</td>
       <td>${esc(c.programs||'—')}</td>
       <td class="num">${fmtMoney(c.revenue)}</td>
       <td class="num">${c.active_contracts}</td><td>${esc(c.assigned_coach_name||'—')}</td>
       <td><button class="btn tiny" onclick="openClientProfile(${c.id})">View profile →</button></td></tr>`).join('') +
     `<tr style="font-weight:600;border-top:2px solid var(--border,#ccc)">
-      <td colspan="3">Total — ${rows.length} client${rows.length===1?'':'s'}</td>
+      <td colspan="4">Total — ${rows.length} client${rows.length===1?'':'s'}</td>
       <td class="num">${fmtMoney(totalRevenue)}</td><td></td><td></td><td></td></tr>` +
     `</table>` + (rows.length ? '' : `<p class="small">No clients match.</p>`);
 }
@@ -1201,11 +1208,27 @@ async function loadClientProfile(id){
     $('#main').innerHTML = clientProfileView(data, notes);
   }catch(e){ $('#main').innerHTML = '<div class="panel"><p class="small">Could not load this client.</p></div>'; }
 }
+const HEALTH_STYLE = {
+  on_track: { bg:'#e2f4ea', border:'var(--ok)', ink:'#186b45' },
+  behind:   { bg:'#fdeecd', border:'var(--warn)', ink:'#8a5b06' },
+  at_risk:  { bg:'#fbe3e3', border:'var(--bad)', ink:'#a12626' },
+  inactive: { bg:'#f0f0f1', border:'#9a9aa2', ink:'#55555c' },
+};
+function healthBanner(h){
+  if(!h) return '';
+  const s = HEALTH_STYLE[h.level] || HEALTH_STYLE.inactive;
+  return `<div style="background:${s.bg};border-left:5px solid ${s.border};padding:12px 16px;margin-bottom:14px">
+    <div style="font-family:var(--head);font-size:15px;letter-spacing:1px;text-transform:uppercase;color:${s.ink};font-weight:600">${esc(h.label)}</div>
+    ${h.reasons.map(r=>`<div style="font-size:13px;margin-top:4px">• ${esc(r)}</div>`).join('')}
+    ${h.warnings.map(w=>`<div style="font-size:12.5px;margin-top:4px;color:var(--muted)">⚠ ${esc(w)}</div>`).join('')}
+  </div>`;
+}
 function clientProfileView(data, notes){
-  const { client, assignedCoach, contracts, visits, visitProgress } = data;
+  const { client, assignedCoach, contracts, visits, visitProgress, health } = data;
   const pct = visitProgress.total ? Math.round(visitProgress.completed/visitProgress.total*100) : 0;
   const activeContract = contracts.find(c=>c.status==='active');
-  let html = `<div class="panel">
+  let html = healthBanner(health);
+  html += `<div class="panel">
     <div class="controls">
       <button class="btn tiny" onclick="go('clients')">← All clients</button>
       <span style="flex:1"></span>
@@ -1242,8 +1265,12 @@ function clientProfileView(data, notes){
   </div>`;
 
   html += `<div class="panel"><h2>Visit history</h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th></tr>` +
-    visits.slice().reverse().map(v=>`<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
-      <td>${v.completed?'<span class="pill p-done">completed</span>':v.cal_week?'<span class="pill p-cal">on calendar</span>':'<span class="pill p-due">needs scheduling</span>'}</td></tr>`).join('') +
+    visits.slice().reverse().map(v=>{
+      const pill = v.completed?'<span class="pill p-done">completed</span>'
+        : v.cal_week?(v.due&&v.due<TODAY?'<span class="pill p-due">late — on calendar</span>':'<span class="pill p-cal">on calendar</span>')
+        : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
+      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td></tr>`;
+    }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
   html += `<div class="panel"><h2>Notes</h2>
