@@ -797,8 +797,10 @@ function visitDlg(id){
 async function saveVisit(id){
   const b={client:$('#vName').value.trim(),program:$('#vProg').value,cycle:$('#vCycle').value.trim(),due:$('#vDue').value||null,team:$('#vTeam').value};
   if(!b.client){uiAlert('Client name required');return;}
-  if(id) await api('PATCH','/api/visits/'+id,b); else await api('POST','/api/visits',b);
-  closeDlg(); await refresh(); toast('Saved');
+  let r = null;
+  if(id) r = await api('PATCH','/api/visits/'+id,b); else await api('POST','/api/visits',b);
+  closeDlg(); await refresh();
+  toast(r && r.unscheduled ? `Saved — the visit was scheduled on the old team's coach, so it's back in Team ${b.team}'s to-schedule list for re-placing` : 'Saved');
 }
 async function delVisit(id){
   const v=D.visits.find(x=>x.id===id);
@@ -1428,8 +1430,18 @@ async function doDeactivateCoach(id, name){
   if(st.view==='coachprofile') go('admin');
 }
 async function saveAssignedCoach(clientId, coachId){
-  await api('PATCH','/api/clients/'+clientId, { assigned_coach_id: coachId || null });
-  toast('Coach assignment saved');
+  const r = await api('PATCH','/api/clients/'+clientId, { assigned_coach_id: coachId || null });
+  if(r.cascade){
+    const c = r.cascade;
+    const parts = [];
+    if(c.keptWeek) parts.push(`${c.keptWeek} scheduled visit(s) moved with their week intact`);
+    if(c.teamMoved) parts.push(`${c.teamMoved} unscheduled visit(s) moved to Team ${r.newTeam}'s list`);
+    if(c.needsReplacing) parts.push(`${c.needsReplacing} visit(s) need re-placing (the new coach's week was taken) — they're in Team ${r.newTeam}'s to-schedule list`);
+    toast(parts.length ? 'Coach reassigned — ' + parts.join('; ') : 'Coach assignment saved');
+  } else {
+    toast('Coach assignment saved');
+  }
+  await refresh();
   await loadClientProfile(clientId);
 }
 function deleteClientDlg(clientId, clientName){

@@ -304,12 +304,20 @@ route('PATCH', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, u
   if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
   const f = {};
   for(const k of ['client','program','cycle','due','team']) if(body[k] !== undefined) f[k] = body[k];
+  // Moving an open visit to another team can't leave it sitting on the old team's
+  // board: if it's scheduled under a coach who isn't on the new team, unschedule it
+  // so it surfaces in the NEW team's to-schedule list instead of visually vanishing.
+  let unscheduled = false;
+  if(f.team && f.team !== v.team && !v.completed && v.cal_coach){
+    const c = getCoach(v.cal_coach);
+    if(!c || c.team !== f.team){ f.cal_coach = null; f.cal_week = null; unscheduled = true; }
+  }
   if(Object.keys(f).length){
     db.prepare(`UPDATE visits SET ${Object.keys(f).map(k=>k+'=?').join(',')} WHERE id=?`)
       .run(...Object.values(f), v.id);
-    log(user.email, 'visit.edit', { id: v.id, ...f });
+    log(user.email, 'visit.edit', { id: v.id, ...f, unscheduled });
   }
-  send(res, 200, { ok: true });
+  send(res, 200, { ok: true, unscheduled });
 });
 route('DELETE', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
@@ -1137,17 +1145,51 @@ function clientHealth(cl, contracts, visits, assignedCoach){
 route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
+  const result = { ok: true };
   if(body.assigned_coach_id !== undefined){
     const coachId = body.assigned_coach_id || null;
-    if(coachId && !getCoach(coachId)) return err(res, 400, 'unknown coach');
+    const dest = coachId ? getCoach(coachId) : null;
+    if(coachId && !dest) return err(res, 400, 'unknown coach');
     db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(coachId, cl.id);
-    log(user.email, 'client.assign_coach', { clientId: cl.id, name: cl.name, coachId });
+    // Cascade to the client's OPEN visits so the Schedule Board and LID Inventory
+    // actually reflect the reassignment instead of silently keeping the old team:
+    //  - unscheduled open visits move to the new coach's team (they surface in that
+    //    team's to-schedule list)
+    //  - scheduled open visits move to the new coach's calendar IF the same week is
+    //    free on it (the planned date survives); otherwise they're unscheduled into
+    //    the new team's list rather than left on the old coach — nothing is lost,
+    //    it just needs re-placing.
+    // Completed visits are never touched: history keeps who really did the work.
+    if(dest){
+      const cascade = { teamMoved: 0, keptWeek: 0, needsReplacing: 0 };
+      const open = db.prepare('SELECT * FROM visits WHERE client_id=? AND completed=0').all(cl.id);
+      for(const v of open){
+        if(!v.cal_week){
+          db.prepare('UPDATE visits SET team=? WHERE id=?').run(dest.team, v.id);
+          cascade.teamMoved++;
+        } else if(v.cal_coach === dest.id){
+          db.prepare('UPDATE visits SET team=? WHERE id=?').run(dest.team, v.id);
+          cascade.keptWeek++;
+        } else if(cellFree(dest.id, v.cal_week, v.id)){
+          db.prepare('UPDATE visits SET team=?, cal_coach=? WHERE id=?').run(dest.team, dest.id, v.id);
+          cascade.keptWeek++;
+        } else {
+          db.prepare('UPDATE visits SET team=?, cal_coach=NULL, cal_week=NULL WHERE id=?').run(dest.team, v.id);
+          cascade.needsReplacing++;
+        }
+      }
+      result.cascade = cascade;
+      result.newTeam = dest.team;
+      log(user.email, 'client.assign_coach', { clientId: cl.id, name: cl.name, coachId, ...cascade });
+    } else {
+      log(user.email, 'client.assign_coach', { clientId: cl.id, name: cl.name, coachId: null, note: 'unassigned — open visits left untouched' });
+    }
   }
   if(body.name !== undefined && String(body.name).trim()){
     db.prepare('UPDATE clients SET name=? WHERE id=?').run(String(body.name).trim(), cl.id);
     log(user.email, 'client.rename', { clientId: cl.id, name: body.name });
   }
-  send(res, 200, { ok: true });
+  send(res, 200, result);
 });
 route('DELETE', /^\/api\/clients\/(\d+)$/, ['admin'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
