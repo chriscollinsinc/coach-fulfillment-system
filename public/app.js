@@ -12,7 +12,7 @@ const dayDiff = (a,b)=>(new Date(a)-new Date(b))/864e5;
 const CYCLE_LEN = {'Monthly':12,'Semi-Monthly':6,'Quarterly':4,'Bi-Annual':2,'LID (Purchase)':1,'6 Visits Monthly':6,'Coaching Only':0};
 const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID (Purchase)':0,'6 Visits Monthly':1,'Coaching Only':0};
 const PROGRAMS = Object.keys(CYCLE_LEN);
-const BLOCKKINDS = {home:'Home',off:'Off / Vacation',training:'Training',bootcamp:'Bootcamp',event:'Event (Top Dog / Virtual)',truck:'TRUCK',travel:'Travel',mag:'Mills (M.A.G.)',launch_open:'Launch slot held',not_hired:'Not hired yet',shadow:'Shadow',meeting:'Meeting',blocked:'Blocked',visit:'Legacy visit (from sheet)',visit_legacy:'Legacy visit (from sheet)'};
+const BLOCKKINDS = {home:'Home',off:'Off / Vacation',training:'Training',bootcamp:'Bootcamp',event:'Event (Top Dog / Virtual)',truck:'TRUCK',travel:'Travel',mag:'Mills (M.A.G.)',launch_open:'Launch slot held',soft_pencil:'Soft pencil hold (tentative launch)',not_hired:'Not hired yet',shadow:'Shadow',meeting:'Meeting',blocked:'Blocked',visit:'Legacy visit (from sheet)',visit_legacy:'Legacy visit (from sheet)'};
 
 /* Avatar — initials on a color derived from the team name, so every coach on a team
    reads as visually related without needing an upload/storage pipeline. */
@@ -334,7 +334,7 @@ function board(){
         inner=`<b>${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>`;
         if(canEdit()) click=` onclick="st.detail=${v.id};st.placing=null;render()"`;
       } else {
-        const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open':'s-block';
+        const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
         inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
         if(canEdit() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
@@ -579,7 +579,11 @@ function availabilityView(){
       <input type="checkbox" id="aFar" style="width:auto" ${st.due2027?'checked':''}> include unplanned months (2027+)</label>
     <button class="btn primary" onclick="runAvail()">Check availability</button>
   </div><div id="aOut"></div></div>
-  <div class="panel"><h2>Open capacity by month</h2><div id="capOut"></div></div>`;
+  <div class="panel" id="previewPanel" style="display:none"></div>
+  <div class="panel"><h2>Open capacity by month</h2><div id="capOut"></div></div>
+  <div class="panel"><h2>Active soft-pencil holds</h2>
+  <p class="small" style="margin-bottom:8px">Tentative launch-date placeholders — reserve a coach's calendar for a prospect before the contract's signed, so nobody double-books that window. Release a hold to free those weeks back up.</p>
+  <div id="softHoldsOut"></div></div>`;
 }
 function runAvail(){
   const prog=$('#aProg').value,team=$('#aTeam').value,from=$('#aFrom').value||TODAY;
@@ -608,21 +612,25 @@ function runAvail(){
     if(plan) results.push({coach:c,plan,spare:open.length-plan.seq.length});
   }
   results.sort((a,b)=>a.plan.start.localeCompare(b.plan.start));
+  st.availResults = results; st.availProg = prog;
   let html='';
   if(!results.length){
     html=`<p style="color:var(--bad);font-weight:600">No coach can absorb a full ${prog} cadence before ${fmt(horizon)}${team!=='Any'?` on Team ${team}`:''}.</p>`;
   }else{
     html=`<p style="margin:8px 0"><b style="color:var(--ok)">Yes — ${results.length} coach${results.length>1?'es':''} can take a new ${prog} client.</b>
     Earliest start: <b>week of ${fmt(results[0].plan.start)}</b> with ${esc(results[0].coach.name)} (Team ${results[0].coach.team}).</p>
-    <table><tr><th>Coach</th><th>Team</th><th>Earliest start</th><th>Projected visit weeks</th><th class="num">Spare open weeks</th></tr>`;
-    results.slice(0,12).forEach(r=>{
+    <table><tr><th>Coach</th><th>Team</th><th>Earliest start</th><th>Projected visit weeks</th><th class="num">Spare open weeks</th><th></th></tr>`;
+    results.slice(0,12).forEach((r,i)=>{
       html+=`<tr><td><b>${esc(r.coach.name)}</b></td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
-      <td>${r.plan.seq.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td><td class="num">${r.spare}</td></tr>`;
+      <td>${r.plan.seq.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td><td class="num">${r.spare}</td>
+      <td><button class="btn tiny" onclick="previewAvailCoach(${i})">Preview calendar</button></td></tr>`;
     });
     html+=`</table>`;
   }
   html+=`<p class="small" style="margin-top:8px">Planning horizon: through ${fmt(horizon)}. ${st.due2027?'Months past the current plan read as fully open — treat those as estimates.':'Check the box above to look into 2027 (not yet planned).'}</p>`;
   $('#aOut').innerHTML=html;
+  $('#previewPanel').style.display='none';
+  loadSoftHolds();
   let cb='';
   for(const [y,m] of rolling12()){
     let open=0,total=0;
@@ -633,6 +641,103 @@ function runAvail(){
       <div class="small mono">${open} open / ${total} workable</div></div>`;
   }
   $('#capOut').innerHTML=cb;
+}
+
+/* Preview one candidate coach's calendar — actual bookings plus the proposed cadence
+   highlighted — over at least a 60-90 day window, extended further if the recurring
+   visit cadence itself runs longer than that (e.g. a Quarterly plan's 4th visit lands
+   9 months out). Lets whoever's placing the client see the whole picture — everything
+   else already on that coach's book — before committing to a start date. */
+function previewAvailCoach(i){
+  const r = (st.availResults||[])[i]; if(!r) return;
+  st.previewResult = r; st.previewDays = st.previewDays || 90;
+  renderPreviewPanel();
+}
+function setPreviewWindow(days){ st.previewDays = days; renderPreviewPanel(); }
+function renderPreviewPanel(){
+  const r = st.previewResult; if(!r) return;
+  const panel = $('#previewPanel'); panel.style.display='';
+  const { coach, plan } = r;
+  const lastSeqWeek = plan.seq[plan.seq.length-1];
+  const minEnd = addDays(plan.start, st.previewDays);
+  const end = lastSeqWeek > minEnd ? lastSeqWeek : minEnd;
+  const weeks = mondaysRange(plan.start<TODAY?TODAY:plan.start, end);
+  const suggestSet = new Set(plan.seq);
+  let rows='';
+  weeks.forEach(w=>{
+    const o=occ[coach.id+'|'+w];
+    const isSuggested = suggestSet.has(w);
+    const visitNum = isSuggested ? plan.seq.indexOf(w)+1 : null;
+    let cls='slot', label='', detail='';
+    if(isSuggested && !o){ cls+=' suggest'; label=`<b>Suggested visit ${visitNum} of ${plan.seq.length}</b>`; detail='Open — would become this client\'s visit'; }
+    else if(!o){ cls+=' s-open'; label='Open'; }
+    else if(o.type==='visit'){ cls+= o.v.completed?' s-done':' s-visit'; label=`<b>${esc(o.v.client)}</b>`; detail=`${esc(o.v.cycle)} ${esc(o.v.program)}`; }
+    else{
+      const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
+      cls+=' '+kindCls; label=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b>`; detail=esc(BLOCKKINDS[o.kind]||'');
+      if(isSuggested) detail += ' — ⚠️ conflicts with the suggested cadence, pick a different start';
+    }
+    rows+=`<tr><td class="mono">${fmtW(w)}</td><td><div class="${cls}" style="min-height:36px;padding:4px 8px">${label}</div></td><td class="small">${detail}</td></tr>`;
+  });
+  panel.innerHTML = `<h2>${esc(coach.name)}'s calendar — Team ${esc(coach.team)}</h2>
+    <div class="controls" style="margin-bottom:8px">
+      <label style="margin:0">Window</label>
+      <button class="btn tiny ${st.previewDays===60?'primary':''}" onclick="setPreviewWindow(60)">60 days</button>
+      <button class="btn tiny ${st.previewDays===90?'primary':''}" onclick="setPreviewWindow(90)">90 days</button>
+      <span class="small" style="margin-left:auto">Showing ${fmt(weeks[0])} – ${fmt(weeks[weeks.length-1])}</span>
+    </div>
+    <div class="legend" style="margin-bottom:8px">
+      <span><i style="background:#fffaf0;border:1px dashed var(--gold)"></i>Suggested visit</span>
+      <span><i style="background:var(--visit)"></i>Already booked</span>
+      <span><i style="background:var(--open);border:1px dashed var(--openb)"></i>Open</span>
+      <span><i style="background:#fdf6e3;border:1px dashed var(--gold)"></i>Soft pencil hold</span>
+    </div>
+    <div style="max-height:60vh;overflow-y:auto"><table><tr><th>Week of</th><th>Status</th><th>Detail</th></tr>${rows}</table></div>
+    <div class="controls" style="margin-top:12px">
+      <label style="margin:0">Prospect / launch label</label><input id="softHoldLabel" placeholder="e.g. Acme Motors — Launch" style="min-width:220px">
+      <button class="btn primary" onclick="placeSoftHold(${(st.availResults||[]).indexOf(r)})">Place soft pencil hold</button>
+    </div>
+    <p class="small" style="margin-top:6px">Reserves ${esc(coach.name)}'s ${plan.seq.length} suggested week(s) as tentative — visible to everyone on the Schedule Board, and blocked from being double-booked — without creating a real client or contract. Once the deal actually signs, release the hold (Availability → Active soft-pencil holds) for those weeks, then place the real visit on the Schedule Board.</p>`;
+}
+async function placeSoftHold(i){
+  const r = (st.availResults||[])[i]; if(!r) return;
+  const label = ($('#softHoldLabel').value||'').trim();
+  if(!label){ alert('Enter a prospect/launch label so this hold is identifiable later.'); return; }
+  const { coach, plan } = r;
+  const openWeeks = plan.seq.filter(w=>!occ[coach.id+'|'+w]);
+  const skipped = plan.seq.length - openWeeks.length;
+  for(const w of openWeeks){
+    await api('PUT','/api/blocks',{coach:coach.id, week:w, kind:'soft_pencil', label});
+  }
+  await refresh();
+  renderPreviewPanel();
+  loadSoftHolds();
+  toast(`Placed ${openWeeks.length} soft-pencil week(s) for ${label}${skipped?` (${skipped} week(s) skipped — no longer open)`:''}`);
+}
+function loadSoftHolds(){
+  const holds = {};
+  for(const b of (D.blocks||[])){
+    if(b.kind!=='soft_pencil') continue;
+    const key = b.coach_id+'|'+(b.label||'');
+    if(!holds[key]) holds[key] = { coachId:b.coach_id, label:b.label, weeks:[] };
+    holds[key].weeks.push(b.week);
+  }
+  const list = Object.values(holds).sort((a,b)=>Math.min(...a.weeks.map(w=>+new Date(w)))-Math.min(...b.weeks.map(w=>+new Date(w))));
+  $('#softHoldsOut').innerHTML = list.length ? `<table><tr><th>Label</th><th>Coach</th><th>Team</th><th>Weeks held</th><th></th></tr>` +
+    list.map(h=>{ const c=coach(h.coachId); const sorted=h.weeks.slice().sort();
+      return `<tr><td><b>${esc(h.label||'(no label)')}</b></td><td>${esc(c?c.name:h.coachId)}</td><td>${esc(c?c.team:'—')}</td>
+      <td>${sorted.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td>
+      <td><button class="btn tiny danger" onclick="releaseSoftHold('${h.coachId}','${esc(h.label).replace(/'/g,"\\'")}')">Release</button></td></tr>`;
+    }).join('') + `</table>` : `<p class="small">No soft-pencil holds currently placed.</p>`;
+}
+async function releaseSoftHold(coachId, label){
+  if(!confirm(`Release the soft-pencil hold "${label}"? Those weeks go back to open.`)) return;
+  const weeks = (D.blocks||[]).filter(b=>b.coach_id===coachId && b.kind==='soft_pencil' && (b.label||'')===label).map(b=>b.week);
+  for(const w of weeks){ await api('PUT','/api/blocks',{coach:coachId, week:w, kind:'open'}); }
+  await refresh();
+  loadSoftHolds();
+  if(st.view==='availability') renderPreviewPanel();
+  toast('Hold released — weeks are open again');
 }
 
 /* ---------- pending clients (new Keap subscriptions awaiting team assignment) ---------- */

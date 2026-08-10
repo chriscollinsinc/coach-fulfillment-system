@@ -88,6 +88,9 @@ button.btn.danger:hover{background:var(--bad);border-color:var(--bad)}
 .s-launch_open{background:var(--launch);border-left:4px solid var(--launchb)}
 .s-block{background:var(--offc);border-left:4px solid var(--offb);color:#6a7386}
 .s-mag{background:#e2f0f0;border-left:4px solid #2a8a8a}
+.s-soft{background:#fdf6e3;border:1px dashed var(--gold);border-left:4px solid var(--gold)}
+.slot.suggest{outline:2px dashed var(--gold);outline-offset:-2px;background:#fffaf0}
+.slot.suggest::after{content:'Suggested';font-family:var(--head);font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:#a8790a;position:absolute;top:3px;right:5px}
 .s-legacy{background:var(--visit);border-left:4px solid var(--visitb);opacity:.75}
 .s-past{opacity:.55;cursor:default}
 .slot.target{outline:3px solid var(--primary);outline-offset:-3px;background:#fff3f0}
