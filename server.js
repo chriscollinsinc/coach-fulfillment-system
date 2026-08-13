@@ -792,6 +792,28 @@ route('GET', /^\/api\/admin\/keap-diag$/, ['admin'], async (req, res) => {
     const r = await keapGet(path);
     out.results.push({ label, path, ok: r.ok, status: r.status, json: r.json });
   }
+  // The critical test: does GET-by-ID work at all for a subscription we can PROVE
+  // exists (the first row returned by the list call above)? If the list works but
+  // this 404s, the "get one subscription by id" endpoint itself is the broken path —
+  // not any particular ID being stale/deleted.
+  const listResult = out.results.find(r => r.label.startsWith('subscriptions list (no id)'));
+  const knownId = listResult && listResult.json && listResult.json.subscriptions && listResult.json.subscriptions[0] && listResult.json.subscriptions[0].id;
+  if(knownId != null){
+    // Keap's own "next"/"previous" pagination links above are shaped
+    // ".../v1/subscriptions/?limit=1&offset=1" — note the trailing slash before the
+    // query string. Try a handful of URL-shape variants for the single-item fetch in
+    // case the item route needs something the collection route tolerates either way.
+    const variants = [
+      `/v1/subscriptions/${knownId}`,
+      `/v1/subscriptions/${knownId}/`,
+      `/v1/subscriptions?id=${knownId}`,
+      `/v1/subscriptions/?id=${knownId}`,
+    ];
+    for(const path of variants){
+      const r = await keapGet(path);
+      out.results.push({ label: `single subscription fetch, KNOWN-GOOD id ${knownId}`, path, ok: r.ok, status: r.status, json: r.json });
+    }
+  }
   send(res, 200, out);
 });
 route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], async (req, res, m) => {
