@@ -121,6 +121,24 @@ function uiConfirm(msg, yesLabel){
 /* ---------- shell ---------- */
 function render(){
   const app=$('#app');
+  // Preserve focus + cursor/selection across a full re-render. Several inputs (e.g.
+  // the Inventory search box) call render() directly on every keystroke instead of
+  // patching just their own section — without this, replacing innerHTML creates a
+  // brand-new node each time and steals focus, so typing a second character requires
+  // clicking back into the field first.
+  const activeEl = document.activeElement;
+  const focusId = activeEl && app.contains(activeEl) && activeEl.id ? activeEl.id : null;
+  const selStart = focusId && typeof activeEl.selectionStart === 'number' ? activeEl.selectionStart : null;
+  const selEnd = focusId && typeof activeEl.selectionEnd === 'number' ? activeEl.selectionEnd : null;
+  const restoreFocus = () => {
+    if(!focusId) return;
+    const el = document.getElementById(focusId);
+    if(!el) return;
+    el.focus();
+    if(selStart != null && typeof el.setSelectionRange === 'function'){
+      try{ el.setSelectionRange(selStart, selEnd); }catch(e){}
+    }
+  };
   if(!D){
     const resetToken = new URLSearchParams(location.search).get('reset');
     app.innerHTML = resetToken ? resetView(resetToken) : loginView();
@@ -191,6 +209,7 @@ function render(){
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
+  restoreFocus();
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
 /* ---------- global search: type any dealership or coach name from anywhere ---------- */
