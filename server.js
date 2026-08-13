@@ -781,6 +781,23 @@ route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, u
  * than guessing whether it's the token, the base URL, or the resource path. */
 route('GET', /^\/api\/admin\/keap-diag$/, ['admin'], async (req, res) => {
   if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
+  // Summarize rather than return raw bodies — a "list" response can be megabytes if an
+  // unrecognized query param gets silently ignored and Keap falls back to its full
+  // default page, which is itself useful signal but must never be dumped whole.
+  const summarize = j => {
+    if(j == null) return null;
+    if(Array.isArray(j)) return { _shape: 'array', length: j.length, sample: j[0] };
+    if(typeof j === 'object'){
+      const out = {};
+      for(const k of Object.keys(j)){
+        const v = j[k];
+        if(Array.isArray(v)) out[k] = { _shape: 'array', length: v.length, sample: v[0] };
+        else out[k] = v;
+      }
+      return out;
+    }
+    return j;
+  };
   const checks = [
     ['account profile (sanity check token+base)', '/v1/account/profile'],
     ['contacts list', '/v1/contacts?limit=1'],
@@ -790,14 +807,14 @@ route('GET', /^\/api\/admin\/keap-diag$/, ['admin'], async (req, res) => {
   const out = { keapBase: KEAP_BASE, results: [] };
   for(const [label, path] of checks){
     const r = await keapGet(path);
-    out.results.push({ label, path, ok: r.ok, status: r.status, json: r.json });
+    out.results.push({ label, path, ok: r.ok, status: r.status, json: summarize(r.json) });
   }
   // The critical test: does GET-by-ID work at all for a subscription we can PROVE
   // exists (the first row returned by the list call above)? If the list works but
   // this 404s, the "get one subscription by id" endpoint itself is the broken path —
   // not any particular ID being stale/deleted.
   const listResult = out.results.find(r => r.label.startsWith('subscriptions list (no id)'));
-  const knownId = listResult && listResult.json && listResult.json.subscriptions && listResult.json.subscriptions[0] && listResult.json.subscriptions[0].id;
+  const knownId = listResult && listResult.json && listResult.json.subscriptions && listResult.json.subscriptions.sample && listResult.json.subscriptions.sample.id;
   if(knownId != null){
     // Keap's own "next"/"previous" pagination links above are shaped
     // ".../v1/subscriptions/?limit=1&offset=1" — note the trailing slash before the
@@ -811,8 +828,28 @@ route('GET', /^\/api\/admin\/keap-diag$/, ['admin'], async (req, res) => {
     ];
     for(const path of variants){
       const r = await keapGet(path);
-      out.results.push({ label: `single subscription fetch, KNOWN-GOOD id ${knownId}`, path, ok: r.ok, status: r.status, json: r.json });
+      out.results.push({ label: `single subscription fetch, KNOWN-GOOD id ${knownId}`, path, ok: r.ok, status: r.status, json: summarize(r.json) });
     }
+  }
+  // Product lookup is the other single-item-by-id call the coaching-subscription
+  // filter depends on (keapGetProductName) — check it the same way: list to prove a
+  // real id exists, then try fetching that exact id.
+  const productsList = await keapGet('/v1/products?limit=1');
+  out.results.push({ label: 'products list', path: '/v1/products?limit=1', ok: productsList.ok, status: productsList.status, json: summarize(productsList.json) });
+  const knownProductId = productsList.ok && productsList.json && (productsList.json.products || productsList.json.result_set) && (productsList.json.products || productsList.json.result_set)[0] && (productsList.json.products || productsList.json.result_set)[0].id;
+  if(knownProductId != null){
+    const r = await keapGet(`/v1/products/${knownProductId}`);
+    out.results.push({ label: `single product fetch, KNOWN-GOOD id ${knownProductId}`, path: `/v1/products/${knownProductId}`, ok: r.ok, status: r.status, json: summarize(r.json) });
+  }
+  // And contact-by-id, since keap-raw / queueSubscriptionAsPending both fetch a
+  // specific contact by id too — worth confirming that one's genuinely fine (it
+  // returned a real "Unable to find this Contact" message earlier, unlike
+  // subscriptions' blank SPA-fallback 404, which is a good sign it's a real route).
+  const contactsList = out.results.find(r => r.label === 'contacts list');
+  const knownContactId = contactsList && contactsList.json && contactsList.json.contacts && contactsList.json.contacts.sample && contactsList.json.contacts.sample.id;
+  if(knownContactId != null){
+    const r = await keapGet(`/v1/contacts/${knownContactId}?optional_properties=company`);
+    out.results.push({ label: `single contact fetch, KNOWN-GOOD id ${knownContactId}`, path: `/v1/contacts/${knownContactId}`, ok: r.ok, status: r.status, json: summarize(r.json) });
   }
   send(res, 200, out);
 });
@@ -822,8 +859,8 @@ route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], asyn
   if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
   const out = { pendingClient: pc };
   if(pc.keap_subscription_id){
-    const sub = await keapGet(`/v1/subscriptions/${pc.keap_subscription_id}`);
-    out.subscription = { ok: sub.ok, status: sub.status, json: sub.json };
+    const sub = await keapFindSubscriptionById(pc.keap_subscription_id, { force: true });
+    out.subscription = { ok: sub.ok, status: sub.status, json: sub.json, error: sub.error };
   }
   if(pc.keap_contact_id){
     const c = await keapGet(`/v1/contacts/${pc.keap_contact_id}?optional_properties=company`);
@@ -1643,9 +1680,38 @@ async function queueSubscriptionAsPending(s, opts = {}){
   log('keap.webhook', 'pendingclient.queued', { subId, companyName, contactName, productName, forced: !!opts.force });
   return { subId, companyName, contactName, startDate: s.start_date || null, active: !!s.active, productName };
 }
+/* Keap's REST v1 "get one subscription by id" endpoint (GET /v1/subscriptions/{id})
+ * does not work against this account — confirmed directly: it 404s even for an id
+ * the LIST endpoint just proved exists, with or without a trailing slash, and an
+ * `?id=` query filter is silently ignored (Keap just returns its default full list).
+ * The list endpoint itself works fine and returns every field we need (contact_id,
+ * billing_amount, billing_cycle, product_id, start_date, active), so every lookup
+ * that used to be a single-item fetch now finds its record in a cached full listing
+ * instead. Cache is short-lived (60s) so a burst of webhook events for the same
+ * moment in time shares one Keap round-trip instead of re-listing per event.
+ */
+let _subsCache = { at: 0, subs: null };
+async function keapFindSubscriptionById(subId, opts = {}){
+  const now = Date.now();
+  if(opts.force || !_subsCache.subs || (now - _subsCache.at) > 60000){
+    const listing = await keapListAllSubscriptions();
+    if(!listing.ok) return { ok:false, error: listing.error };
+    _subsCache = { at: now, subs: listing.subs };
+  }
+  const match = _subsCache.subs.find(s => String(s.id) === String(subId));
+  if(!match){
+    // One retry with a forced fresh list — covers the case where this is a
+    // brand-new subscription created after our cache snapshot.
+    if(!opts._retried){
+      return keapFindSubscriptionById(subId, { force: true, _retried: true });
+    }
+    return { ok:false, status: 404, error: 'not found in Keap subscriptions list' };
+  }
+  return { ok:true, status: 200, json: match };
+}
 async function onSubscriptionAdd(subId, opts = {}){
-  const sub = await keapGet(`/v1/subscriptions/${subId}`);
-  if(!sub.ok) return { subId, error: `keap fetch failed (status ${sub.status}) — nothing was queued or changed` };
+  const sub = await keapFindSubscriptionById(subId);
+  if(!sub.ok) return { subId, error: `keap lookup failed (${sub.error || sub.status}) — nothing was queued or changed` };
   return queueSubscriptionAsPending({ ...(sub.json || {}), id: subId }, opts);
 }
 
@@ -1696,13 +1762,14 @@ route('POST', /^\/api\/admin\/keap-backfill-subscriptions$/, ['admin'], async (r
 async function onSubscriptionChange(subId, eventKey, opts = {}){
   const source = opts.source || 'keap.webhook';
   const isDelete = eventKey === 'subscription.delete';
-  const sub = await keapGet(`/v1/subscriptions/${subId}`);
+  const sub = await keapFindSubscriptionById(subId);
   // For a delete event, Keap already told us via the event itself — the subscription
-  // may legitimately 404 once gone, so we don't need a successful fetch to act on it.
-  // For anything else (edit events, or a manual sync poll), a failed fetch — timeout,
-  // network blip, non-2xx — must NOT be read as "inactive". Report it and touch nothing.
+  // may legitimately be gone from the list once deleted, so we don't need a successful
+  // lookup to act on it. For anything else (edit events, or a manual sync poll), a
+  // failed lookup — timeout, network blip, genuinely not found — must NOT be read as
+  // "inactive". Report it and touch nothing.
   if(!isDelete && !sub.ok){
-    return { subId, found: false, error: `keap fetch failed (status ${sub.status})` };
+    return { subId, found: false, error: `keap lookup failed (${sub.error || sub.status})` };
   }
   const s = sub.json || {};
   const contract = db.prepare('SELECT * FROM contracts WHERE keap_subscription_id=?').get(String(subId));
