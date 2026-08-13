@@ -802,6 +802,23 @@ route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) 
 route('GET', /^\/api\/admin\/keap-events$/, ['admin'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM keap_events ORDER BY id DESC LIMIT 100').all());
 });
+route('POST', /^\/api\/admin\/keap-events\/(\d+)\/reprocess$/, ['admin'], async (req, res, m, body, user) => {
+  const row = db.prepare('SELECT * FROM keap_events WHERE id=?').get(+m[1]);
+  if(!row) return err(res, 404, 'not found');
+  let evt; try{ evt = JSON.parse(row.raw || '{}'); }catch(e){ return err(res, 400, 'stored event is not valid JSON'); }
+  const eventKey = evt.event_key || evt.eventKey || row.event_key;
+  const objectId = extractKeapObjectId(evt);
+  if(!objectId) return err(res, 400, 'could not extract an object id from this event’s raw payload');
+  try{
+    let result = null;
+    if(eventKey === 'subscription.add') result = await onSubscriptionAdd(objectId);
+    else if(eventKey === 'subscription.edit' || eventKey === 'subscription.delete') result = await onSubscriptionChange(objectId, eventKey, { source: 'admin.reprocess' });
+    else return err(res, 400, `don't know how to reprocess event type "${eventKey}"`);
+    db.prepare('UPDATE keap_events SET object_id=?, handled=? WHERE id=?').run(String(objectId), 'reprocessed ' + new Date().toISOString(), row.id);
+    log(user.email, 'keap_event.reprocess', { id: row.id, eventKey, objectId });
+    send(res, 200, { ok: true, result });
+  }catch(e){ err(res, 500, String(e && e.message || e)); }
+});
 route('GET', /^\/api\/admin\/keap-hooks-status$/, ['admin'], async (req, res) => {
   if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server — cannot check hook status.');
   try{
@@ -1352,20 +1369,38 @@ async function handleKeapWebhook(req, res, rawBody){
 
   for(const evt of events){
     const eventKey = evt.event_key || evt.eventKey || '';
-    const objectId = (evt.object_keys && evt.object_keys[0]) || (evt.objectKeys && evt.objectKeys[0]) || evt.object_key || evt.id || evt.subscription_id || null;
+    const objectId = extractKeapObjectId(evt);
 
-    db.prepare('INSERT INTO keap_events(ts,event_key,object_id,raw) VALUES(?,?,?,?)')
-      .run(new Date().toISOString(), eventKey || '(unknown)', String(objectId || ''), JSON.stringify(evt).slice(0, 4000));
+    const eventRow = db.prepare('INSERT INTO keap_events(ts,event_key,object_id,raw) VALUES(?,?,?,?)')
+      .run(new Date().toISOString(), eventKey || '(unknown)', objectId != null ? String(objectId) : '', JSON.stringify(evt).slice(0, 4000));
 
-    if(eventKey === 'subscription.add' && objectId){
-      await onSubscriptionAdd(objectId);
-    } else if((eventKey === 'subscription.edit' || eventKey === 'subscription.delete') && objectId){
-      await onSubscriptionChange(objectId, eventKey);
+    try{
+      if(eventKey === 'subscription.add' && objectId){
+        await onSubscriptionAdd(objectId);
+      } else if((eventKey === 'subscription.edit' || eventKey === 'subscription.delete') && objectId){
+        await onSubscriptionChange(objectId, eventKey);
+      }
+      // other event keys (contact.*, order.*, invoice.*) are logged to keap_events but not
+      // acted on yet — safe to extend here later.
+      db.prepare('UPDATE keap_events SET handled=? WHERE id=?').run('ok', eventRow.lastInsertRowid);
+    }catch(e){
+      // Never let one bad event take down the batch (or silently vanish) — the raw
+      // payload is already saved above, so it's always reprocessable once the bug's fixed.
+      console.error('keap webhook: failed to handle event', eventKey, objectId, e);
+      db.prepare('UPDATE keap_events SET handled=? WHERE id=?').run('error: ' + String(e && e.message || e).slice(0, 200), eventRow.lastInsertRowid);
     }
-    // other event keys (contact.*, order.*, invoice.*) are logged to keap_events but not
-    // acted on yet — safe to extend here later.
   }
   send(res, 200, { ok: true });
+}
+/* Keap's REST hooks send object_keys as an array of OBJECTS (e.g. {id, apiUrl}),
+ * not bare IDs — a payload-shape assumption we got wrong on first build, which
+ * silently swallowed every subscription.add/edit event (object_id stored as the
+ * literal string "[object Object]", and the downstream Keap API call built from it
+ * always 404'd). Unwrap whatever shape shows up rather than assuming one. */
+function extractKeapObjectId(evt){
+  const raw = (evt.object_keys && evt.object_keys[0]) ?? (evt.objectKeys && evt.objectKeys[0]) ?? evt.object_key ?? evt.id ?? evt.subscription_id ?? null;
+  if(raw != null && typeof raw === 'object') return raw.id ?? raw.objectId ?? raw.object_id ?? raw.key ?? null;
+  return raw;
 }
 
 async function onSubscriptionAdd(subId){
