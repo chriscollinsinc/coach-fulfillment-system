@@ -680,7 +680,7 @@ function inventory(){
       <option value="active" ${f==='active'?'selected':''}>All active — ${count(stf.active)}</option>
       <option value="completed" ${f==='completed'?'selected':''}>Completed — ${count(stf.completed)}</option>
       <option value="all" ${f==='all'?'selected':''}>Everything — ${base.length}</option></select>
-    <input placeholder="Search client or coach…" value="${esc(st.invSearch)}" oninput="st.invSearch=this.value;render()" style="width:230px">
+    <input id="invSearchBox" placeholder="Search client or coach…" value="${esc(st.invSearch)}" oninput="st.invSearch=this.value;updateInventoryMain()" style="width:230px">
     <span class="small">${rows.length} rows</span></div>`;
   if(f!=='stale' && staleCount && !q){
     html+=`<div class="panel" style="border-left:4px solid var(--warn);padding:10px 14px;margin-bottom:12px">
@@ -713,6 +713,25 @@ function inventory(){
   if(rows.length>400) html+=`<tr><td colspan="10" class="small">…first 400 of ${rows.length}</td></tr>`;
   html+=`</table></div>`;
   return html;
+}
+/* Root-cause fix for the search box, not just a patch over its symptom: a full
+ * render() rebuilds the header, nav, and global search too on every single keystroke
+ * — unnecessary work, and on a large Inventory list (hundreds of rows re-stringified
+ * per character) it's real, visible lag even with focus preserved. This only rebuilds
+ * #main, which is the one part of the page that actually depends on the search text. */
+function updateInventoryMain(){
+  const m = $('#main'); if(!m) return;
+  const el = document.getElementById('invSearchBox');
+  const selStart = el && typeof el.selectionStart === 'number' ? el.selectionStart : null;
+  const selEnd = el && typeof el.selectionEnd === 'number' ? el.selectionEnd : null;
+  m.innerHTML = inventory();
+  const el2 = document.getElementById('invSearchBox');
+  if(el2){
+    el2.focus();
+    if(selStart != null && typeof el2.setSelectionRange === 'function'){
+      try{ el2.setSelectionRange(selStart, selEnd); }catch(e){}
+    }
+  }
 }
 function toggleInvSel(id, on){ if(on) st.invSel.add(id); else st.invSel.delete(id); render(); }
 function toggleInvAll(on){
