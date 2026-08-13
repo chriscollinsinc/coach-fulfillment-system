@@ -1418,19 +1418,22 @@ function extractKeapObjectId(evt){
   return raw;
 }
 
-async function onSubscriptionAdd(subId, opts = {}){
-  const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(String(subId));
+/* Shared by the webhook path (which has only a subscription ID and must fetch it)
+ * and the backfill sweep below (which already has the full subscription object from
+ * a list call, so it skips the redundant single-subscription fetch). Both funnel
+ * through here so "what counts as already tracked" and "how we enrich company/contact
+ * name" only ever lives in one place. */
+async function queueSubscriptionAsPending(s, opts = {}){
+  const subId = String(s.id);
+  const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(subId);
   if(existingContract) return { subId, skipped: true, reason: 'already has a real contract' };
-  const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(String(subId));
-  // Normal webhook delivery: a pending item already queued (even a blank/placeholder
-  // one from a past failed lookup) is left alone — don't silently re-run enrichment
-  // on every retry. opts.force (used by the admin "Reprocess" button) overrides this
-  // on purpose: a human explicitly asked to re-fetch and refresh it.
+  const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(subId);
+  // Normal webhook/backfill delivery: a pending item already queued (even a blank/
+  // placeholder one from a past failed lookup) is left alone — don't silently re-run
+  // enrichment on every retry. opts.force (used by the admin "Reprocess" button)
+  // overrides this on purpose: a human explicitly asked to re-fetch and refresh it.
   if(already && !opts.force) return { subId, skipped: true, reason: 'already queued' };
 
-  const sub = await keapGet(`/v1/subscriptions/${subId}`);
-  if(!sub.ok) return { subId, error: `keap fetch failed (status ${sub.status}) — nothing was queued or changed` };
-  const s = sub.json || {};
   let companyName = '', contactName = '';
   if(s.contact_id){
     const c = await keapGet(`/v1/contacts/${s.contact_id}?optional_properties=company`);
@@ -1450,13 +1453,59 @@ async function onSubscriptionAdd(subId, opts = {}){
       billing_cycle=excluded.billing_cycle, billing_frequency=excluded.billing_frequency,
       start_date=excluded.start_date, status='pending'
     WHERE pending_clients.status != 'assigned'`)
-    .run(String(subId), s.contact_id ? String(s.contact_id) : null, s.contact_id_company || '', companyName, contactName,
+    .run(subId, s.contact_id ? String(s.contact_id) : null, s.contact_id_company || '', companyName, contactName,
       s.subscription_plan_id ? String(s.subscription_plan_id) : (s.product_id ? String(s.product_id) : ''),
       Number(s.billing_amount) || null, s.billing_cycle || '', s.billing_frequency || null, s.start_date || null,
       new Date().toISOString());
   log('keap.webhook', 'pendingclient.queued', { subId, companyName, contactName, forced: !!opts.force });
-  return { subId, companyName, contactName };
+  return { subId, companyName, contactName, startDate: s.start_date || null, active: !!s.active };
 }
+async function onSubscriptionAdd(subId, opts = {}){
+  const sub = await keapGet(`/v1/subscriptions/${subId}`);
+  if(!sub.ok) return { subId, error: `keap fetch failed (status ${sub.status}) — nothing was queued or changed` };
+  return queueSubscriptionAsPending({ ...(sub.json || {}), id: subId }, opts);
+}
+
+/* ---------- backfill sweep: catch anything the webhook ever missed ----------
+   Keap's list endpoints don't reliably support a "since" filter we could trust, so
+   rather than guess at query params, this pulls every subscription in the account
+   (paginated) and diffs it against what the app already knows. Anything with no
+   matching contract AND no matching pending_clients row — whether it's a few weeks
+   old (a webhook that silently failed) or start-dated in the future (added ahead of
+   time) — gets queued exactly like a live webhook would. Nothing here overwrites an
+   already-tracked item; that's what the per-event Reprocess button is for. */
+async function keapListAllSubscriptions(){
+  const PAGE = 200, MAX_PAGES = 25; // 5,000-subscription ceiling — generous for this account size
+  const all = [];
+  let offset = 0, hitCap = false;
+  for(let page = 0; page < MAX_PAGES; page++){
+    const r = await keapGet(`/v1/subscriptions?limit=${PAGE}&offset=${offset}`);
+    if(!r.ok) return { ok:false, error: `Keap returned an error (HTTP ${r.status || 'network'}) while listing subscriptions.` };
+    const batch = (r.json && (r.json.subscriptions || r.json.results)) || (Array.isArray(r.json) ? r.json : []);
+    all.push(...batch);
+    if(batch.length < PAGE) break;
+    offset += PAGE;
+    if(page === MAX_PAGES - 1) hitCap = true;
+  }
+  return { ok:true, subs: all, hitCap };
+}
+route('POST', /^\/api\/admin\/keap-backfill-subscriptions$/, ['admin'], async (req, res, m, body, user) => {
+  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
+  const listing = await keapListAllSubscriptions();
+  if(!listing.ok) return err(res, 502, listing.error);
+  const summary = { checked: listing.subs.length, queued: [], alreadyTracked: 0, errors: [], hitPageCap: !!listing.hitCap };
+  for(const s of listing.subs){
+    try{
+      const r = await queueSubscriptionAsPending(s, { force: false });
+      if(r.skipped) summary.alreadyTracked++;
+      else if(r.error) summary.errors.push(`sub ${r.subId}: ${r.error}`);
+      else summary.queued.push({ subId: r.subId, companyName: r.companyName, contactName: r.contactName, startDate: r.startDate, active: r.active });
+    }catch(e){ summary.errors.push(`sub ${s.id}: ${String(e && e.message || e)}`); }
+    await new Promise(r => setTimeout(r, 100)); // stay well under Keap's rate limit — contact lookups add up across a full sweep
+  }
+  log(user.email, 'keap.backfill_subscriptions', { checked: summary.checked, queuedCount: summary.queued.length, alreadyTracked: summary.alreadyTracked, errorCount: summary.errors.length });
+  send(res, 200, summary);
+});
 
 async function onSubscriptionChange(subId, eventKey, opts = {}){
   const source = opts.source || 'keap.webhook';

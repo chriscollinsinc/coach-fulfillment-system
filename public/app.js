@@ -1045,9 +1045,10 @@ async function loadPending(){
           ${hm.weeks.length} week(s) reserved starting ${fmtW(hm.weeks[0])}, ${esc(hm.program)}.
           <button class="btn tiny primary" style="margin-left:8px" onclick="assignPendingDlg(${r.id}, ${hm.id})">Use this hold</button>
         </td></tr>` : '';
+        const future = r.start_date && r.start_date > TODAY;
         return `<tr><td><b>${esc(r.company_name||'(unknown)')}</b></td><td class="small">${esc(r.contact_name||'—')}</td>
         <td class="num">${r.billing_amount?'$'+r.billing_amount:'—'}</td><td class="small">${esc(r.billing_cycle||'—')} ×${r.billing_frequency||1}</td>
-        <td class="small">${esc(r.start_date||'—')}</td>
+        <td class="small">${esc(r.start_date||'—')}${future?' <span class="pill p-fut">upcoming</span>':''}</td>
         <td><button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
         <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button></td></tr>` + matchRow;
       }).join('') + `</table>`
@@ -1698,10 +1699,12 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
   <div id="deletedOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Keap webhook activity</h2>
-  <p class="small" style="margin-bottom:12px">Diagnostic tool for "I added something in Keap and it never showed up." <b>Recent events</b> is every raw hit Keap has sent this app, whether it was acted on or not — if a store you added isn't in here at all, Keap never reached this app for it (check the subscription actually exists in Keap, not just a contact). <b>Hook status</b> checks live with Keap whether the <code>subscription.add/edit/delete</code> hooks are registered and Verified against this app's URL right now.</p>
+  <p class="small" style="margin-bottom:12px">Diagnostic tool for "I added something in Keap and it never showed up." <b>Recent events</b> is every raw hit Keap has sent this app, whether it was acted on or not — if a store you added isn't in here at all, Keap never reached this app for it (check the subscription actually exists in Keap, not just a contact). <b>Hook status</b> checks live with Keap whether the <code>subscription.add/edit/delete</code> hooks are registered and Verified against this app's URL right now. <b>Backfill</b> below is the fix for missed webhooks — it checks every subscription in Keap (not just recent ones — Keap's own date filters aren't reliable enough to trust) against what this app already knows, and queues anything untracked, including ones that start in the future.</p>
   <div class="controls"><button class="btn" onclick="loadKeapEvents()">Refresh events</button>
-  <button class="btn" onclick="checkKeapHooks()">Check hook status</button></div>
+  <button class="btn" onclick="checkKeapHooks()">Check hook status</button>
+  <button class="btn primary" id="keapBackfillBtn" onclick="backfillKeapSubscriptions()">Backfill missed subscriptions</button></div>
   <div id="keapHooksOut" class="small"></div>
+  <div id="keapBackfillOut" class="small"></div>
   <div id="keapEventsOut" class="small">Loading…</div></div>`;
   return html;
 }
@@ -1878,6 +1881,26 @@ async function checkKeapHooks(){
         `<p class="small">Missing one or more of subscription.add/edit/delete entirely — they need to be (re)registered with Keap pointing at this app's URL.</p>`)
       : `<p>Keap reports no hooks registered at all for this account/app. New subscriptions can never reach this app until the hook registration is (re)run.</p>`);
   }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
+}
+async function backfillKeapSubscriptions(){
+  const out = $('#keapBackfillOut'), btn = $('#keapBackfillBtn'); if(!out) return;
+  if(btn){ btn.disabled = true; btn.textContent = 'Checking every subscription in Keap…'; }
+  out.innerHTML = '';
+  try{
+    const r = await api('POST','/api/admin/keap-backfill-subscriptions',{});
+    const rows = r.queued || [];
+    out.innerHTML = `<p class="small">Checked ${r.checked} subscription(s) in Keap — ${r.alreadyTracked} already tracked, ${rows.length} newly queued${r.errors.length?`, ${r.errors.length} error(s)`:''}.${r.hitPageCap?' (hit the page cap — there may be more; run it again to keep going.)':''}</p>` +
+      (rows.length ? `<table><tr><th>Company</th><th>Contact</th><th>Starts</th><th>Active</th></tr>` +
+        rows.map(q=>{
+          const future = q.startDate && q.startDate > TODAY;
+          return `<tr><td><b>${esc(q.companyName||'(unknown — check Unassigned Clients)')}</b></td><td class="small">${esc(q.contactName||'—')}</td>
+          <td class="small">${esc(q.startDate||'—')}${future?' <span class="pill p-fut">upcoming</span>':''}</td>
+          <td>${q.active?'active':'not yet active'}</td></tr>`;
+        }).join('') + `</table><p class="small">These are now sitting in Unassigned Clients, ready to Assign or Ignore.</p>` : '') +
+      (r.errors.length ? `<p class="small" style="color:var(--danger,#c0392b)">${r.errors.map(esc).join('<br>')}</p>` : '');
+    if(rows.length) toast(`${rows.length} subscription(s) queued to Unassigned Clients`);
+  }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = 'Backfill missed subscriptions'; } }
 }
 async function loadBackupStatus(){
   try{
