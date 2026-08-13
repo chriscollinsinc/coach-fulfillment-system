@@ -818,6 +818,21 @@ route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req,
   log(user.email, 'pendingclient.ignore', { pendingId: pc.id, company: pc.company_name });
   send(res, 200, { ok: true });
 });
+/* Hard-delete ONE pending row outright — distinct from Ignore (which is a permanent
+ * "we looked at this, skip it" decision, kept as status='ignored' forever so the
+ * unique constraint on keap_subscription_id blocks it from resurfacing).
+ * This is for the opposite case: a row whose stored keap_subscription_id/keap_contact_id
+ * are stale/corrupt (e.g. captured under an old bug, or the underlying Keap record was
+ * since deleted/merged) and 404 when re-fetched — deleting it lets a corrected Backfill
+ * cleanly re-create it fresh under the real current Keap IDs instead of being permanently
+ * blocked by a row that can never resolve. */
+route('POST', /^\/api\/admin\/pending-clients\/(\d+)\/delete$/, ['admin'], (req, res, m, body, user) => {
+  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
+  if(!pc) return err(res, 404, 'not found');
+  db.prepare('DELETE FROM pending_clients WHERE id=?').run(pc.id);
+  log(user.email, 'pendingclient.delete_stale', { pendingId: pc.id, company: pc.company_name, keapSubscriptionId: pc.keap_subscription_id, keapContactId: pc.keap_contact_id });
+  send(res, 200, { ok: true });
+});
 route('POST', /^\/api\/pending-clients\/ignore-all$/, ['admin','lead'], (req, res, m, body, user) => {
   // Bulk clear, not a bulk "soft ignore" — this DELETES the pending rows rather than
   // flipping status to 'ignored'. That distinction matters: a single Ignore click is a

@@ -1190,8 +1190,16 @@ async function debugPendingClient(id){
       <pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px;max-height:200px;overflow:auto">${esc(JSON.stringify(r.subscription||'(no keap_subscription_id on this row)', null, 2))}</pre>
       <h4 style="margin:10px 0 4px">Contact</h4>
       <pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px;max-height:200px;overflow:auto">${esc(JSON.stringify(r.contact||'(no keap_contact_id on this row)', null, 2))}</pre>
-      <div class="dlgrow"><button class="btn" onclick="closeDlg()">Close</button></div>`);
+      ${(r.subscription && !r.subscription.ok) || (r.contact && !r.contact.ok) ? `<p class="small" style="color:var(--bad,#c23b3b)">Keap says these IDs don't exist. This row's link is stale or corrupt — deleting it lets a fresh Backfill re-create it correctly under Keap's current IDs (Admin → Backfill missed subscriptions).</p>` : ''}
+      <div class="dlgrow"><button class="btn danger" onclick="deleteStalePendingClient(${id})">Delete this row</button><button class="btn" onclick="closeDlg()">Close</button></div>`);
   }catch(e){ openDlg(`<h3>Keap raw lookup</h3><p class="small" style="color:var(--bad,#c23b3b)">${esc(e.message||String(e))}</p><div class="dlgrow"><button class="btn" onclick="closeDlg()">Close</button></div>`); }
+}
+async function deleteStalePendingClient(id){
+  if(!(await uiConfirm('Delete this pending row outright? Unlike Ignore, this is a hard delete — use it when the stored Keap subscription/contact IDs are stale or corrupt (404 on lookup) so a corrected Backfill can re-create it fresh.','Delete'))) return;
+  await api('POST', `/api/admin/pending-clients/${id}/delete`, {});
+  closeDlg();
+  await refresh();
+  toast('Deleted');
 }
 
 /* ---------- clients (profiles) ---------- */
