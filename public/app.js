@@ -1085,7 +1085,7 @@ async function loadPending(){
   try{
     const rows = await api('GET','/api/pending-clients');
     st.pendingList = rows;
-    $('#pendingOut').innerHTML = rows.length ? `<table><tr><th>Company</th><th>Contact</th><th class="num">Amount</th><th>Billing</th><th>Started</th><th></th></tr>` +
+    $('#pendingOut').innerHTML = rows.length ? `<div style="overflow-x:auto"><table><tr><th>Company</th><th>Contact</th><th class="num">Amount</th><th>Billing</th><th>Started</th><th style="white-space:nowrap">Actions</th></tr>` +
       rows.map(r=>{
         const hm = r.hold_match;
         const matchRow = hm ? `<tr><td colspan="6" style="background:#fdf6e3;border-left:4px solid var(--gold);padding:8px 12px">
@@ -1097,10 +1097,10 @@ async function loadPending(){
         return `<tr><td><b>${esc(r.company_name||'(unknown)')}</b></td><td class="small">${esc(r.contact_name||'—')}</td>
         <td class="num">${r.billing_amount?'$'+r.billing_amount:'—'}</td><td class="small">${esc(r.billing_cycle||'—')} ×${r.billing_frequency||1}</td>
         <td class="small">${esc(r.start_date||'—')}${future?' <span class="pill p-fut">upcoming</span>':''}</td>
-        <td><button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
+        <td style="white-space:nowrap"><button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
         <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button>
         ${D.user.role==='admin'?`<button class="btn tiny" onclick="debugPendingClient(${r.id})">Debug</button>`:''}</td></tr>` + matchRow;
-      }).join('') + `</table>`
+      }).join('') + `</table></div>`
       : `<p class="small">Nothing waiting — you're all caught up.</p>`;
   }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
 }
