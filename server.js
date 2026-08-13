@@ -775,6 +775,25 @@ route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, u
  * contact straight from Keap right now and returns the raw JSON, so a field-name
  * mismatch (Keap nesting company info somewhere other than where the app expects)
  * can be seen and fixed precisely instead of guessed at again. */
+/* Diagnostic for "everything is 404ing" — hits a handful of known-shape Keap
+ * endpoints directly with the configured token so we can see, side by side,
+ * which paths this account's Keap API actually answers to right now, rather
+ * than guessing whether it's the token, the base URL, or the resource path. */
+route('GET', /^\/api\/admin\/keap-diag$/, ['admin'], async (req, res) => {
+  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
+  const checks = [
+    ['account profile (sanity check token+base)', '/v1/account/profile'],
+    ['contacts list', '/v1/contacts?limit=1'],
+    ['subscriptions list (no id)', '/v1/subscriptions?limit=1'],
+    ['subscriptions list (page params as used by Backfill)', '/v1/subscriptions?limit=1&offset=0'],
+  ];
+  const out = { keapBase: KEAP_BASE, results: [] };
+  for(const [label, path] of checks){
+    const r = await keapGet(path);
+    out.results.push({ label, path, ok: r.ok, status: r.status, json: r.json });
+  }
+  send(res, 200, out);
+});
 route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], async (req, res, m) => {
   const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
   if(!pc) return err(res, 404, 'not found');
