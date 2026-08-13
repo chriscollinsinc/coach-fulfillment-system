@@ -811,11 +811,12 @@ route('POST', /^\/api\/admin\/keap-events\/(\d+)\/reprocess$/, ['admin'], async 
   if(!objectId) return err(res, 400, 'could not extract an object id from this event’s raw payload');
   try{
     let result = null;
-    if(eventKey === 'subscription.add') result = await onSubscriptionAdd(objectId);
+    if(eventKey === 'subscription.add') result = await onSubscriptionAdd(objectId, { force: true });
     else if(eventKey === 'subscription.edit' || eventKey === 'subscription.delete') result = await onSubscriptionChange(objectId, eventKey, { source: 'admin.reprocess' });
     else return err(res, 400, `don't know how to reprocess event type "${eventKey}"`);
-    db.prepare('UPDATE keap_events SET object_id=?, handled=? WHERE id=?').run(String(objectId), 'reprocessed ' + new Date().toISOString(), row.id);
-    log(user.email, 'keap_event.reprocess', { id: row.id, eventKey, objectId });
+    db.prepare('UPDATE keap_events SET object_id=? WHERE id=?').run(String(objectId), row.id);
+    recordKeapEventOutcome(row.id, result);
+    log(user.email, 'keap_event.reprocess', { id: row.id, eventKey, objectId, result });
     send(res, 200, { ok: true, result });
   }catch(e){ err(res, 500, String(e && e.message || e)); }
 });
@@ -1375,14 +1376,15 @@ async function handleKeapWebhook(req, res, rawBody){
       .run(new Date().toISOString(), eventKey || '(unknown)', objectId != null ? String(objectId) : '', JSON.stringify(evt).slice(0, 4000));
 
     try{
+      let result = null;
       if(eventKey === 'subscription.add' && objectId){
-        await onSubscriptionAdd(objectId);
+        result = await onSubscriptionAdd(objectId);
       } else if((eventKey === 'subscription.edit' || eventKey === 'subscription.delete') && objectId){
-        await onSubscriptionChange(objectId, eventKey);
+        result = await onSubscriptionChange(objectId, eventKey);
       }
       // other event keys (contact.*, order.*, invoice.*) are logged to keap_events but not
       // acted on yet — safe to extend here later.
-      db.prepare('UPDATE keap_events SET handled=? WHERE id=?').run('ok', eventRow.lastInsertRowid);
+      recordKeapEventOutcome(eventRow.lastInsertRowid, result);
     }catch(e){
       // Never let one bad event take down the batch (or silently vanish) — the raw
       // payload is already saved above, so it's always reprocessable once the bug's fixed.
@@ -1391,6 +1393,19 @@ async function handleKeapWebhook(req, res, rawBody){
     }
   }
   send(res, 200, { ok: true });
+}
+/* Turns whatever onSubscriptionAdd/onSubscriptionChange returned into the two
+ * columns the Admin diagnostics table shows: a plain-English handled status, and
+ * a resolved company/client name (blank if nothing could be resolved — itself a
+ * useful signal that the Keap lookup failed rather than that nothing happened). */
+function recordKeapEventOutcome(eventId, result){
+  const handled = !result ? 'ok — no action needed for this event type'
+    : result.error ? 'error: ' + result.error
+    : result.skipped ? 'skipped — ' + (result.reason || 'already handled')
+    : result.found === false ? 'no matching contract found (still pending, or unrelated)'
+    : 'ok';
+  const companyName = (result && (result.companyName || result.clientName)) || '';
+  db.prepare('UPDATE keap_events SET handled=?, company_name=? WHERE id=?').run(handled, companyName, eventId);
 }
 /* Keap's REST hooks send object_keys as an array of OBJECTS (e.g. {id, apiUrl}),
  * not bare IDs — a payload-shape assumption we got wrong on first build, which
@@ -1403,29 +1418,44 @@ function extractKeapObjectId(evt){
   return raw;
 }
 
-async function onSubscriptionAdd(subId){
-  const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(String(subId));
+async function onSubscriptionAdd(subId, opts = {}){
   const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(String(subId));
-  if(already || existingContract) return; // already queued or already assigned
+  if(existingContract) return { subId, skipped: true, reason: 'already has a real contract' };
+  const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(String(subId));
+  // Normal webhook delivery: a pending item already queued (even a blank/placeholder
+  // one from a past failed lookup) is left alone — don't silently re-run enrichment
+  // on every retry. opts.force (used by the admin "Reprocess" button) overrides this
+  // on purpose: a human explicitly asked to re-fetch and refresh it.
+  if(already && !opts.force) return { subId, skipped: true, reason: 'already queued' };
 
   const sub = await keapGet(`/v1/subscriptions/${subId}`);
+  if(!sub.ok) return { subId, error: `keap fetch failed (status ${sub.status}) — nothing was queued or changed` };
   const s = sub.json || {};
   let companyName = '', contactName = '';
   if(s.contact_id){
     const c = await keapGet(`/v1/contacts/${s.contact_id}?optional_properties=company`);
-    const cj = c.json || {};
-    companyName = cj.company?.company_name || '';
-    contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
+    if(c.ok){
+      const cj = c.json || {};
+      companyName = cj.company?.company_name || '';
+      contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
+    }
   }
   db.prepare(`INSERT INTO pending_clients
     (keap_subscription_id,keap_contact_id,keap_company_id,company_name,contact_name,product_desc,billing_amount,billing_cycle,billing_frequency,start_date,status,created)
     VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?)
-    ON CONFLICT(keap_subscription_id) DO NOTHING`)
+    ON CONFLICT(keap_subscription_id) DO UPDATE SET
+      keap_contact_id=excluded.keap_contact_id, keap_company_id=excluded.keap_company_id,
+      company_name=excluded.company_name, contact_name=excluded.contact_name,
+      product_desc=excluded.product_desc, billing_amount=excluded.billing_amount,
+      billing_cycle=excluded.billing_cycle, billing_frequency=excluded.billing_frequency,
+      start_date=excluded.start_date, status='pending'
+    WHERE pending_clients.status != 'assigned'`)
     .run(String(subId), s.contact_id ? String(s.contact_id) : null, s.contact_id_company || '', companyName, contactName,
       s.subscription_plan_id ? String(s.subscription_plan_id) : (s.product_id ? String(s.product_id) : ''),
       Number(s.billing_amount) || null, s.billing_cycle || '', s.billing_frequency || null, s.start_date || null,
       new Date().toISOString());
-  log('keap.webhook', 'pendingclient.queued', { subId, companyName, contactName });
+  log('keap.webhook', 'pendingclient.queued', { subId, companyName, contactName, forced: !!opts.force });
+  return { subId, companyName, contactName };
 }
 
 async function onSubscriptionChange(subId, eventKey, opts = {}){
@@ -1445,8 +1475,9 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
 
   if(!contract){
     // Might be a subscription that's still in the pending queue (never assigned yet) — ignore/remove it if cancelled.
+    const pc = db.prepare('SELECT company_name FROM pending_clients WHERE keap_subscription_id=?').get(String(subId));
     if(!stillActive) db.prepare("UPDATE pending_clients SET status='ignored' WHERE keap_subscription_id=?").run(String(subId));
-    return { subId, found: false };
+    return { subId, found: false, companyName: pc && pc.company_name || '' };
   }
   let statusChanged = false, priceChanged = false;
   const newStatus = stillActive ? 'active' : 'cancelled';
@@ -1476,7 +1507,7 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
   // Note: we deliberately do NOT auto-delete future scheduled visits on churn — a lead
   // reviews the Inventory screen (now flagged via the client's cancelled status) and
   // removes/reassigns them by hand, so nothing gets silently wiped off the board.
-  return { subId, found: true, statusChanged, priceChanged };
+  return { subId, found: true, statusChanged, priceChanged, clientName: client ? client.name : '' };
 }
 
 /* ---------- manual "Sync with Keap" pass ----------

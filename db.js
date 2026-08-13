@@ -190,6 +190,12 @@ ensureColumn('visits', 'completed_by_email', 'TEXT');
    shown on their profile page, editable by admins/leads. */
 ensureColumn('coaches', 'phone', 'TEXT');
 ensureColumn('coaches', 'start_date', 'TEXT');
+/* Resolved company/client name for a webhook event, filled in when we successfully
+   look it up from Keap (or from our own records for edit/delete) — so the Admin
+   "Keap webhook activity" diagnostic table can show a human name instead of forcing
+   someone to open the raw JSON for every row. Blank means the lookup itself failed
+   or hasn't been attempted (e.g. an unhandled event type) — that's useful signal too. */
+ensureColumn('keap_events', 'company_name', "TEXT DEFAULT ''");
 
 /* ---------- prospect holds (soft pencil, done right) ----------
    A hold is a real record of "we reserved these weeks on this coach's calendar for

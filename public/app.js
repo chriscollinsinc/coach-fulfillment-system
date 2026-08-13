@@ -1838,14 +1838,16 @@ async function loadKeapEvents(){
   try{
     const rows = await api('GET','/api/admin/keap-events');
     out.innerHTML = `<h4 style="margin:12px 0 6px">Recent events (last 100)</h4>` + (rows.length ?
-      `<table><tr><th>When</th><th>Event</th><th>Object ID</th><th>Handled</th><th></th></tr>` +
+      `<table><tr><th>When</th><th>Event</th><th>Company</th><th>Object ID</th><th>Handled</th><th></th></tr>` +
       rows.map((r,i)=>{
         const reprocessable = ['subscription.add','subscription.edit','subscription.delete'].includes(r.event_key);
-        return `<tr><td class="mono small">${esc(r.ts).slice(0,19).replace('T',' ')}</td><td>${esc(r.event_key)}</td><td class="mono small">${esc(r.object_id||'—')}</td>
+        return `<tr><td class="mono small">${esc(r.ts).slice(0,19).replace('T',' ')}</td><td>${esc(r.event_key)}</td>
+        <td><b>${esc(r.company_name||'—')}</b></td>
+        <td class="mono small">${esc(r.object_id||'—')}</td>
         <td class="small">${esc(r.handled||'—')}</td>
         <td><button class="btn tiny" onclick="toggleKeapRaw(${i})">Raw</button>
         ${reprocessable ? `<button class="btn tiny" onclick="reprocessKeapEvent(${r.id},${i})">Reprocess</button>` : ''}</td></tr>
-        <tr id="keapRaw-${i}" style="display:none"><td colspan="5"><pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px">${esc(r.raw)}</pre></td></tr>`;
+        <tr id="keapRaw-${i}" style="display:none"><td colspan="6"><pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px">${esc(r.raw)}</pre></td></tr>`;
       }).join('') +
       `</table>` : `<p>Nothing has ever come in from Keap — if you just added a subscription and expect to see it here within a minute or two, click Refresh. If it stays empty, the webhook itself likely isn't registered or verified with Keap right now (use "Check hook status" above).</p>`);
   }catch(e){ out.innerHTML = '<p>Could not load.</p>'; }
