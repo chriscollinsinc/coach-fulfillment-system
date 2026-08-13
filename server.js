@@ -780,6 +780,19 @@ route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req,
   log(user.email, 'pendingclient.ignore', { pendingId: pc.id, company: pc.company_name });
   send(res, 200, { ok: true });
 });
+route('POST', /^\/api\/pending-clients\/ignore-all$/, ['admin','lead'], (req, res, m, body, user) => {
+  // Bulk clear, not a bulk "soft ignore" — this DELETES the pending rows rather than
+  // flipping status to 'ignored'. That distinction matters: a single Ignore click is a
+  // human decision about one real subscription that should never resurface, so it stays
+  // as a permanent 'ignored' row the unique constraint respects forever. Ignore All exists
+  // for the opposite situation — clearing out a batch that never should have been queued
+  // in the first place (e.g. a Backfill run from before the product filter existed) — and
+  // deleting those rows outright means a corrected Backfill can cleanly re-queue anything
+  // that's actually legitimate afterward instead of having it permanently blocked.
+  const r = db.prepare("DELETE FROM pending_clients WHERE status='pending'").run();
+  log(user.email, 'pendingclient.ignore_all', { count: r.changes });
+  send(res, 200, { ok: true, count: r.changes });
+});
 route('POST', /^\/api\/keap\/sync$/, ['admin'], (req, res, m, body, user) => {
   keapSyncAllLinkedContracts(user.email)
     .then(summary => send(res, 200, { ok: true, ...summary }))

@@ -1028,10 +1028,20 @@ function guessProgram(cycle, freq){
   return 'Quarterly';
 }
 function pendingView(){
+  const n = D.pendingClientCount || 0;
   return `<div class="panel"><h2>Unassigned clients</h2>
   <p class="small" style="margin-bottom:12px">New subscriptions from Keap land here first. Confirm the client name, program cadence,
   and team, then create the contract — same as adding a contract today, just pre-filled from Keap.</p>
+  ${n>0 ? `<div class="controls" style="margin-bottom:10px"><button class="btn danger" onclick="ignoreAllPending()">Clear all${n?` (${n})`:''}</button></div>` : ''}
   <div id="pendingOut">Loading…</div></div>`;
+}
+async function ignoreAllPending(){
+  const n = D.pendingClientCount || 0;
+  if(!n){ toast('Nothing to ignore'); return; }
+  if(!(await uiConfirm(`Clear all ${n} unassigned client(s)? This removes them outright rather than marking them ignored — use it to wipe out a bad batch (like a Backfill run from before the product filter was fixed). Because they're actually removed, not just hidden, running Backfill again afterward can cleanly re-queue anything that's genuinely a real Signature Coaching subscription.`,'Clear all'))) return;
+  const r = await api('POST','/api/pending-clients/ignore-all',{});
+  await refresh();
+  toast(`Cleared ${r.count} item(s)`);
 }
 async function loadPending(){
   try{
