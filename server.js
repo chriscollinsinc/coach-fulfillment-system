@@ -793,6 +793,25 @@ route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) 
     WHERE c.status='cancelled' ORDER BY c.id DESC LIMIT 50`).all());
 });
 
+/* ----- Keap webhook diagnostics (admin only) -----
+   Two separate questions when "I added a store in Keap and it never showed up":
+   1. Did ANYTHING from Keap ever reach this app? (raw keap_events — every inbound
+      hit, whether we acted on it or not, is logged here regardless of event type.)
+   2. Is Keap's hook subscription for subscription.add/edit/delete actually registered
+      and Verified against this app's URL right now? (live GET /v1/hooks call.) */
+route('GET', /^\/api\/admin\/keap-events$/, ['admin'], (req, res) => {
+  send(res, 200, db.prepare('SELECT * FROM keap_events ORDER BY id DESC LIMIT 100').all());
+});
+route('GET', /^\/api\/admin\/keap-hooks-status$/, ['admin'], async (req, res) => {
+  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server — cannot check hook status.');
+  try{
+    const r = await keapGet('/v1/hooks');
+    if(!r.ok) return err(res, 502, `Keap returned status ${r.status} for GET /v1/hooks`);
+    const hooks = (r.json && (r.json.hooks || r.json)) || [];
+    send(res, 200, { hooks: Array.isArray(hooks) ? hooks : [] });
+  }catch(e){ err(res, 500, String(e && e.message || e)); }
+});
+
 /* ----- revenue history ----- */
 route('GET', /^\/api\/revenue-history$/, ['admin','lead'], (req, res) => {
   send(res, 200, db.prepare('SELECT * FROM revenue_snapshots ORDER BY date DESC LIMIT 180').all());

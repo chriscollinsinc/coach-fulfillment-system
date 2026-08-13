@@ -187,7 +187,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -1696,7 +1696,13 @@ function adminDataView(){
   <div id="revenueHistoryOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Recently deleted</h2>
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
-  <div id="deletedOut" class="small">Loading…</div></div>`;
+  <div id="deletedOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Keap webhook activity</h2>
+  <p class="small" style="margin-bottom:12px">Diagnostic tool for "I added something in Keap and it never showed up." <b>Recent events</b> is every raw hit Keap has sent this app, whether it was acted on or not — if a store you added isn't in here at all, Keap never reached this app for it (check the subscription actually exists in Keap, not just a contact). <b>Hook status</b> checks live with Keap whether the <code>subscription.add/edit/delete</code> hooks are registered and Verified against this app's URL right now.</p>
+  <div class="controls"><button class="btn" onclick="loadKeapEvents()">Refresh events</button>
+  <button class="btn" onclick="checkKeapHooks()">Check hook status</button></div>
+  <div id="keapHooksOut" class="small"></div>
+  <div id="keapEventsOut" class="small">Loading…</div></div>`;
   return html;
 }
 function adminHistoryView(){
@@ -1825,6 +1831,39 @@ async function loadAudit(){
     $('#auditOut').innerHTML=`<table><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th></tr>`+
       rows.map(r=>`<tr><td class="mono small">${r.ts.slice(0,16).replace('T',' ')}</td><td>${esc(r.user)}</td><td>${esc(r.action)}</td><td class="small">${esc(r.detail).slice(0,120)}</td></tr>`).join('')+`</table>`;
   }catch(e){}
+}
+async function loadKeapEvents(){
+  const out = $('#keapEventsOut'); if(!out) return;
+  out.innerHTML = 'Loading…';
+  try{
+    const rows = await api('GET','/api/admin/keap-events');
+    out.innerHTML = `<h4 style="margin:12px 0 6px">Recent events (last 100)</h4>` + (rows.length ?
+      `<table><tr><th>When</th><th>Event</th><th>Object ID</th><th></th></tr>` +
+      rows.map((r,i)=>`<tr><td class="mono small">${esc(r.ts).slice(0,19).replace('T',' ')}</td><td>${esc(r.event_key)}</td><td class="mono small">${esc(r.object_id||'—')}</td>
+        <td><button class="btn tiny" onclick="toggleKeapRaw(${i})">Raw</button></td></tr>
+        <tr id="keapRaw-${i}" style="display:none"><td colspan="4"><pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px">${esc(r.raw)}</pre></td></tr>`).join('') +
+      `</table>` : `<p>Nothing has ever come in from Keap — if you just added a subscription and expect to see it here within a minute or two, click Refresh. If it stays empty, the webhook itself likely isn't registered or verified with Keap right now (use "Check hook status" above).</p>`);
+  }catch(e){ out.innerHTML = '<p>Could not load.</p>'; }
+}
+function toggleKeapRaw(i){ const el=$('#keapRaw-'+i); if(el) el.style.display = el.style.display==='none' ? '' : 'none'; }
+async function checkKeapHooks(){
+  const out = $('#keapHooksOut'); if(!out) return;
+  out.innerHTML = 'Checking with Keap…';
+  try{
+    const r = await api('GET','/api/admin/keap-hooks-status');
+    const relevant = ['subscription.add','subscription.edit','subscription.delete'];
+    out.innerHTML = `<h4 style="margin:0 0 6px">Hook status (live from Keap)</h4>` + (r.hooks.length ?
+      `<table><tr><th>Event</th><th>Hook URL</th><th>Status</th></tr>` +
+      r.hooks.filter(h=>relevant.includes(h.eventKey||h.event_key)).map(h=>{
+        const status = h.status || h.hookStatus || '—';
+        const ok = /verified/i.test(status);
+        return `<tr><td>${esc(h.eventKey||h.event_key)}</td><td class="mono small">${esc(h.hookUrl||h.hook_url||'—')}</td>
+          <td><span class="pill ${ok?'p-done':'p-over'}">${esc(status)}</span></td></tr>`;
+      }).join('') + `</table>` +
+      (relevant.every(k=>r.hooks.some(h=>(h.eventKey||h.event_key)===k)) ? '' :
+        `<p class="small">Missing one or more of subscription.add/edit/delete entirely — they need to be (re)registered with Keap pointing at this app's URL.</p>`)
+      : `<p>Keap reports no hooks registered at all for this account/app. New subscriptions can never reach this app until the hook registration is (re)run.</p>`);
+  }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
 }
 async function loadBackupStatus(){
   try{
