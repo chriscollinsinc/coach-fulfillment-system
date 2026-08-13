@@ -62,7 +62,8 @@ button.btn:hover{border-color:var(--secondary);background:var(--secondary);color
 button.btn.primary{background:var(--gold);border-color:var(--gold);color:var(--secondary);font-weight:600}
 button.btn.primary:hover{background:var(--primary);border-color:var(--primary);color:#fff}
 button.btn.tiny{padding:2px 8px;font-size:10.5px}
-button.btn.danger:hover{background:var(--bad);border-color:var(--bad)}
+button.btn.danger{border-color:var(--bad);color:var(--bad)}
+button.btn.danger:hover{background:var(--bad);border-color:var(--bad);color:#fff}
 .bar{display:flex;height:20px;overflow:hidden;background:#eef0f4;min-width:200px}
 .bar div{height:100%}
 
