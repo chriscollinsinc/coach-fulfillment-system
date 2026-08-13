@@ -1889,7 +1889,7 @@ async function backfillKeapSubscriptions(){
   try{
     const r = await api('POST','/api/admin/keap-backfill-subscriptions',{});
     const rows = r.queued || [];
-    out.innerHTML = `<p class="small">Checked ${r.checked} subscription(s) in Keap — ${r.alreadyTracked} already tracked, ${rows.length} newly queued${r.errors.length?`, ${r.errors.length} error(s)`:''}.${r.hitPageCap?' (hit the page cap — there may be more; run it again to keep going.)':''}</p>` +
+    out.innerHTML = `<p class="small">Checked ${r.checked} subscription(s) in Keap — ${rows.length} newly queued, ${r.alreadyTracked} already tracked, ${r.notCoachingProduct} not a Signature Coaching subscription, ${r.cancelled} cancelled/inactive${r.errors.length?`, ${r.errors.length} error(s)`:''}.${r.hitPageCap?' (hit the page cap — there may be more; run it again to keep going.)':''}</p>` +
       (rows.length ? `<table><tr><th>Company</th><th>Contact</th><th>Starts</th><th>Active</th></tr>` +
         rows.map(q=>{
           const future = q.startDate && q.startDate > TODAY;
