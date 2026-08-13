@@ -196,6 +196,14 @@ ensureColumn('coaches', 'start_date', 'TEXT');
    someone to open the raw JSON for every row. Blank means the lookup itself failed
    or hasn't been attempted (e.g. an unhandled event type) — that's useful signal too. */
 ensureColumn('keap_events', 'company_name', "TEXT DEFAULT ''");
+/* Set manually when ops emails in that a client gave their 30-day notice to quit —
+ * Keap itself won't show anything different until the final invoice actually lapses,
+ * which can be well past the point coaching should stop. Purely a marker; nothing
+ * reads it except the "give notice" bulk action (which also clears open visits at the
+ * same time it's set) and the nightly digest (which flags anyone past their 30 days
+ * that Keap still hasn't confirmed as cancelled). Client status itself is untouched —
+ * they're still a real, paying, active client through their last month. */
+ensureColumn('clients', 'notice_given_date', 'TEXT');
 
 /* ---------- prospect holds (soft pencil, done right) ----------
    A hold is a real record of "we reserved these weeks on this coach's calendar for

@@ -1184,12 +1184,14 @@ const CLIENT_COLS = [
 ];
 function clientsView(){
   if(!st.cliSort) st.cliSort = { key:'name', dir:'asc' };
+  if(!st.cliSel) st.cliSel = new Set();
   return `<div class="panel"><h2>Clients</h2>
   <p class="small" style="margin-bottom:12px">Every dealership we've coached — with who's assigned, Keap-imported details, and a running notes history. Click a column header to sort.</p>
   <div class="controls"><input placeholder="Search client…" id="cliSearch" value="${esc(st.cliSearch||'')}" oninput="st.cliSearch=this.value;renderClientTable()" style="width:260px">
     ${['admin','lead'].includes(D.user.role) ? `<a class="btn tiny" href="/api/clients/export.csv">Export CSV</a>` : ''}
     ${D.user.role==='admin' ? `<button class="btn tiny" id="keapSyncBtn" onclick="syncWithKeap()">Sync with Keap</button>` : ''}
   </div>
+  <div id="cliBulkOut"></div>
   <div id="clientsOut">Loading…</div></div>`;
 }
 async function syncWithKeap(){
@@ -1228,8 +1230,16 @@ const healthPill = h =>
   : h==='behind' ? '<span class="pill p-due">Behind</span>'
   : h==='on_track' ? '<span class="pill p-done">On track</span>'
   : '<span class="pill p-fut">—</span>';
+function noticePill(c){
+  if(!c.notice_given_date || c.status==='cancelled') return '';
+  const daysSince = Math.floor((Date.now() - new Date(c.notice_given_date+'T12:00:00').getTime()) / 86400000);
+  return daysSince > 30 ? ' <span class="pill p-over">Notice expired — follow up</span>'
+    : ` <span class="pill p-due">On notice — day ${daysSince}/30</span>`;
+}
 function renderClientTable(){
   const box = $('#clientsOut'); if(!box) return;
+  const canBulk = ['admin','lead'].includes(D.user.role);
+  const sel = st.cliSel || (st.cliSel = new Set());
   const q = norm(st.cliSearch||'');
   let rows = (st.clientsList||[]).slice();
   if(q) rows = rows.filter(c=>norm(c.name).includes(q));
@@ -1244,8 +1254,13 @@ function renderClientTable(){
   const totalRevenue = rows.reduce((s,c)=>s+(Number(c.revenue)||0),0);
   const arrow = k => st.cliSort.key===k ? (st.cliSort.dir==='asc'?' ▲':' ▼') : '';
   const th = c => `<th class="${c.type==='num'?'num':''}" style="cursor:pointer;user-select:none" onclick="sortClients('${c.key}')">${c.label}<span class="small">${arrow(c.key)}</span></th>`;
-  box.innerHTML = `<table><tr>${CLIENT_COLS.map(th).join('')}<th></th></tr>` +
-    rows.map(c=>`<tr><td><b>${esc(c.name)}</b></td>
+  const bulkOut = $('#cliBulkOut');
+  if(bulkOut) bulkOut.innerHTML = (canBulk && sel.size) ? `<div class="panel" style="border-left:4px solid var(--primary);padding:10px 14px;margin-bottom:12px">
+    <b>${sel.size} selected</b>
+    <button class="btn tiny danger" style="margin-left:10px" onclick="giveNoticeDlg()">Give 30-day notice</button>
+    <button class="btn tiny" onclick="st.cliSel=new Set();renderClientTable()">Clear selection</button></div>` : '';
+  box.innerHTML = `<table><tr>${canBulk?`<th style="width:26px"><input type="checkbox" ${rows.length&&rows.every(c=>sel.has(c.id))?'checked':''} onclick="toggleClientAll(this.checked)"></th>`:''}${CLIENT_COLS.map(th).join('')}<th></th></tr>` +
+    rows.map(c=>`<tr>${canBulk?`<td onclick="event.stopPropagation()"><input type="checkbox" ${sel.has(c.id)?'checked':''} onclick="toggleClientSel(${c.id},this.checked)"></td>`:''}<td><b>${esc(c.name)}</b>${noticePill(c)}</td>
       <td>${healthPill(c.health)}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}</td>
       <td>${esc(c.programs||'—')}</td>
@@ -1253,9 +1268,44 @@ function renderClientTable(){
       <td class="num">${c.active_contracts}</td><td>${esc(c.assigned_coach_name||'—')}</td>
       <td><button class="btn tiny" onclick="openClientProfile(${c.id})">View profile →</button></td></tr>`).join('') +
     `<tr style="font-weight:600;border-top:2px solid var(--border,#ccc)">
-      <td colspan="4">Total — ${rows.length} client${rows.length===1?'':'s'}</td>
+      <td colspan="${canBulk?5:4}">Total — ${rows.length} client${rows.length===1?'':'s'}</td>
       <td class="num">${fmtMoney(totalRevenue)}</td><td></td><td></td><td></td></tr>` +
     `</table>` + (rows.length ? '' : `<p class="small">No clients match.</p>`);
+}
+function toggleClientSel(id, on){ if(on) st.cliSel.add(id); else st.cliSel.delete(id); renderClientTable(); }
+function toggleClientAll(on){
+  const q = norm(st.cliSearch||'');
+  const visible = (st.clientsList||[]).filter(c=>!q||norm(c.name).includes(q));
+  st.cliSel = on ? new Set(visible.map(c=>c.id)) : new Set();
+  renderClientTable();
+}
+function giveNoticeDlg(){
+  const ids = [...st.cliSel];
+  if(!ids.length) return;
+  const names = (st.clientsList||[]).filter(c=>ids.includes(c.id)).map(c=>c.name);
+  openDlg(`<h3>Give 30-day notice</h3>
+    <p class="small" style="margin-bottom:10px">For: ${names.map(esc).join(', ')}</p>
+    <label>Date the notice email came in</label><input type="date" id="noticeDate" value="${TODAY}">
+    <p class="small" style="margin:10px 0;color:var(--bad,#c23b3b)"><b>This deletes every one of their upcoming/unscheduled visits right now — permanently, not a soft delete.</b> The client's status and revenue are untouched (they're still active through their last paid month); this only stops scheduling new coaching work for them. If notice gets rescinded later, new visits have to be added by hand.</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn danger" onclick="doGiveNotice()">Confirm — remove their LIDs</button></div>`);
+}
+async function doGiveNotice(){
+  const ids = [...st.cliSel];
+  const noticeDate = $('#noticeDate').value || TODAY;
+  closeDlg();
+  try{
+    const r = await api('POST','/api/clients/notice',{ clientIds: ids, noticeDate });
+    st.cliSel = new Set();
+    await refresh();
+    toast(`${r.clientsUpdated} client(s) marked on notice — ${r.visitsDeleted} visit(s) removed`);
+  }catch(e){}
+}
+async function clearClientNotice(id){
+  if(!(await uiConfirm('Clear the notice marker for this client? This does not restore any visits that were already removed.','Clear notice'))) return;
+  await api('POST',`/api/clients/${id}/notice/clear`,{});
+  await refresh();
+  toast('Notice cleared');
 }
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
 async function loadClientProfile(id){
@@ -1291,11 +1341,13 @@ function clientProfileView(data, notes){
     <div class="controls">
       <button class="btn tiny" onclick="go('clients')">← All clients</button>
       <span style="flex:1"></span>
+      ${canEdit() && client.notice_given_date && client.status!=='cancelled' ? `<button class="btn tiny" onclick="clearClientNotice(${client.id})">Clear notice</button>` : ''}
       ${D.user.role==='admin' ? `<button class="btn tiny danger" onclick="deleteClientDlg(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Delete client</button>` : ''}
     </div>
     <h2 style="margin-top:8px">${esc(client.name)}
-      ${client.status==='active'?'<span class="pill p-done">active</span>':client.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}
+      ${client.status==='active'?'<span class="pill p-done">active</span>':client.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}${noticePill(client)}
     </h2>
+    ${client.notice_given_date ? `<p class="small" style="color:var(--muted)">30-day notice given ${fmt(client.notice_given_date)}${client.status!=='cancelled'?' — no open visits are scheduled for them':''}</p>` : ''}
     <div class="cards" style="margin-top:12px">
       <div class="card"><div class="k">${visitProgress.completed}/${visitProgress.total}</div><div class="l">Visits completed — ${visitProgress.year}</div></div>
       <div class="card"><div class="k">${contracts.filter(c=>c.status==='active').length}</div><div class="l">Active contracts</div></div>

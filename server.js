@@ -975,6 +975,14 @@ async function runNightlyMaintenance(actorEmail){
     const overdue = db.prepare("SELECT COUNT(*) c FROM visits WHERE completed=0 AND due IS NOT NULL AND due < ?").get(new Date().toISOString().slice(0,10)).c;
     const stalePending = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending' AND created < ?").get(new Date(Date.now()-7*24*60*60*1000).toISOString()).c;
     const syncErrors = (summary.sync && summary.sync.errors) ? summary.sync.errors.length : 0;
+    // Someone gave notice 30+ days ago and Keap still hasn't reported the subscription
+    // cancelled — either a billing/follow-up gap worth chasing, or they changed their
+    // mind and the notice marker should be cleared so this stops nagging.
+    const noticeOverdue = db.prepare(`
+      SELECT name, notice_given_date FROM clients
+      WHERE deleted_at IS NULL AND status!='cancelled' AND notice_given_date IS NOT NULL
+        AND date(notice_given_date,'+30 days') <= date('now')
+      ORDER BY notice_given_date`).all();
     const lines = [
       `Coach Fulfillment System — nightly summary for ${new Date().toISOString().slice(0,10)}`,
       '',
@@ -986,6 +994,11 @@ async function runNightlyMaintenance(actorEmail){
       `Overdue visits (not yet completed, past due): ${overdue}`,
       `Pending Clients queue items older than 7 days: ${stalePending}`,
     ];
+    if(noticeOverdue.length){
+      lines.push(`Clients past their 30-day notice, Keap still hasn't confirmed cancelled: ${noticeOverdue.length}`);
+      noticeOverdue.slice(0,15).forEach(c => lines.push(`  - ${c.name} (notice given ${c.notice_given_date})`));
+      if(noticeOverdue.length > 15) lines.push(`  …and ${noticeOverdue.length - 15} more`);
+    }
     if(summary.holds && !summary.holds.error){
       if(summary.holds.expired.length) lines.push(`Prospect holds auto-released (expired): ${summary.holds.expired.join(', ')}`);
       if(summary.holds.expiring.length) lines.push(`Prospect holds expiring within 7 days: ${summary.holds.expiring.join(', ')}`);
@@ -1009,7 +1022,7 @@ async function runNightlyMaintenance(actorEmail){
       if(noKeapClients) integrity.push(`${noKeapClients} active client(s) with no Keap company id linked`);
       if(integrity.length){ lines.push('', 'Data integrity — worth a cleanup pass:'); integrity.forEach(x => lines.push('  - ' + x)); }
     }catch(e){ lines.push('Data integrity check failed: ' + e.message); }
-    if(overdue > 0 || stalePending > 0 || syncErrors > 0 || !summary.backup.ok) lines.push('', 'One or more of the above needs a look.');
+    if(overdue > 0 || stalePending > 0 || syncErrors > 0 || noticeOverdue.length > 0 || !summary.backup.ok) lines.push('', 'One or more of the above needs a look.');
     const admins = ADMIN_EMAILS();
     let digestSent = 0;
     for(const to of admins){
@@ -1245,6 +1258,43 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
     log(user.email, 'client.rename', { clientId: cl.id, name: body.name });
   }
   send(res, 200, result);
+});
+/* ----- 30-day cancellation notice -----
+   Purely a manual marker: someone read an email saying a dealership is quitting, with
+   a 30-day notice — Keap itself keeps showing the subscription as active until the
+   final invoice actually lapses, which can be well past when coaching should stop.
+   This does NOT touch client/contract status (they're still a real active client
+   through their last paid month) — it only stops scheduling work for them by clearing
+   out their open visits. Deliberately a hard delete, not the usual soft-delete pattern,
+   per how this was scoped: if a client rescinds notice, those visits get recreated by
+   hand rather than restored. */
+route('POST', /^\/api\/clients\/notice$/, ['admin','lead'], (req, res, m, body, user) => {
+  const ids = Array.isArray(body.clientIds) ? [...new Set(body.clientIds.map(Number).filter(Boolean))] : [];
+  if(!ids.length) return err(res, 400, 'clientIds required');
+  const noticeDate = /^\d{4}-\d{2}-\d{2}$/.test(body.noticeDate || '') ? body.noticeDate : new Date().toISOString().slice(0,10);
+  let clientsUpdated = 0, visitsDeleted = 0;
+  const results = [];
+  for(const id of ids){
+    const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(id);
+    if(!cl) continue;
+    db.prepare('UPDATE clients SET notice_given_date=? WHERE id=?').run(noticeDate, cl.id);
+    const del = db.prepare('DELETE FROM visits WHERE client_id=? AND completed=0').run(cl.id);
+    clientsUpdated++;
+    visitsDeleted += del.changes;
+    results.push({ clientId: cl.id, name: cl.name, visitsDeleted: del.changes });
+  }
+  log(user.email, 'client.give_notice', { noticeDate, clientsUpdated, visitsDeleted, clients: results.map(r => r.name) });
+  send(res, 200, { ok: true, clientsUpdated, visitsDeleted, results });
+});
+route('POST', /^\/api\/clients\/(\d+)\/notice\/clear$/, ['admin','lead'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  // Clears the marker only — does not recreate any visits that were removed when
+  // notice was given. Use this when notice was entered on the wrong client, or a
+  // client rescinds and coaching resumes (schedule their next visits normally after).
+  db.prepare('UPDATE clients SET notice_given_date=NULL WHERE id=?').run(cl.id);
+  log(user.email, 'client.notice_clear', { clientId: cl.id, name: cl.name });
+  send(res, 200, { ok: true });
 });
 route('DELETE', /^\/api\/clients\/(\d+)$/, ['admin'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
