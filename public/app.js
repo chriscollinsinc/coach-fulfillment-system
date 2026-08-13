@@ -1098,7 +1098,8 @@ async function loadPending(){
         <td class="num">${r.billing_amount?'$'+r.billing_amount:'—'}</td><td class="small">${esc(r.billing_cycle||'—')} ×${r.billing_frequency||1}</td>
         <td class="small">${esc(r.start_date||'—')}${future?' <span class="pill p-fut">upcoming</span>':''}</td>
         <td><button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
-        <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button></td></tr>` + matchRow;
+        <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button>
+        ${D.user.role==='admin'?`<button class="btn tiny" onclick="debugPendingClient(${r.id})">Debug</button>`:''}</td></tr>` + matchRow;
       }).join('') + `</table>`
       : `<p class="small">Nothing waiting — you're all caught up.</p>`;
   }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
@@ -1170,6 +1171,19 @@ async function saveAssignPending(id){
 async function ignorePending(id){
   if(!(await uiConfirm("Ignore this subscription? It won't be added to the LID Inventory.","Ignore"))) return;
   await api('POST',`/api/pending-clients/${id}/ignore`,{}); await refresh(); toast('Ignored');
+}
+async function debugPendingClient(id){
+  openDlg(`<h3>Keap raw lookup</h3><p class="small">Fetching live from Keap…</p>`);
+  try{
+    const r = await api('GET', `/api/admin/pending-clients/${id}/keap-raw`);
+    openDlg(`<h3>Keap raw lookup</h3>
+      <p class="small">This is exactly what Keap returns right now for this pending item's subscription and contact — useful for figuring out why a field (like company name) isn't showing up correctly.</p>
+      <h4 style="margin:10px 0 4px">Subscription</h4>
+      <pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px;max-height:200px;overflow:auto">${esc(JSON.stringify(r.subscription||'(no keap_subscription_id on this row)', null, 2))}</pre>
+      <h4 style="margin:10px 0 4px">Contact</h4>
+      <pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px;max-height:200px;overflow:auto">${esc(JSON.stringify(r.contact||'(no keap_contact_id on this row)', null, 2))}</pre>
+      <div class="dlgrow"><button class="btn" onclick="closeDlg()">Close</button></div>`);
+  }catch(e){ openDlg(`<h3>Keap raw lookup</h3><p class="small" style="color:var(--bad,#c23b3b)">${esc(e.message||String(e))}</p><div class="dlgrow"><button class="btn" onclick="closeDlg()">Close</button></div>`); }
 }
 
 /* ---------- clients (profiles) ---------- */
@@ -1529,7 +1543,15 @@ async function doDeactivateCoach(id, name){
   const reassignToCoachId = $('#reassignTo').value || undefined;
   const r = await api('DELETE','/api/coaches/'+id, reassignToCoachId ? { reassignToCoachId } : undefined);
   closeDlg(); await refresh();
-  toast(`${name} deactivated${r.storesMoved ? ` — ${r.storesMoved} store(s) ${reassignToCoachId?'reassigned':'unassigned'}` : ''}`);
+  const parts = [];
+  if(r.storesMoved) parts.push(`${r.storesMoved} store(s) ${reassignToCoachId?'reassigned':'unassigned'}`);
+  const c = r.cascade;
+  if(c){
+    if(c.keptWeek) parts.push(`${c.keptWeek} scheduled visit(s) moved with their week intact`);
+    if(c.needsReplacing) parts.push(`${c.needsReplacing} visit(s) need re-placing (the new coach's week was already taken) — check that team's to-schedule list`);
+    if(c.unscheduled) parts.push(`${c.unscheduled} visit(s) taken off the calendar`);
+  }
+  toast(`${name} deactivated${parts.length ? ' — ' + parts.join('; ') : ''}`);
   if(st.view==='coachprofile') go('admin');
 }
 async function saveAssignedCoach(clientId, coachId){

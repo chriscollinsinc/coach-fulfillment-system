@@ -566,18 +566,37 @@ route('DELETE', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bo
   // permanently credits the coach who actually did the work, so their profile/history
   // stays intact and correct even after they're deactivated.
   const toId = body && body.reassignToCoachId ? String(body.reassignToCoachId) : null;
+  let dest = null;
   if(toId){
-    const dest = getCoach(toId);
+    dest = getCoach(toId);
     if(!dest) return err(res, 400, 'reassignment target coach not found');
     if(!canEditTeam(user, dest.team)) return err(res, 403, 'Reassignment target is not on your team');
   }
   const storesMoved = db.prepare('SELECT COUNT(*) n FROM clients WHERE assigned_coach_id=?').get(c.id).n;
   db.prepare('UPDATE clients SET assigned_coach_id=? WHERE assigned_coach_id=?').run(toId, c.id);
-  if(toId) db.prepare('UPDATE visits SET cal_coach=? WHERE cal_coach=? AND completed=0').run(toId, c.id);
-  else db.prepare('UPDATE visits SET cal_coach=NULL, cal_week=NULL WHERE cal_coach=? AND completed=0').run(c.id);
+  // Every visit currently on this coach's calendar (cal_coach set implies cal_week set —
+  // this never touches unscheduled work, that's tracked via clients.assigned_coach_id
+  // above, not here). Reassigning blindly onto the new coach's calendar without checking
+  // for a conflict would silently double-book them if they already have something that
+  // week — same cellFree check used for a single-client coach reassignment, applied here
+  // too so both paths behave identically.
+  const cascade = { keptWeek: 0, needsReplacing: 0, unscheduled: 0 };
+  const openVisits = db.prepare('SELECT * FROM visits WHERE cal_coach=? AND completed=0').all(c.id);
+  for(const v of openVisits){
+    if(dest && cellFree(dest.id, v.cal_week, v.id)){
+      db.prepare('UPDATE visits SET cal_coach=?, team=? WHERE id=?').run(dest.id, dest.team, v.id);
+      cascade.keptWeek++;
+    } else if(dest){
+      db.prepare('UPDATE visits SET cal_coach=NULL, cal_week=NULL, team=? WHERE id=?').run(dest.team, v.id);
+      cascade.needsReplacing++;
+    } else {
+      db.prepare('UPDATE visits SET cal_coach=NULL, cal_week=NULL WHERE id=?').run(v.id);
+      cascade.unscheduled++;
+    }
+  }
   db.prepare('UPDATE coaches SET active=0 WHERE id=?').run(c.id);
-  log(user.email, 'coach.remove', { id: c.id, name: c.name, storesMoved, reassignedTo: toId || null });
-  send(res, 200, { ok: true, storesMoved });
+  log(user.email, 'coach.remove', { id: c.id, name: c.name, storesMoved, reassignedTo: toId || null, ...cascade });
+  send(res, 200, { ok: true, storesMoved, cascade });
 });
 route('GET', /^\/api\/coaches\/inactive$/, ['admin','lead'], (req, res, m, body, user) => {
   const rows = db.prepare('SELECT * FROM coaches WHERE active=0 ORDER BY team,name').all()
@@ -751,6 +770,25 @@ function matchHoldForName(name){
 route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, user) => {
   const rows = db.prepare("SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all();
   send(res, 200, rows.map(r => ({ ...r, hold_match: matchHoldForName(r.company_name || r.contact_name || '') })));
+});
+/* Diagnostic for "(unknown)" rows — re-fetches this pending item's subscription and
+ * contact straight from Keap right now and returns the raw JSON, so a field-name
+ * mismatch (Keap nesting company info somewhere other than where the app expects)
+ * can be seen and fixed precisely instead of guessed at again. */
+route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], async (req, res, m) => {
+  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
+  if(!pc) return err(res, 404, 'not found');
+  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
+  const out = { pendingClient: pc };
+  if(pc.keap_subscription_id){
+    const sub = await keapGet(`/v1/subscriptions/${pc.keap_subscription_id}`);
+    out.subscription = { ok: sub.ok, status: sub.status, json: sub.json };
+  }
+  if(pc.keap_contact_id){
+    const c = await keapGet(`/v1/contacts/${pc.keap_contact_id}?optional_properties=company`);
+    out.contact = { ok: c.ok, status: c.status, json: c.json };
+  }
+  send(res, 200, out);
 });
 route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req, res, m, body, user) => {
   const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
