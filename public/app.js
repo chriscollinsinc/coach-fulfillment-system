@@ -1178,6 +1178,14 @@ async function debugPendingClient(id){
     const r = await api('GET', `/api/admin/pending-clients/${id}/keap-raw`);
     openDlg(`<h3>Keap raw lookup</h3>
       <p class="small">This is exactly what Keap returns right now for this pending item's subscription and contact — useful for figuring out why a field (like company name) isn't showing up correctly.</p>
+      <h4 style="margin:10px 0 4px">Stored on this row</h4>
+      <pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px;max-height:160px;overflow:auto">${esc(JSON.stringify({
+        keap_subscription_id: r.pendingClient && r.pendingClient.keap_subscription_id,
+        keap_contact_id: r.pendingClient && r.pendingClient.keap_contact_id,
+        keap_company_id: r.pendingClient && r.pendingClient.keap_company_id,
+        company_name: r.pendingClient && r.pendingClient.company_name,
+        contact_name: r.pendingClient && r.pendingClient.contact_name,
+      }, null, 2))}</pre>
       <h4 style="margin:10px 0 4px">Subscription</h4>
       <pre class="small mono" style="white-space:pre-wrap;background:var(--bg2,#f6f6f6);padding:8px;border-radius:6px;max-height:200px;overflow:auto">${esc(JSON.stringify(r.subscription||'(no keap_subscription_id on this row)', null, 2))}</pre>
       <h4 style="margin:10px 0 4px">Contact</h4>
