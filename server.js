@@ -2013,22 +2013,32 @@ route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, bo
       }
     }
     const flags = [];
-    if(cl.status === 'active' && !matched) flags.push('No Keap match found (by Keap ID or name).');
-    if(matched && appCats.length && !appCats.some(a => keapCategories.has(a.category)))
+    let flagType = null;
+    if(cl.status === 'active' && !matched){ flags.push('No Keap match found (by Keap ID or name).'); flagType = 'no_match'; }
+    if(matched && appCats.length && !appCats.some(a => keapCategories.has(a.category))){
       flags.push(`App program (${appCats.map(a => a.category).join(', ') || '—'}) doesn't match Keap's product type (${[...keapCategories].join(', ') || '—'}).`);
-    if(cl.status !== 'active' && matched)
+      flagType = flagType || 'program_mismatch';
+    }
+    if(cl.status !== 'active' && matched){
       flags.push(`Client is "${cl.status}" in the app, but Keap still shows an active subscription — worth confirming it's really cancelled.`);
+      flagType = flagType || 'inactive_but_keap_active';
+    }
     if(!flags.length) continue; // clean match — counted above, not listed individually
     let suggestions = [];
     if(!matched && cl.status === 'active'){
-      // Restricted to companies that actually have a live coaching subscription
-      // (coachingCompanyIds) — never suggests linking to a company with nothing to link.
+      // Not restricted to companies with a live subscription anymore — a dealership can be
+      // in Keap (as a company record) with no subscription yet, or its subscription may use
+      // a product name cadenceCategory() doesn't recognize; either way it's still worth
+      // showing as a candidate. hasActiveSub flags whether linking will actually clear the
+      // "no match" flag on the next audit, so it's never a silent dead end.
       const candidates = await keapFindCompaniesByName(cl.name);
-      suggestions = candidates.filter(co => coachingCompanyIds.has(String(co.id))).slice(0, 3)
-        .map(co => ({ keapCompanyId: String(co.id), keapCompanyName: co.company_name, subs: byCompanyId.get(String(co.id)) }));
+      suggestions = candidates.slice(0, 3).map(co => {
+        const subs = byCompanyId.get(String(co.id)) || [];
+        return { keapCompanyId: String(co.id), keapCompanyName: co.company_name, subs, hasActiveSub: subs.length > 0 };
+      });
     }
     exceptions.push({
-      clientId: cl.id, clientName: cl.name, status: cl.status, keapId: cl.keap_id || '', matchType,
+      clientId: cl.id, clientName: cl.name, status: cl.status, keapId: cl.keap_id || '', matchType, flagType,
       keapSubs, appContracts: appCats.map(a => ({ id: a.contract.id, program: a.contract.program, category: a.category, price: a.contract.price, keap_subscription_id: a.contract.keap_subscription_id })),
       flags, suggestions,
     });
@@ -2051,6 +2061,33 @@ route('POST', /^\/api\/admin\/clients\/(\d+)\/link-keap$/, ['admin'], (req, res,
   db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(keapCompanyId, cl.id);
   log(user.email, 'client.link_keap', { clientId: cl.id, name: cl.name, keapCompanyId });
   send(res, 200, { ok: true });
+});
+/* Reconciliation for the "inactive here, but Keap still shows active" audit flag —
+ * a yes/no a human answers after actually looking at Keap. "No, still active" flips
+ * the client (and any of their contracts that Keap's billing_amount/cycle line up
+ * with an active sub for) back to active — same effect as a person editing the
+ * client by hand, just one click. "Yes, really cancelled" doesn't change any data —
+ * Keap itself is the thing that needs fixing (cancel the subscription there), so this
+ * just records that a human looked at it and confirmed the app's status is correct;
+ * the flag will keep resurfacing until Keap agrees, which is the intended nudge. */
+route('POST', /^\/api\/admin\/clients\/(\d+)\/confirm-keap-status$/, ['admin'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  const action = (body && body.action) || '';
+  if(action === 'reactivate'){
+    // Flips the client back to active only — contracts are left as-is, since which
+    // specific contract Keap's subscription corresponds to isn't something this
+    // endpoint can safely guess. Re-open/edit the actual contract from the client
+    // profile if it also needs reactivating.
+    if(cl.status !== 'active') db.prepare("UPDATE clients SET status='active' WHERE id=?").run(cl.id);
+    log(user.email, 'client.reactivate_from_keap_audit', { clientId: cl.id, name: cl.name });
+    send(res, 200, { ok: true });
+  } else if(action === 'confirm_cancelled'){
+    log(user.email, 'client.confirm_cancelled_from_keap_audit', { clientId: cl.id, name: cl.name, note: 'Human confirmed app status is correct — Keap subscription still needs to be cancelled there.' });
+    send(res, 200, { ok: true });
+  } else {
+    err(res, 400, 'action must be "reactivate" or "confirm_cancelled"');
+  }
 });
 
 async function onSubscriptionChange(subId, eventKey, opts = {}){
