@@ -2109,13 +2109,20 @@ async function runLidAudit(){
         const contractRows = x.appContracts.length ? `<table style="margin-top:6px"><tr><th>App contract</th><th>Program</th><th>Category</th><th class="num">Price</th></tr>` +
           x.appContracts.map(co=>`<tr><td>#${co.id}</td><td class="small">${esc(co.program||'—')}</td><td class="small">${esc(co.category)}</td><td class="num">${co.price!=null?fmtMoney(co.price):'—'}</td></tr>`).join('') + `</table>` : '';
         const suggestions = (x.suggestions||[]).length ? `<div style="margin-top:8px"><p class="small" style="margin-bottom:4px"><b>Possible Keap matches:</b></p>` +
-          x.suggestions.map(sg=>`<div class="small" style="margin-bottom:4px">${esc(sg.keapCompanyName)} <span class="mono">#${esc(sg.keapCompanyId)}</span>
-            <button class="btn" style="padding:2px 8px;font-size:12px" onclick="linkClientToKeap(${x.clientId},'${esc(sg.keapCompanyId)}',this)">Link</button></div>`).join('') + `</div>` : '';
+          x.suggestions.map(sg=>`<div class="small" style="margin-bottom:4px">${esc(sg.keapCompanyName)} <span class="mono">#${esc(sg.keapCompanyId)}</span>${sg.hasActiveSub?'':' <span class="pill">no active subscription in Keap</span>'}
+            <button class="btn" style="padding:2px 8px;font-size:12px" onclick="linkClientToKeap(${x.clientId},'${esc(sg.keapCompanyId)}',this)">Link</button></div>`).join('') + `</div>`
+          : (x.flagType==='no_match' ? '<p class="small" style="margin-top:8px;color:var(--muted)">No plausible Keap company found by name — this dealership may not exist in Keap at all yet, or is filed under a very different name. Worth checking Keap directly.</p>' : '');
+        const mismatchHint = x.flagType==='program_mismatch' ? `<p class="small" style="margin-top:8px;color:var(--muted)">Click the client name above to open their profile and correct the program in the app if the app is wrong — or confirm the correct product directly in Keap if Keap is wrong. Nothing here writes to Keap automatically.</p>` : '';
+        const reconcileButtons = x.flagType==='inactive_but_keap_active' ? `<div class="controls" style="margin-top:8px">
+            <span class="small" style="margin-right:4px">Is this really cancelled?</span>
+            <button class="btn" style="padding:2px 10px;font-size:12px" onclick="confirmKeapStatus(${x.clientId},'confirm_cancelled',this)">Yes, dismiss</button>
+            <button class="btn primary" style="padding:2px 10px;font-size:12px" onclick="confirmKeapStatus(${x.clientId},'reactivate',this)">No, reactivate in app</button>
+          </div>` : '';
         return `<div style="border:1px solid var(--border,#ddd);border-radius:8px;padding:12px;margin-top:10px">
           <h4 style="margin:0 0 6px"><a onclick="openClientProfile(${x.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(x.clientName)}</a>
           <span class="small">— status ${esc(x.status)}${x.keapId?` · Keap #${esc(x.keapId)}`:''}</span></h4>
           <ul style="margin:4px 0 0;padding-left:18px">${x.flags.map(f=>`<li class="small" style="color:var(--danger,#c0392b)">${esc(f)}</li>`).join('')}</ul>
-          ${subsRows}${contractRows}${suggestions}
+          ${subsRows}${contractRows}${suggestions}${mismatchHint}${reconcileButtons}
         </div>`;
       }).join('');
     }
@@ -2130,6 +2137,14 @@ async function linkClientToKeap(clientId, keapCompanyId, btn){
     toast('Linked to Keap company #'+keapCompanyId);
     await runLidAudit();
   }catch(e){ uiAlert(e.message||String(e)); if(btn){ btn.disabled = false; btn.textContent = 'Link'; } }
+}
+async function confirmKeapStatus(clientId, action, btn){
+  if(btn){ btn.disabled = true; btn.textContent = '…'; }
+  try{
+    await api('POST', '/api/admin/clients/'+clientId+'/confirm-keap-status', { action });
+    toast(action==='reactivate' ? 'Client reactivated in the app' : 'Confirmed — Keap still needs to be cancelled there');
+    await runLidAudit();
+  }catch(e){ uiAlert(e.message||String(e)); if(btn){ btn.disabled = false; } }
 }
 async function loadBackupStatus(){
   try{
