@@ -1844,6 +1844,13 @@ function adminDataView(){
   <div id="keapHooksOut" class="small"></div>
   <div id="keapBackfillOut" class="small"></div>
   <div id="keapEventsOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Audit full LID Inventory vs Keap</h2>
+  <p class="small" style="margin-bottom:12px">One button, sweeps every client in the LID Inventory against Keap: matches each one to its Keap
+  company by Keap ID (or name if not yet linked), confirms the program/product type lines up (Coaching, Monthly, Semi-Monthly, etc.), and
+  shows how many matched vs. didn't. Clients with a problem show up below with suggested fixes — read-only until you click "Link" on a
+  suggestion.</p>
+  <div class="controls"><button class="btn primary" id="lidAuditBtn" onclick="runLidAudit()">Audit full LID Inventory</button></div>
+  <div id="lidAuditOut" class="small"></div></div>
   <div class="panel"><h2>Audit a client vs Keap</h2>
   <p class="small" style="margin-bottom:12px">Type a dealership name (as it appears on the LID Inventory / Clients page) to find its
   real Keap company record and subscription, and check that against what this app already has for it — same idea as
@@ -2072,6 +2079,57 @@ async function auditClientVsKeap(){
     }).join('');
   }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
   finally{ if(btn){ btn.disabled = false; btn.textContent = 'Audit'; } }
+}
+async function runLidAudit(){
+  const out = $('#lidAuditOut'), btn = $('#lidAuditBtn'); if(!out) return;
+  if(btn){ btn.disabled = true; btn.textContent = 'Auditing…'; }
+  out.innerHTML = 'Pulling every client and checking each against Keap — this can take a little while on a full sweep…';
+  try{
+    const r = await api('GET', '/api/admin/keap-lid-audit');
+    const s = r.summary;
+    const cats = Object.keys(s.byCategory).sort();
+    let html = `<div class="controls" style="flex-wrap:wrap;gap:16px;margin:6px 0 14px">
+      <div><b style="font-size:20px">${s.totalClients}</b><br><span class="small">Total clients</span></div>
+      <div><b style="font-size:20px">${s.activeClients}</b><br><span class="small">Active clients</span></div>
+      <div><b style="font-size:20px;color:var(--good,#2a8f4d)">${s.matched}</b><br><span class="small">Matched in Keap</span></div>
+      <div><b style="font-size:20px;color:var(--danger,#c0392b)">${s.unmatched}</b><br><span class="small">No Keap match</span></div>
+    </div>`;
+    if(cats.length){
+      html += `<table><tr><th>Program category</th><th class="num">App count</th><th class="num">Keap-confirmed</th><th class="num">Mismatched</th></tr>` +
+        cats.map(c=>{ const b=s.byCategory[c]; return `<tr><td>${esc(c)}</td><td class="num">${b.appCount}</td><td class="num" style="color:var(--good,#2a8f4d)">${b.keapConfirmed}</td><td class="num" style="color:${b.keapMismatched?'var(--danger,#c0392b)':'inherit'}">${b.keapMismatched}</td></tr>`; }).join('') +
+        `</table>`;
+    }
+    if(!r.exceptions.length){
+      html += `<p class="small" style="color:var(--good,#2a8f4d);margin-top:12px">No drift found — every active client matches Keap by company and program.</p>`;
+    } else {
+      html += `<h4 style="margin:16px 0 6px">Needs attention (${r.exceptions.length})</h4>`;
+      html += r.exceptions.map(x => {
+        const subsRows = x.keapSubs.length ? `<table style="margin-top:6px"><tr><th>Keap sub</th><th>Product</th><th class="num">Amount</th><th>Billing</th></tr>` +
+          x.keapSubs.map(sub=>`<tr><td class="mono">#${esc(sub.subId)}</td><td class="small">${esc(sub.productName)}</td><td class="num">${sub.billingAmount!=null?fmtMoney(sub.billingAmount):'—'}</td><td class="small">${esc(sub.billingCycle)}×${sub.billingFrequency||1}</td></tr>`).join('') + `</table>` : '';
+        const contractRows = x.appContracts.length ? `<table style="margin-top:6px"><tr><th>App contract</th><th>Program</th><th>Category</th><th class="num">Price</th></tr>` +
+          x.appContracts.map(co=>`<tr><td>#${co.id}</td><td class="small">${esc(co.program||'—')}</td><td class="small">${esc(co.category)}</td><td class="num">${co.price!=null?fmtMoney(co.price):'—'}</td></tr>`).join('') + `</table>` : '';
+        const suggestions = (x.suggestions||[]).length ? `<div style="margin-top:8px"><p class="small" style="margin-bottom:4px"><b>Possible Keap matches:</b></p>` +
+          x.suggestions.map(sg=>`<div class="small" style="margin-bottom:4px">${esc(sg.keapCompanyName)} <span class="mono">#${esc(sg.keapCompanyId)}</span>
+            <button class="btn" style="padding:2px 8px;font-size:12px" onclick="linkClientToKeap(${x.clientId},'${esc(sg.keapCompanyId)}',this)">Link</button></div>`).join('') + `</div>` : '';
+        return `<div style="border:1px solid var(--border,#ddd);border-radius:8px;padding:12px;margin-top:10px">
+          <h4 style="margin:0 0 6px"><a onclick="openClientProfile(${x.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(x.clientName)}</a>
+          <span class="small">— status ${esc(x.status)}${x.keapId?` · Keap #${esc(x.keapId)}`:''}</span></h4>
+          <ul style="margin:4px 0 0;padding-left:18px">${x.flags.map(f=>`<li class="small" style="color:var(--danger,#c0392b)">${esc(f)}</li>`).join('')}</ul>
+          ${subsRows}${contractRows}${suggestions}
+        </div>`;
+      }).join('');
+    }
+    out.innerHTML = html;
+  }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = 'Audit full LID Inventory'; } }
+}
+async function linkClientToKeap(clientId, keapCompanyId, btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Linking…'; }
+  try{
+    await api('POST', '/api/admin/clients/'+clientId+'/link-keap', { keapCompanyId });
+    toast('Linked to Keap company #'+keapCompanyId);
+    await runLidAudit();
+  }catch(e){ uiAlert(e.message||String(e)); if(btn){ btn.disabled = false; btn.textContent = 'Link'; } }
 }
 async function loadBackupStatus(){
   try{
