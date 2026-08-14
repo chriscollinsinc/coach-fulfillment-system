@@ -865,6 +865,11 @@ route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], asyn
   if(pc.keap_contact_id){
     const c = await keapGet(`/v1/contacts/${pc.keap_contact_id}?optional_properties=company`);
     out.contact = { ok: c.ok, status: c.status, json: c.json };
+    // The same id tried as a COMPANY record — subscriptions here are usually created
+    // on the company itself, whose id the contacts endpoint refuses to serve.
+    const co = await keapGet(`/v1/companies/${pc.keap_contact_id}`);
+    out.companyById = { ok: co.ok, status: co.status, json: co.json };
+    out.resolved = await keapResolveSubscriptionParty(pc.keap_contact_id);
   }
   send(res, 200, out);
 });
@@ -1634,16 +1639,76 @@ async function keapGetProductName(s){
   const pj = r.json || {};
   return pj.product_name || pj.name || '';
 }
+/* ---- resolving WHO a subscription belongs to ----
+ * Root cause of the "(unknown company)" rows: in this Keap Classic account most
+ * coaching subscriptions are created on the COMPANY record itself, not on a person.
+ * A company shares its id with a row in the contact table (confirmed in the Aug-2026
+ * XML-RPC audit: every companyId appears in its own contactIds list), but REST
+ * /v1/contacts/{id} refuses to serve company-type records — it answers
+ * "Unable to find this Contact" — so the old person-only lookup silently got nothing.
+ * So: try the id as a person contact first (also yields their linked company), and
+ * when that fails or carries no company, try the SAME id as a company. Ids can't
+ * collide across the two — person and company are the same underlying id space —
+ * so whichever endpoint answers is the truth. A cached companies-list scan is the
+ * last resort, since single-item GETs have already proven flaky on this account
+ * (see keapFindSubscriptionById). */
+let _companiesCache = { at: 0, companies: null };
+async function keapFindCompanyById(companyId){
+  const now = Date.now();
+  if(!_companiesCache.companies || (now - _companiesCache.at) > 600000){ // 10 min — company names change rarely
+    const PAGE = 1000, MAX_PAGES = 15;
+    const all = [];
+    let offset = 0;
+    for(let page = 0; page < MAX_PAGES; page++){
+      const r = await keapGet(`/v1/companies?limit=${PAGE}&offset=${offset}`);
+      if(!r.ok) return null; // fall through quietly — this is already the last resort
+      const batch = (r.json && r.json.companies) || [];
+      all.push(...batch);
+      if(batch.length < PAGE) break;
+      offset += PAGE;
+    }
+    _companiesCache = { at: now, companies: all };
+  }
+  return _companiesCache.companies.find(c => String(c.id) === String(companyId)) || null;
+}
+async function keapResolveSubscriptionParty(contactId){
+  let companyName = '', contactName = '', companyId = '';
+  if(!contactId) return { companyName, contactName, companyId };
+  // 1) id as a PERSON contact (also carries their linked company, when set)
+  const c = await keapGet(`/v1/contacts/${contactId}?optional_properties=company`);
+  if(c.ok && c.json){
+    const cj = c.json;
+    contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
+    if(cj.company && cj.company.company_name){
+      return { companyName: cj.company.company_name, contactName, companyId: cj.company.id != null ? String(cj.company.id) : '' };
+    }
+  }
+  // 2) id as a COMPANY record (the common case for coaching subscriptions here)
+  const co = await keapGet(`/v1/companies/${contactId}`);
+  if(co.ok && co.json && co.json.company_name){
+    return { companyName: co.json.company_name, contactName, companyId: String(contactId) };
+  }
+  // 3) last resort: find the company in the (cached) full companies listing
+  const found = await keapFindCompanyById(contactId);
+  if(found && found.company_name){
+    return { companyName: found.company_name, contactName, companyId: String(contactId) };
+  }
+  return { companyName, contactName, companyId }; // genuinely unresolvable — stays visible as "(unknown company)"
+}
 async function queueSubscriptionAsPending(s, opts = {}){
   const subId = String(s.id);
   const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(subId);
   if(existingContract) return { subId, skipped: true, reason: 'already has a real contract' };
-  const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(subId);
-  // Normal webhook/backfill delivery: a pending item already queued (even a blank/
-  // placeholder one from a past failed lookup) is left alone — don't silently re-run
-  // enrichment on every retry. opts.force (used by the admin "Reprocess" button)
-  // overrides this on purpose: a human explicitly asked to re-fetch and refresh it.
-  if(already && !opts.force) return { subId, skipped: true, reason: 'already queued' };
+  const already = db.prepare('SELECT id, status, company_name FROM pending_clients WHERE keap_subscription_id=?').get(subId);
+  // Normal webhook/backfill delivery: a pending item already queued is left alone —
+  // don't silently re-run enrichment on every retry. Two exceptions re-run it:
+  //   - opts.force (the admin "Reprocess" button): a human explicitly asked.
+  //   - a still-pending row whose company_name is BLANK: that's a row captured while
+  //     the company lookup was broken, and re-running enrichment can only improve it
+  //     (the ON CONFLICT update below refreshes it in place). This is what lets one
+  //     Backfill click self-heal every "(unknown company)" row.
+  const isBlankPending = already && already.status === 'pending' && !(already.company_name || '').trim();
+  if(already && !opts.force && !isBlankPending) return { subId, skipped: true, reason: 'already queued' };
 
   // Only real, currently-active Signature Coaching subscriptions belong in Unassigned
   // Clients — anything cancelled, or any other Keap product entirely, is skipped here
@@ -1654,15 +1719,7 @@ async function queueSubscriptionAsPending(s, opts = {}){
     return { subId, skipped: true, reason: `product "${productName || '(unknown product)'}" is not Chris Collins' Signature Coaching` };
   }
 
-  let companyName = '', contactName = '';
-  if(s.contact_id){
-    const c = await keapGet(`/v1/contacts/${s.contact_id}?optional_properties=company`);
-    if(c.ok){
-      const cj = c.json || {};
-      companyName = cj.company?.company_name || '';
-      contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
-    }
-  }
+  const { companyName, contactName, companyId } = await keapResolveSubscriptionParty(s.contact_id);
   db.prepare(`INSERT INTO pending_clients
     (keap_subscription_id,keap_contact_id,keap_company_id,company_name,contact_name,product_desc,billing_amount,billing_cycle,billing_frequency,start_date,status,created)
     VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?)
@@ -1673,7 +1730,7 @@ async function queueSubscriptionAsPending(s, opts = {}){
       billing_cycle=excluded.billing_cycle, billing_frequency=excluded.billing_frequency,
       start_date=excluded.start_date, status='pending'
     WHERE pending_clients.status != 'assigned'`)
-    .run(subId, s.contact_id ? String(s.contact_id) : null, s.contact_id_company || '', companyName, contactName,
+    .run(subId, s.contact_id ? String(s.contact_id) : null, companyId || '', companyName, contactName,
       productName || (s.subscription_plan_id ? String(s.subscription_plan_id) : (s.product_id ? String(s.product_id) : '')),
       Number(s.billing_amount) || null, s.billing_cycle || '', s.billing_frequency || null, s.start_date || null,
       new Date().toISOString());
