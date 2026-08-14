@@ -1390,7 +1390,8 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
     }
   }
   if(body.name !== undefined && String(body.name).trim()){
-    renameClientEverywhere(cl.id, String(body.name).trim(), user.email);
+    try{ renameClientEverywhere(cl.id, String(body.name).trim(), user.email); }
+    catch(e){ if(e.isCollision) return err(res, 400, e.message); throw e; }
   }
   send(res, 200, result);
 });
@@ -1405,7 +1406,14 @@ function renameClientEverywhere(clientId, newName, actorEmail){
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(clientId);
   if(!cl || cl.name === newName) return { changed: false };
   const oldName = cl.name;
-  db.prepare('UPDATE clients SET name=? WHERE id=?').run(newName, clientId);
+  const newNorm = normName(newName);
+  const collision = db.prepare('SELECT id, name FROM clients WHERE norm=? AND id!=?').get(newNorm, clientId);
+  if(collision){
+    const e = new Error(`Renaming to "${newName}" would collide with existing client #${collision.id} ("${collision.name}") — this usually means these are actually the same client (merge them by hand) or the new name/link is wrong. Nothing was changed.`);
+    e.isCollision = true;
+    throw e;
+  }
+  db.prepare('UPDATE clients SET name=?, norm=? WHERE id=?').run(newName, newNorm, clientId);
   const visitsUpdated = db.prepare('UPDATE visits SET client=? WHERE client_id=?').run(newName, clientId).changes;
   log(actorEmail, 'client.rename', { clientId, oldName, newName, visitsUpdated });
   return { changed: true, oldName, visitsUpdated };
@@ -2010,6 +2018,10 @@ route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, bo
   }
   const coachingCompanyIds = new Set(byCompanyId.keys());
   const clients = db.prepare('SELECT * FROM clients WHERE deleted_at IS NULL ORDER BY name').all();
+  // Keap company IDs already claimed by an existing client's keap_id — a suggestion
+  // pointing a different, unmatched client at one of these is exactly the collision
+  // that corrupted the Bowman Chevrolet records, so these are never offered as candidates.
+  const claimedKeapIds = new Set(clients.filter(c => c.keap_id).map(c => c.keap_id));
   const summary = { totalClients: clients.length, activeClients: 0, matched: 0, unmatched: 0, byCategory: {} };
   const exceptions = [];
   for(const cl of clients){
@@ -2052,7 +2064,7 @@ route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, bo
       // showing as a candidate. hasActiveSub flags whether linking will actually clear the
       // "no match" flag on the next audit, so it's never a silent dead end.
       const candidates = await keapFindCompaniesByName(cl.name);
-      suggestions = candidates.slice(0, 3).map(co => {
+      suggestions = candidates.filter(co => !claimedKeapIds.has(String(co.id))).slice(0, 3).map(co => {
         const subs = byCompanyId.get(String(co.id)) || [];
         return { keapCompanyId: String(co.id), keapCompanyName: co.company_name, subs, hasActiveSub: subs.length > 0 };
       });
@@ -2097,6 +2109,12 @@ route('POST', /^\/api\/admin\/clients\/(\d+)\/link-keap$/, ['admin'], (req, res,
   if(cl.keap_id && cl.keap_id !== keapCompanyId){
     if(!force) return err(res, 400, `This client is already linked to Keap company ${cl.keap_id} — unlink first if that's wrong.`);
   }
+  // A different existing client already claiming this exact Keap company is the collision
+  // that bit us on Bowman Chevrolet — a stale link plus a rename can quietly point two
+  // distinct real clients at the same Keap subscription. Block it outright; whoever is
+  // fixing this needs to look at both records by hand, not have the app silently merge them.
+  const claimedBy = db.prepare('SELECT id, name FROM clients WHERE keap_id=? AND id!=?').get(keapCompanyId, cl.id);
+  if(claimedBy) return err(res, 400, `Keap company ${keapCompanyId} is already linked to a different client — #${claimedBy.id} ("${claimedBy.name}"). These may be duplicate client records; resolve that first rather than linking both to the same Keap company.`);
   const oldKeapId = cl.keap_id || null;
   const keapCompanyName = String((body && body.keapCompanyName) || '').trim();
   let renamed = false, visitsUpdated = 0;
@@ -2107,7 +2125,16 @@ route('POST', /^\/api\/admin\/clients\/(\d+)\/link-keap$/, ['admin'], (req, res,
   // renameClientEverywhere so every already-scheduled visit's displayed name (Schedule
   // Board, Today view, LID Inventory) updates too, not just the client record itself.
   if(force && keapCompanyName && normName(keapCompanyName) !== normName(cl.name)){
-    const r = renameClientEverywhere(cl.id, keapCompanyName, user.email);
+    let r;
+    try{ r = renameClientEverywhere(cl.id, keapCompanyName, user.email); }
+    catch(e){
+      if(e.isCollision){
+        // Roll back the keap_id write so we don't leave the client half-linked.
+        db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(oldKeapId, cl.id);
+        return err(res, 400, e.message);
+      }
+      throw e;
+    }
     renamed = r.changed; visitsUpdated = r.visitsUpdated || 0;
   }
   log(user.email, 'client.link_keap', { clientId: cl.id, name: renamed ? keapCompanyName : cl.name, keapCompanyId, oldKeapId, renamedFrom: renamed ? cl.name : undefined, visitsUpdated });
@@ -2138,6 +2165,24 @@ route('POST', /^\/api\/admin\/contracts\/(\d+)\/sync-from-keap$/, ['admin'], (re
   db.prepare('UPDATE contracts SET program=?, price=?, keap_subscription_id=? WHERE id=?')
     .run(category, Number.isFinite(billingAmount) && billingAmount > 0 ? billingAmount : contract.price, keapSubscriptionId, contract.id);
   log(user.email, 'contract.sync_from_keap', { contractId: contract.id, before, after: { program: category, price: Number.isFinite(billingAmount) && billingAmount > 0 ? billingAmount : contract.price, keap_subscription_id: keapSubscriptionId }, note: 'label + price only — visit schedule left untouched' });
+  send(res, 200, { ok: true });
+});
+/* Manual admin correction for a contract's program/price/Keap-subscription-link —
+ * used for hand-fixing bad data (e.g. reverting a wrong auto-sync), not part of any
+ * automated flow. Unlike sync-from-keap above, keapSubscriptionId may be explicitly
+ * cleared to null by passing an empty string, since a revert needs to be able to
+ * unlink, not just relink. */
+route('POST', /^\/api\/admin\/contracts\/(\d+)\/manual-edit$/, ['admin'], (req, res, m, body, user) => {
+  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
+  if(!contract) return err(res, 404, 'not found');
+  const before = { program: contract.program, price: contract.price, keap_subscription_id: contract.keap_subscription_id };
+  const program = body && body.program !== undefined ? String(body.program).trim() : contract.program;
+  const price = body && body.price !== undefined ? Number(body.price) : contract.price;
+  const keapSubscriptionId = body && body.keapSubscriptionId !== undefined ? (String(body.keapSubscriptionId).trim() || null) : contract.keap_subscription_id;
+  if(body && body.program !== undefined && !KNOWN_APP_PROGRAMS.has(program)) return err(res, 400, `"${program}" isn't a program this app recognizes — nothing was changed.`);
+  if(body && body.price !== undefined && !Number.isFinite(price)) return err(res, 400, 'price must be a number.');
+  db.prepare('UPDATE contracts SET program=?, price=?, keap_subscription_id=? WHERE id=?').run(program, price, keapSubscriptionId, contract.id);
+  log(user.email, 'contract.manual_edit', { contractId: contract.id, before, after: { program, price, keap_subscription_id: keapSubscriptionId } });
   send(res, 200, { ok: true });
 });
 /* Reconciliation for the "inactive here, but Keap still shows active" audit flag —
