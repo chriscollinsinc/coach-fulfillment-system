@@ -1631,13 +1631,19 @@ function isCoachingSubscriptionProduct(name){
   const n = String(name || '').toLowerCase();
   return n.includes('chris collins') && n.includes('signature coaching');
 }
+// Memoized by product_id — a handful of product ids cover thousands of subscriptions,
+// so this turns "one Keap call per subscription" into "one call per distinct product,"
+// which matters once something (the audit index, a full Backfill) scans every active
+// subscription in the account instead of just the one a webhook just told us about.
+const _productNameCache = new Map();
 async function keapGetProductName(s){
   const pid = s.product_id || s.subscription_plan_id;
   if(!pid) return '';
+  if(_productNameCache.has(pid)) return _productNameCache.get(pid);
   const r = await keapGet(`/v1/products/${pid}`);
-  if(!r.ok) return '';
-  const pj = r.json || {};
-  return pj.product_name || pj.name || '';
+  const name = r.ok ? ((r.json || {}).product_name || (r.json || {}).name || '') : '';
+  if(r.ok) _productNameCache.set(pid, name); // only cache successes — a transient failure should retry next time
+  return name;
 }
 /* ---- resolving WHO a subscription belongs to ----
  * Root cause of the "(unknown company)" rows: in this Keap Classic account most
@@ -1653,23 +1659,50 @@ async function keapGetProductName(s){
  * last resort, since single-item GETs have already proven flaky on this account
  * (see keapFindSubscriptionById). */
 let _companiesCache = { at: 0, companies: null };
-async function keapFindCompanyById(companyId){
+async function keapEnsureCompaniesCache(){
   const now = Date.now();
-  if(!_companiesCache.companies || (now - _companiesCache.at) > 600000){ // 10 min — company names change rarely
-    const PAGE = 1000, MAX_PAGES = 15;
-    const all = [];
-    let offset = 0;
-    for(let page = 0; page < MAX_PAGES; page++){
-      const r = await keapGet(`/v1/companies?limit=${PAGE}&offset=${offset}`);
-      if(!r.ok) return null; // fall through quietly — this is already the last resort
-      const batch = (r.json && r.json.companies) || [];
-      all.push(...batch);
-      if(batch.length < PAGE) break;
-      offset += PAGE;
-    }
-    _companiesCache = { at: now, companies: all };
+  if(_companiesCache.companies && (now - _companiesCache.at) <= 600000) return _companiesCache.companies; // 10 min — company names change rarely
+  const PAGE = 1000, MAX_PAGES = 15;
+  const all = [];
+  let offset = 0;
+  for(let page = 0; page < MAX_PAGES; page++){
+    const r = await keapGet(`/v1/companies?limit=${PAGE}&offset=${offset}`);
+    if(!r.ok) return _companiesCache.companies || null; // keep serving a stale cache over nothing, if we have one
+    const batch = (r.json && r.json.companies) || [];
+    all.push(...batch);
+    if(batch.length < PAGE) break;
+    offset += PAGE;
   }
-  return _companiesCache.companies.find(c => String(c.id) === String(companyId)) || null;
+  _companiesCache = { at: now, companies: all };
+  return all;
+}
+async function keapFindCompanyById(companyId){
+  const companies = await keapEnsureCompaniesCache();
+  if(!companies) return null;
+  return companies.find(c => String(c.id) === String(companyId)) || null;
+}
+/* Used by the "audit a client vs Keap" tool — an admin has a dealership name (from
+ * the LID Inventory / Clients page) and wants to find its Keap company record.
+ * Same tolerant, punctuation/case-insensitive matching as isCoachingSubscriptionProduct,
+ * via the normName() helper already shared with the app's own client-name matching
+ * (db.js) — so "Tom Hesser Nissan" matches "Tom Hesser Nissan" even if Keap has it
+ * with different punctuation or casing. Returns every match (there can be more than
+ * one store under a similar name — e.g. the M.A.G. group) rather than guessing.
+ */
+async function keapFindCompaniesByName(query){
+  const companies = await keapEnsureCompaniesCache();
+  if(!companies) return [];
+  const key = normName(query);
+  if(!key) return [];
+  const scored = [];
+  for(const c of companies){
+    const n = normName(c.company_name);
+    if(!n) continue;
+    if(n === key) scored.push({ c, rank: 0 });
+    else if(n.includes(key) || key.includes(n)) scored.push({ c, rank: 1 });
+  }
+  scored.sort((a, b) => a.rank - b.rank);
+  return scored.map(s => s.c);
 }
 async function keapResolveSubscriptionParty(contactId){
   let companyName = '', contactName = '', companyId = '';
@@ -1694,6 +1727,36 @@ async function keapResolveSubscriptionParty(contactId){
     return { companyName: found.company_name, contactName, companyId: String(contactId) };
   }
   return { companyName, contactName, companyId }; // genuinely unresolvable — stays visible as "(unknown company)"
+}
+/* ---- "audit a client vs Keap" support ----
+ * Live equivalent of the one-time Aug-5 keap_master_v2.json audit (company -> its
+ * coaching subscriptions), but computed on demand via REST only — no XML-RPC, no
+ * local script. Scans every subscription in the (cached) full list, keeps active +
+ * Signature-Coaching-product ones (product lookups are memoized, so this costs one
+ * Keap call per distinct product, not per subscription), and resolves each to its
+ * owning company via the same chain the webhook fix uses. Cached 10 min — an admin
+ * running a few audits back to back doesn't re-pay this scan every time. */
+let _coachingSubIndexCache = { at: 0, rows: null };
+async function keapBuildCoachingSubscriptionIndex(){
+  const now = Date.now();
+  if(_coachingSubIndexCache.rows && (now - _coachingSubIndexCache.at) <= 600000) return _coachingSubIndexCache.rows;
+  const listing = await keapListAllSubscriptions();
+  if(!listing.ok) return _coachingSubIndexCache.rows || []; // serve stale over nothing, if we have it
+  const rows = [];
+  for(const s of listing.subs){
+    if(!s.active) continue;
+    const productName = await keapGetProductName(s);
+    if(!isCoachingSubscriptionProduct(productName)) continue;
+    const { companyName, contactName, companyId } = await keapResolveSubscriptionParty(s.contact_id);
+    rows.push({
+      subId: String(s.id), companyId, companyName, contactName, productName,
+      billingAmount: Number(s.billing_amount) || null, billingCycle: s.billing_cycle || '',
+      billingFrequency: s.billing_frequency || null, startDate: s.start_date || null,
+      nextBillDate: s.next_bill_date || null,
+    });
+  }
+  _coachingSubIndexCache = { at: now, rows };
+  return rows;
 }
 async function queueSubscriptionAsPending(s, opts = {}){
   const subId = String(s.id);
@@ -1815,6 +1878,49 @@ route('POST', /^\/api\/admin\/keap-backfill-subscriptions$/, ['admin'], async (r
   log(user.email, 'keap.backfill_subscriptions', { checked: summary.checked, queuedCount: summary.queued.length, alreadyTracked: summary.alreadyTracked, notCoachingProduct: summary.notCoachingProduct, cancelled: summary.cancelled, errorCount: summary.errors.length });
   send(res, 200, summary);
 });
+/* "Audit a client vs Keap" — given a dealership name (typed off the LID Inventory /
+ * Clients page), find its real Keap company + coaching subscription(s), and compare
+ * that against whatever this app already has for the same client. Read-only: it
+ * only reports drift, it never writes anything — a person decides what to do with
+ * what it finds, same principle as the rest of the Keap integration (see
+ * Keap_App_Source_of_Truth_SOP.md). Returns one block per matched Keap company,
+ * since a name can match more than one store (e.g. a multi-brand group). */
+route('GET', /^\/api\/admin\/keap-client-audit$/, ['admin'], async (req, res, m, body, user) => {
+  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
+  const name = (new URL(req.url, 'http://x').searchParams.get('name') || '').trim();
+  if(!name) return err(res, 400, 'name is required, e.g. ?name=Tom Hesser Nissan');
+  const companies = await keapFindCompaniesByName(name);
+  if(!companies.length) return send(res, 200, { name, matches: [] });
+  const index = await keapBuildCoachingSubscriptionIndex();
+  const matches = companies.slice(0, 5).map(co => {
+    const companyId = String(co.id);
+    const subs = index.filter(r => r.companyId === companyId);
+    // App side: prefer the durable keap_id link; fall back to normalized-name match
+    // (the same fragile-but-only-option path documented as the norm until a client
+    // has a keap_id — see the SOP's "Identity rules" section).
+    let client = db.prepare('SELECT * FROM clients WHERE keap_id=?').get(companyId);
+    if(!client) client = db.prepare('SELECT * FROM clients WHERE norm=?').get(normName(co.company_name));
+    const contracts = client ? db.prepare('SELECT * FROM contracts WHERE client_id=? ORDER BY created DESC').all(client.id) : [];
+    const flags = [];
+    if(!client) flags.push('No matching client found in the app at all (by Keap ID or name) — this dealership may be missing from LID Inventory entirely.');
+    else if(!client.keap_id) flags.push(`Client "${client.name}" exists in the app but isn't linked to this Keap company id (${companyId}) yet.`);
+    for(const sub of subs){
+      const linked = contracts.find(c => c.keap_subscription_id === sub.subId);
+      if(!linked) flags.push(`Keap has an active subscription (#${sub.subId}, ${fmtCents(sub.billingAmount)}/${sub.billingCycle}) with no matching contract in the app.`);
+      else{
+        if(Number(linked.price) !== sub.billingAmount) flags.push(`Contract #${linked.id} price ($${linked.price ?? '—'}) doesn't match Keap's billing amount ($${sub.billingAmount}).`);
+        if(linked.status !== 'active') flags.push(`Contract #${linked.id} is marked "${linked.status}" in the app, but Keap shows subscription #${sub.subId} as active.`);
+      }
+    }
+    for(const c of contracts){
+      if(c.status === 'active' && c.keap_subscription_id && !subs.some(s => s.subId === c.keap_subscription_id))
+        flags.push(`App contract #${c.id} points at Keap subscription #${c.keap_subscription_id}, which is no longer active/found in Keap.`);
+    }
+    return { keapCompanyId: companyId, keapCompanyName: co.company_name, subscriptions: subs, client, contracts, flags };
+  });
+  send(res, 200, { name, matches });
+});
+function fmtCents(n){ return n == null ? '—' : `$${n}`; }
 
 async function onSubscriptionChange(subId, eventKey, opts = {}){
   const source = opts.source || 'keap.webhook';
