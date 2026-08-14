@@ -1925,6 +1925,105 @@ route('GET', /^\/api\/admin\/keap-client-audit$/, ['admin'], async (req, res, m,
   send(res, 200, { name, matches });
 });
 function fmtCents(n){ return n == null ? '—' : `$${n}`; }
+/* Buckets a free-text program/product name into a cadence category so an app
+ * contract's `program` (e.g. "6 Visits Monthly") can be compared against a Keap
+ * product name (e.g. "...Mastermind and Monthly Live-in-Drive") even though the two
+ * systems never share a controlled vocabulary. Order matters — check the more
+ * specific phrases (Semi-Monthly, Coaching Only) before the generic "month" catch-all. */
+function cadenceCategory(text){
+  const t = String(text || '').toLowerCase();
+  if(!t) return 'Unknown';
+  if(t.includes('coaching only')) return 'Coaching Only';
+  if(t.includes('semi') && t.includes('month')) return 'Semi-Monthly';
+  if(t.includes('quarter')) return 'Quarterly';
+  if(t.includes('bi-annual') || t.includes('biannual') || t.includes('bi annual')) return 'Bi-Annual';
+  if(t.includes('lid') && t.includes('purchase')) return 'LID (Purchase)';
+  // Keap's plain "...Signature Coaching Program" (no "and X Live-in-Drive" suffix)
+  // is the base coaching-only product — no scheduled LID visits attached.
+  if(t.includes('signature coaching program') && !t.includes('live-in-drive')) return 'Coaching Only';
+  if(t.includes('month')) return 'Monthly'; // catches "Monthly", "6 Visits Monthly", and Keap's "...Monthly Live-in-Drive"
+  return 'Other';
+}
+/* "Audit full LID Inventory" — the button version of the single-name lookup above.
+ * Sweeps every non-deleted app client against the (cached) coaching-subscription
+ * index in one pass — no per-client Keap calls, since the index already has every
+ * active coaching company's name/id. Returns summary counts (how many clients have
+ * a Keap match, broken down by program/product cadence) plus the list of clients
+ * that need a human look — a clean match isn't listed individually, just counted,
+ * so the exceptions list stays focused on what actually needs reconciling. */
+route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, body, user) => {
+  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
+  const index = await keapBuildCoachingSubscriptionIndex();
+  const byCompanyId = new Map(), byNormName = new Map();
+  for(const r of index){
+    if(r.companyId){ if(!byCompanyId.has(r.companyId)) byCompanyId.set(r.companyId, []); byCompanyId.get(r.companyId).push(r); }
+    const nn = normName(r.companyName);
+    if(nn){ if(!byNormName.has(nn)) byNormName.set(nn, []); byNormName.get(nn).push(r); }
+  }
+  const coachingCompanyIds = new Set(byCompanyId.keys());
+  const clients = db.prepare('SELECT * FROM clients WHERE deleted_at IS NULL ORDER BY name').all();
+  const summary = { totalClients: clients.length, activeClients: 0, matched: 0, unmatched: 0, byCategory: {} };
+  const exceptions = [];
+  for(const cl of clients){
+    const activeContracts = db.prepare("SELECT * FROM contracts WHERE client_id=? AND status='active'").all(cl.id);
+    let keapSubs = [], matchType = null;
+    if(cl.keap_id && byCompanyId.has(cl.keap_id)){ keapSubs = byCompanyId.get(cl.keap_id); matchType = 'id'; }
+    else{
+      const nn = normName(cl.name);
+      if(byNormName.has(nn)){ keapSubs = byNormName.get(nn); matchType = 'name'; }
+    }
+    const matched = keapSubs.length > 0;
+    const keapCategories = new Set(keapSubs.map(s => cadenceCategory(s.productName)));
+    const appCats = activeContracts.map(c => ({ contract: c, category: cadenceCategory(c.program) }));
+    if(cl.status === 'active'){
+      summary.activeClients++;
+      if(matched) summary.matched++; else summary.unmatched++;
+      for(const { category } of appCats){
+        const b = (summary.byCategory[category] ||= { appCount: 0, keapConfirmed: 0, keapMismatched: 0 });
+        b.appCount++;
+        if(matched){ if(keapCategories.has(category)) b.keapConfirmed++; else b.keapMismatched++; }
+      }
+    }
+    const flags = [];
+    if(cl.status === 'active' && !matched) flags.push('No Keap match found (by Keap ID or name).');
+    if(matched && appCats.length && !appCats.some(a => keapCategories.has(a.category)))
+      flags.push(`App program (${appCats.map(a => a.category).join(', ') || '—'}) doesn't match Keap's product type (${[...keapCategories].join(', ') || '—'}).`);
+    if(cl.status !== 'active' && matched)
+      flags.push(`Client is "${cl.status}" in the app, but Keap still shows an active coaching subscription — worth confirming it's really cancelled.`);
+    if(!flags.length) continue; // clean match — counted above, not listed individually
+    let suggestions = [];
+    if(!matched && cl.status === 'active'){
+      // Restricted to companies that actually have a live coaching subscription
+      // (coachingCompanyIds) — never suggests linking to a company with nothing to link.
+      const candidates = await keapFindCompaniesByName(cl.name);
+      suggestions = candidates.filter(co => coachingCompanyIds.has(String(co.id))).slice(0, 3)
+        .map(co => ({ keapCompanyId: String(co.id), keapCompanyName: co.company_name, subs: byCompanyId.get(String(co.id)) }));
+    }
+    exceptions.push({
+      clientId: cl.id, clientName: cl.name, status: cl.status, keapId: cl.keap_id || '', matchType,
+      keapSubs, appContracts: appCats.map(a => ({ id: a.contract.id, program: a.contract.program, category: a.category, price: a.contract.price, keap_subscription_id: a.contract.keap_subscription_id })),
+      flags, suggestions,
+    });
+  }
+  log(user.email, 'keap.lid_audit', { totalClients: summary.totalClients, activeClients: summary.activeClients, matched: summary.matched, unmatched: summary.unmatched, exceptions: exceptions.length });
+  send(res, 200, { summary, exceptions });
+});
+/* Reconcile step for an unmatched client found by the audit above — an admin has
+ * confirmed (by eye) that this app client really is this Keap company, and wants to
+ * link them the durable way (by keap_id), same as the one-time Aug-7 reconciliation
+ * pass described in Keap_App_Source_of_Truth_SOP.md. Never overwrites an existing
+ * link — that would be a silent identity change, which is exactly the kind of thing
+ * this whole integration is designed to never do without a person explicitly acting. */
+route('POST', /^\/api\/admin\/clients\/(\d+)\/link-keap$/, ['admin'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  if(cl.keap_id) return err(res, 400, `This client is already linked to Keap company ${cl.keap_id} — unlink first if that's wrong.`);
+  const keapCompanyId = String((body && body.keapCompanyId) || '').trim();
+  if(!keapCompanyId) return err(res, 400, 'keapCompanyId is required.');
+  db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(keapCompanyId, cl.id);
+  log(user.email, 'client.link_keap', { clientId: cl.id, name: cl.name, keapCompanyId });
+  send(res, 200, { ok: true });
+});
 
 async function onSubscriptionChange(subId, eventKey, opts = {}){
   const source = opts.source || 'keap.webhook';
