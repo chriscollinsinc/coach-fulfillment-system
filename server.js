@@ -1390,11 +1390,26 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
     }
   }
   if(body.name !== undefined && String(body.name).trim()){
-    db.prepare('UPDATE clients SET name=? WHERE id=?').run(String(body.name).trim(), cl.id);
-    log(user.email, 'client.rename', { clientId: cl.id, name: body.name });
+    renameClientEverywhere(cl.id, String(body.name).trim(), user.email);
   }
   send(res, 200, result);
 });
+/* Renaming a client only updates clients.name by itself — visits.client is a
+ * separate, denormalized copy of the name taken at visit-creation time (not a live
+ * join), and it's what actually shows on the Schedule Board, Today view, and LID
+ * Inventory rows for every visit already generated. Skipping this cascade leaves
+ * old/wrong names plastered across every existing visit for a renamed client, so
+ * every rename path (the manual "rename" field and the Keap relink-and-rename flow)
+ * must funnel through here rather than touching clients.name directly. */
+function renameClientEverywhere(clientId, newName, actorEmail){
+  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(clientId);
+  if(!cl || cl.name === newName) return { changed: false };
+  const oldName = cl.name;
+  db.prepare('UPDATE clients SET name=? WHERE id=?').run(newName, clientId);
+  const visitsUpdated = db.prepare('UPDATE visits SET client=? WHERE client_id=?').run(newName, clientId).changes;
+  log(actorEmail, 'client.rename', { clientId, oldName, newName, visitsUpdated });
+  return { changed: true, oldName, visitsUpdated };
+}
 /* ----- 30-day cancellation notice -----
    Purely a manual marker: someone read an email saying a dealership is quitting, with
    a 30-day notice — Keap itself keeps showing the subscription as active until the
@@ -1972,6 +1987,11 @@ function cadenceCategory(text){
   if(t.includes('month')) return 'Monthly'; // catches "Monthly", "6 Visits Monthly", and Keap's "...Monthly Live-in-Drive"
   return 'Other';
 }
+// The subset of cadenceCategory()'s possible outputs that are also real, selectable
+// program values in the app (public/app.js's PROGRAMS list) — 'Other' and 'Unknown'
+// are Keap product names cadenceCategory() couldn't confidently bucket, so there's
+// nothing safe to auto-apply for those; a person has to look at the raw product name.
+const KNOWN_APP_PROGRAMS = new Set(['Coaching Only', 'Semi-Monthly', 'Quarterly', 'Bi-Annual', 'LID (Purchase)', 'Monthly']);
 /* "Audit full LID Inventory" — the button version of the single-name lookup above.
  * Sweeps every non-deleted app client against the (cached) coaching-subscription
  * index in one pass — no per-client Keap calls, since the index already has every
@@ -2037,10 +2057,22 @@ route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, bo
         return { keapCompanyId: String(co.id), keapCompanyName: co.company_name, subs, hasActiveSub: subs.length > 0 };
       });
     }
+    // For the common, unambiguous shape of a program mismatch — exactly one active Keap
+    // sub, exactly one active app contract, and Keap's cadence maps to a program the app
+    // actually has — offer a one-click "make the app match Keap" fix instead of only a
+    // manual-edit hint. Anything more ambiguous (multiple subs/contracts, or a Keap
+    // product name cadenceCategory() can't confidently bucket) still requires a person.
+    let autoSync = null;
+    if(flagType === 'program_mismatch' && keapSubs.length === 1 && appCats.length === 1){
+      const keapCat = cadenceCategory(keapSubs[0].productName);
+      if(KNOWN_APP_PROGRAMS.has(keapCat)){
+        autoSync = { contractId: appCats[0].contract.id, keapSubscriptionId: keapSubs[0].subId, category: keapCat, billingAmount: keapSubs[0].billingAmount };
+      }
+    }
     exceptions.push({
       clientId: cl.id, clientName: cl.name, status: cl.status, keapId: cl.keap_id || '', matchType, flagType,
       keapSubs, appContracts: appCats.map(a => ({ id: a.contract.id, program: a.contract.program, category: a.category, price: a.contract.price, keap_subscription_id: a.contract.keap_subscription_id })),
-      flags, suggestions,
+      flags, suggestions, autoSync,
     });
   }
   log(user.email, 'keap.lid_audit', { totalClients: summary.totalClients, activeClients: summary.activeClients, matched: summary.matched, unmatched: summary.unmatched, exceptions: exceptions.length });
@@ -2067,17 +2099,46 @@ route('POST', /^\/api\/admin\/clients\/(\d+)\/link-keap$/, ['admin'], (req, res,
   }
   const oldKeapId = cl.keap_id || null;
   const keapCompanyName = String((body && body.keapCompanyName) || '').trim();
-  let renamed = false;
+  let renamed = false, visitsUpdated = 0;
   db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(keapCompanyId, cl.id);
   // Rewriting the app's name to match Keap only happens on an explicit relink (force),
   // and only if a name was actually supplied — never on a fresh first-time link, so a
-  // normal "no Keap match yet" Link doesn't silently rename anything.
+  // normal "no Keap match yet" Link doesn't silently rename anything. Goes through
+  // renameClientEverywhere so every already-scheduled visit's displayed name (Schedule
+  // Board, Today view, LID Inventory) updates too, not just the client record itself.
   if(force && keapCompanyName && normName(keapCompanyName) !== normName(cl.name)){
-    db.prepare('UPDATE clients SET name=? WHERE id=?').run(keapCompanyName, cl.id);
-    renamed = true;
+    const r = renameClientEverywhere(cl.id, keapCompanyName, user.email);
+    renamed = r.changed; visitsUpdated = r.visitsUpdated || 0;
   }
-  log(user.email, 'client.link_keap', { clientId: cl.id, name: renamed ? keapCompanyName : cl.name, keapCompanyId, oldKeapId, renamedFrom: renamed ? cl.name : undefined });
-  send(res, 200, { ok: true, renamed, newName: renamed ? keapCompanyName : cl.name });
+  log(user.email, 'client.link_keap', { clientId: cl.id, name: renamed ? keapCompanyName : cl.name, keapCompanyId, oldKeapId, renamedFrom: renamed ? cl.name : undefined, visitsUpdated });
+  send(res, 200, { ok: true, renamed, newName: renamed ? keapCompanyName : cl.name, visitsUpdated });
+});
+/* "Update app to match Keap" for the audit's program-mismatch flag — Keap is the
+ * source of truth for what a client is actually being billed for, so when there's
+ * exactly one active Keap subscription and exactly one active app contract (no
+ * ambiguity about which maps to which — see the `autoSync` gate in the audit route
+ * above), this rewrites the contract's program label and price to match Keap and
+ * links keap_subscription_id, all in one click instead of a manual edit.
+ * Deliberately does NOT touch the visits table — the existing due-date/visit-count
+ * cadence stays exactly as scheduled. Changing cadence (e.g. Bi-Annual -> Quarterly)
+ * only relabels going forward; it does not retroactively add/remove visits, since
+ * silently rewriting a client's visit history/schedule out from under a coach is a
+ * different, riskier kind of change than a label+price correction. If the actual
+ * visit cadence needs to change, that's still a manual call — this just stops the
+ * app's own program label from lying about what Keap is billing for. */
+route('POST', /^\/api\/admin\/contracts\/(\d+)\/sync-from-keap$/, ['admin'], (req, res, m, body, user) => {
+  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
+  if(!contract) return err(res, 404, 'not found');
+  const keapSubscriptionId = String((body && body.keapSubscriptionId) || '').trim();
+  const category = String((body && body.category) || '').trim();
+  const billingAmount = Number(body && body.billingAmount);
+  if(!keapSubscriptionId) return err(res, 400, 'keapSubscriptionId is required.');
+  if(!KNOWN_APP_PROGRAMS.has(category)) return err(res, 400, `"${category}" isn't a program this app recognizes — nothing was changed.`);
+  const before = { program: contract.program, price: contract.price, keap_subscription_id: contract.keap_subscription_id };
+  db.prepare('UPDATE contracts SET program=?, price=?, keap_subscription_id=? WHERE id=?')
+    .run(category, Number.isFinite(billingAmount) && billingAmount > 0 ? billingAmount : contract.price, keapSubscriptionId, contract.id);
+  log(user.email, 'contract.sync_from_keap', { contractId: contract.id, before, after: { program: category, price: Number.isFinite(billingAmount) && billingAmount > 0 ? billingAmount : contract.price, keap_subscription_id: keapSubscriptionId }, note: 'label + price only — visit schedule left untouched' });
+  send(res, 200, { ok: true });
 });
 /* Reconciliation for the "inactive here, but Keap still shows active" audit flag —
  * a yes/no a human answers after actually looking at Keap. "No, still active" flips
