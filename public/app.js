@@ -2110,7 +2110,7 @@ async function runLidAudit(){
           x.appContracts.map(co=>`<tr><td>#${co.id}</td><td class="small">${esc(co.program||'—')}</td><td class="small">${esc(co.category)}</td><td class="num">${co.price!=null?fmtMoney(co.price):'—'}</td></tr>`).join('') + `</table>` : '';
         const suggestions = (x.suggestions||[]).length ? `<div style="margin-top:8px"><p class="small" style="margin-bottom:4px"><b>Possible Keap matches:</b></p>` +
           x.suggestions.map(sg=>`<div class="small" style="margin-bottom:4px">${esc(sg.keapCompanyName)} <span class="mono">#${esc(sg.keapCompanyId)}</span>${sg.hasActiveSub?'':' <span class="pill">no active subscription in Keap</span>'}
-            <button class="btn" style="padding:2px 8px;font-size:12px" onclick="linkClientToKeap(${x.clientId},'${esc(sg.keapCompanyId)}',this)">Link</button></div>`).join('') + `</div>`
+            <button class="btn" style="padding:2px 8px;font-size:12px" onclick="linkClientToKeap(${x.clientId},'${esc(sg.keapCompanyId)}','${encodeURIComponent(sg.keapCompanyName||'')}',this)">Link</button></div>`).join('') + `</div>`
           : (x.flagType==='no_match' ? '<p class="small" style="margin-top:8px;color:var(--muted)">No plausible Keap company found by name — this dealership may not exist in Keap at all yet, or is filed under a very different name. Worth checking Keap directly.</p>' : '');
         const mismatchHint = x.flagType==='program_mismatch' ? `<p class="small" style="margin-top:8px;color:var(--muted)">Click the client name above to open their profile and correct the program in the app if the app is wrong — or confirm the correct product directly in Keap if Keap is wrong. Nothing here writes to Keap automatically.</p>` : '';
         const reconcileButtons = x.flagType==='inactive_but_keap_active' ? `<div class="controls" style="margin-top:8px">
@@ -2130,13 +2130,32 @@ async function runLidAudit(){
   }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
   finally{ if(btn){ btn.disabled = false; btn.textContent = 'Audit full LID Inventory'; } }
 }
-async function linkClientToKeap(clientId, keapCompanyId, btn){
+async function linkClientToKeap(clientId, keapCompanyId, keapCompanyNameEnc, btn){
+  const keapCompanyName = decodeURIComponent(keapCompanyNameEnc||'');
   if(btn){ btn.disabled = true; btn.textContent = 'Linking…'; }
   try{
-    await api('POST', '/api/admin/clients/'+clientId+'/link-keap', { keapCompanyId });
+    await api('POST', '/api/admin/clients/'+clientId+'/link-keap', { keapCompanyId, keapCompanyName });
     toast('Linked to Keap company #'+keapCompanyId);
     await runLidAudit();
-  }catch(e){ uiAlert(e.message||String(e)); if(btn){ btn.disabled = false; btn.textContent = 'Link'; } }
+  }catch(e){
+    const msg = e.message||String(e);
+    if(/already linked to Keap company/i.test(msg)){
+      if(btn) btn.disabled = false;
+      const ok = await uiConfirm(
+        `${msg}\n\nThis usually means the app is linked to the wrong (or a stale, subscription-less) Keap company. ` +
+        `Relink to ${keapCompanyName||'Keap company #'+keapCompanyId} and rename this client in the app to match?`,
+        'Relink & rename');
+      if(!ok){ if(btn) btn.textContent = 'Link'; return; }
+      if(btn){ btn.disabled = true; btn.textContent = 'Relinking…'; }
+      try{
+        const r = await api('POST', '/api/admin/clients/'+clientId+'/link-keap', { keapCompanyId, keapCompanyName, force: true });
+        toast(r.renamed ? `Relinked and renamed to "${r.newName}"` : 'Relinked to Keap company #'+keapCompanyId);
+        await runLidAudit();
+      }catch(e2){ uiAlert(e2.message||String(e2)); if(btn){ btn.disabled = false; btn.textContent = 'Link'; } }
+    } else {
+      uiAlert(msg); if(btn){ btn.disabled = false; btn.textContent = 'Link'; }
+    }
+  }
 }
 async function confirmKeapStatus(clientId, action, btn){
   if(btn){ btn.disabled = true; btn.textContent = '…'; }
