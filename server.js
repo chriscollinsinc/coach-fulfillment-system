@@ -1762,6 +1762,34 @@ async function keapBuildCoachingSubscriptionIndex(){
   _coachingSubIndexCache = { at: now, rows };
   return rows;
 }
+/* The "audit full LID Inventory" sweep needs EVERY active Keap subscription, not just
+ * "Signature Coaching" ones — the app's own contract categories (Quarterly, Bi-Annual,
+ * Monthly, Semi-Monthly, etc.) come from a variety of Keap products, and restricting to
+ * isCoachingSubscriptionProduct() (which was built for "what belongs in Unassigned
+ * Clients") would falsely report "no Keap match" for every client whose real Keap
+ * product isn't literally Signature Coaching. Same caching/resolution machinery as
+ * keapBuildCoachingSubscriptionIndex, just without the product-name filter. */
+let _allSubIndexCache = { at: 0, rows: null };
+async function keapBuildAllSubscriptionIndex(){
+  const now = Date.now();
+  if(_allSubIndexCache.rows && (now - _allSubIndexCache.at) <= 600000) return _allSubIndexCache.rows;
+  const listing = await keapListAllSubscriptions();
+  if(!listing.ok) return _allSubIndexCache.rows || [];
+  const rows = [];
+  for(const s of listing.subs){
+    if(!s.active) continue;
+    const productName = await keapGetProductName(s);
+    const { companyName, contactName, companyId } = await keapResolveSubscriptionParty(s.contact_id);
+    rows.push({
+      subId: String(s.id), companyId, companyName, contactName, productName,
+      billingAmount: Number(s.billing_amount) || null, billingCycle: s.billing_cycle || '',
+      billingFrequency: s.billing_frequency || null, startDate: s.start_date || null,
+      nextBillDate: s.next_bill_date || null,
+    });
+  }
+  _allSubIndexCache = { at: now, rows };
+  return rows;
+}
 async function queueSubscriptionAsPending(s, opts = {}){
   const subId = String(s.id);
   const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(subId);
@@ -1953,7 +1981,7 @@ function cadenceCategory(text){
  * so the exceptions list stays focused on what actually needs reconciling. */
 route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, body, user) => {
   if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
-  const index = await keapBuildCoachingSubscriptionIndex();
+  const index = await keapBuildAllSubscriptionIndex();
   const byCompanyId = new Map(), byNormName = new Map();
   for(const r of index){
     if(r.companyId){ if(!byCompanyId.has(r.companyId)) byCompanyId.set(r.companyId, []); byCompanyId.get(r.companyId).push(r); }
@@ -1989,7 +2017,7 @@ route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, bo
     if(matched && appCats.length && !appCats.some(a => keapCategories.has(a.category)))
       flags.push(`App program (${appCats.map(a => a.category).join(', ') || '—'}) doesn't match Keap's product type (${[...keapCategories].join(', ') || '—'}).`);
     if(cl.status !== 'active' && matched)
-      flags.push(`Client is "${cl.status}" in the app, but Keap still shows an active coaching subscription — worth confirming it's really cancelled.`);
+      flags.push(`Client is "${cl.status}" in the app, but Keap still shows an active subscription — worth confirming it's really cancelled.`);
     if(!flags.length) continue; // clean match — counted above, not listed individually
     let suggestions = [];
     if(!matched && cl.status === 'active'){
