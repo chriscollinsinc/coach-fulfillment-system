@@ -1843,7 +1843,14 @@ function adminDataView(){
   <button class="btn primary" id="keapBackfillBtn" onclick="backfillKeapSubscriptions()">Backfill missed subscriptions</button></div>
   <div id="keapHooksOut" class="small"></div>
   <div id="keapBackfillOut" class="small"></div>
-  <div id="keapEventsOut" class="small">Loading…</div></div>`;
+  <div id="keapEventsOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Audit a client vs Keap</h2>
+  <p class="small" style="margin-bottom:12px">Type a dealership name (as it appears on the LID Inventory / Clients page) to find its
+  real Keap company record and subscription, and check that against what this app already has for it — same idea as
+  "Sync with Keap," but for any client by name, not just ones already linked. Read-only: nothing here is written back.</p>
+  <div class="controls"><input id="auditClientName" placeholder="e.g. Tom Hesser Nissan" style="min-width:260px">
+  <button class="btn primary" id="auditClientBtn" onclick="auditClientVsKeap()">Audit</button></div>
+  <div id="auditClientOut" class="small"></div></div>`;
   return html;
 }
 function adminHistoryView(){
@@ -2039,6 +2046,32 @@ async function backfillKeapSubscriptions(){
     if(rows.length) toast(`${rows.length} subscription(s) queued to Unassigned Clients`);
   }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
   finally{ if(btn){ btn.disabled = false; btn.textContent = 'Backfill missed subscriptions'; } }
+}
+async function auditClientVsKeap(){
+  const nameEl = $('#auditClientName'), out = $('#auditClientOut'), btn = $('#auditClientBtn'); if(!out) return;
+  const name = (nameEl.value||'').trim();
+  if(!name){ out.innerHTML = '<p class="small">Type a name first.</p>'; return; }
+  if(btn){ btn.disabled = true; btn.textContent = 'Checking Keap…'; }
+  out.innerHTML = 'Looking up "'+esc(name)+'" in Keap…';
+  try{
+    const r = await api('GET', '/api/admin/keap-client-audit?name='+encodeURIComponent(name));
+    if(!r.matches.length){ out.innerHTML = `<p class="small">No Keap company matched "${esc(name)}". Check the spelling, or it may not exist in Keap under this name.</p>`; return; }
+    out.innerHTML = r.matches.map(mtch => {
+      const c = mtch.client;
+      return `<div style="border:1px solid var(--border,#ddd);border-radius:8px;padding:12px;margin-top:10px">
+        <h4 style="margin:0 0 6px">${esc(mtch.keapCompanyName)} <span class="small mono">Keap company #${esc(mtch.keapCompanyId)}</span></h4>
+        <p class="small"><b>App client:</b> ${c ? `<a onclick="openClientProfile(${c.id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a> — status ${esc(c.status)}${c.keap_id?'':' <span class="pill p-over">not linked to Keap</span>'}` : '<span class="pill p-over">no matching client in the app</span>'}</p>
+        ${mtch.subscriptions.length ? `<table><tr><th>Keap sub</th><th>Product</th><th class="num">Amount</th><th>Billing</th><th>Next bill</th></tr>` +
+          mtch.subscriptions.map(s=>`<tr><td class="mono">#${esc(s.subId)}</td><td class="small">${esc(s.productName)}</td><td class="num">${s.billingAmount!=null?fmtMoney(s.billingAmount):'—'}</td><td class="small">${esc(s.billingCycle)}×${s.billingFrequency||1}</td><td class="small">${esc(s.nextBillDate||'—')}</td></tr>`).join('') +
+          `</table>` : '<p class="small">No active Signature Coaching subscription found in Keap for this company.</p>'}
+        ${mtch.contracts.length ? `<table style="margin-top:8px"><tr><th>App contract</th><th>Program</th><th class="num">Price</th><th>Status</th><th>Keap sub</th></tr>` +
+          mtch.contracts.map(co=>`<tr><td>#${co.id}</td><td class="small">${esc(co.program||'—')}</td><td class="num">${co.price!=null?fmtMoney(co.price):'—'}</td><td>${esc(co.status)}</td><td class="mono small">${esc(co.keap_subscription_id||'—')}</td></tr>`).join('') +
+          `</table>` : ''}
+        ${mtch.flags.length ? `<ul style="margin:8px 0 0;padding-left:18px">` + mtch.flags.map(f=>`<li class="small" style="color:var(--danger,#c0392b)">${esc(f)}</li>`).join('') + `</ul>` : '<p class="small" style="color:var(--good,#2a8f4d);margin:8px 0 0">No drift found — Keap and the app agree.</p>'}
+      </div>`;
+    }).join('');
+  }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = 'Audit'; } }
 }
 async function loadBackupStatus(){
   try{
