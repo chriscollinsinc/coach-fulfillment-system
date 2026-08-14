@@ -2112,7 +2112,13 @@ async function runLidAudit(){
           x.suggestions.map(sg=>`<div class="small" style="margin-bottom:4px">${esc(sg.keapCompanyName)} <span class="mono">#${esc(sg.keapCompanyId)}</span>${sg.hasActiveSub?'':' <span class="pill">no active subscription in Keap</span>'}
             <button class="btn" style="padding:2px 8px;font-size:12px" onclick="linkClientToKeap(${x.clientId},'${esc(sg.keapCompanyId)}','${encodeURIComponent(sg.keapCompanyName||'')}',this)">Link</button></div>`).join('') + `</div>`
           : (x.flagType==='no_match' ? '<p class="small" style="margin-top:8px;color:var(--muted)">No plausible Keap company found by name — this dealership may not exist in Keap at all yet, or is filed under a very different name. Worth checking Keap directly.</p>' : '');
-        const mismatchHint = x.flagType==='program_mismatch' ? `<p class="small" style="margin-top:8px;color:var(--muted)">Click the client name above to open their profile and correct the program in the app if the app is wrong — or confirm the correct product directly in Keap if Keap is wrong. Nothing here writes to Keap automatically.</p>` : '';
+        const mismatchHint = x.flagType==='program_mismatch' ? (x.autoSync
+          ? `<div class="controls" style="margin-top:8px">
+              <button class="btn primary" style="padding:2px 10px;font-size:12px" onclick="syncContractFromKeap(${x.autoSync.contractId},'${esc(x.autoSync.keapSubscriptionId)}','${esc(x.autoSync.category)}',${x.autoSync.billingAmount!=null?x.autoSync.billingAmount:'null'},this)">Update app to match Keap (${esc(x.autoSync.category)})</button>
+              <span class="small" style="color:var(--muted)">Updates this contract's program label and price to match Keap, and links it so price/status keep syncing automatically. Does not add or remove any scheduled visits — review the schedule by hand if the actual cadence changed.</span>
+            </div>`
+          : `<p class="small" style="margin-top:8px;color:var(--muted)">Click the client name above to open their profile and correct the program in the app if the app is wrong — or confirm the correct product directly in Keap if Keap is wrong. Nothing here writes to Keap automatically.</p>`)
+          : '';
         const reconcileButtons = x.flagType==='inactive_but_keap_active' ? `<div class="controls" style="margin-top:8px">
             <span class="small" style="margin-right:4px">Is this really cancelled?</span>
             <button class="btn" style="padding:2px 10px;font-size:12px" onclick="confirmKeapStatus(${x.clientId},'confirm_cancelled',this)">Yes, dismiss</button>
@@ -2149,13 +2155,21 @@ async function linkClientToKeap(clientId, keapCompanyId, keapCompanyNameEnc, btn
       if(btn){ btn.disabled = true; btn.textContent = 'Relinking…'; }
       try{
         const r = await api('POST', '/api/admin/clients/'+clientId+'/link-keap', { keapCompanyId, keapCompanyName, force: true });
-        toast(r.renamed ? `Relinked and renamed to "${r.newName}"` : 'Relinked to Keap company #'+keapCompanyId);
+        toast(r.renamed ? `Relinked and renamed to "${r.newName}"${r.visitsUpdated?` (${r.visitsUpdated} scheduled visit${r.visitsUpdated===1?'':'s'} updated too)`:''}` : 'Relinked to Keap company #'+keapCompanyId);
         await runLidAudit();
       }catch(e2){ uiAlert(e2.message||String(e2)); if(btn){ btn.disabled = false; btn.textContent = 'Link'; } }
     } else {
       uiAlert(msg); if(btn){ btn.disabled = false; btn.textContent = 'Link'; }
     }
   }
+}
+async function syncContractFromKeap(contractId, keapSubscriptionId, category, billingAmount, btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Updating…'; }
+  try{
+    await api('POST', '/api/admin/contracts/'+contractId+'/sync-from-keap', { keapSubscriptionId, category, billingAmount });
+    toast(`Contract #${contractId} updated to match Keap (${category})`);
+    await runLidAudit();
+  }catch(e){ uiAlert(e.message||String(e)); if(btn){ btn.disabled = false; } }
 }
 async function confirmKeapStatus(clientId, action, btn){
   if(btn){ btn.disabled = true; btn.textContent = '…'; }
