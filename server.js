@@ -2055,12 +2055,29 @@ route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, bo
 route('POST', /^\/api\/admin\/clients\/(\d+)\/link-keap$/, ['admin'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
-  if(cl.keap_id) return err(res, 400, `This client is already linked to Keap company ${cl.keap_id} — unlink first if that's wrong.`);
   const keapCompanyId = String((body && body.keapCompanyId) || '').trim();
   if(!keapCompanyId) return err(res, 400, 'keapCompanyId is required.');
+  const force = !!(body && body.force);
+  // Already linked to a DIFFERENT Keap company — this is the "the app's link is wrong,
+  // point it at the real one instead" case (e.g. a stale/duplicate Keap company id that
+  // has no subscription on it). Requires force:true so the frontend gets a chance to
+  // show a confirmation first; a same-id "relink" is always a no-op either way.
+  if(cl.keap_id && cl.keap_id !== keapCompanyId){
+    if(!force) return err(res, 400, `This client is already linked to Keap company ${cl.keap_id} — unlink first if that's wrong.`);
+  }
+  const oldKeapId = cl.keap_id || null;
+  const keapCompanyName = String((body && body.keapCompanyName) || '').trim();
+  let renamed = false;
   db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(keapCompanyId, cl.id);
-  log(user.email, 'client.link_keap', { clientId: cl.id, name: cl.name, keapCompanyId });
-  send(res, 200, { ok: true });
+  // Rewriting the app's name to match Keap only happens on an explicit relink (force),
+  // and only if a name was actually supplied — never on a fresh first-time link, so a
+  // normal "no Keap match yet" Link doesn't silently rename anything.
+  if(force && keapCompanyName && normName(keapCompanyName) !== normName(cl.name)){
+    db.prepare('UPDATE clients SET name=? WHERE id=?').run(keapCompanyName, cl.id);
+    renamed = true;
+  }
+  log(user.email, 'client.link_keap', { clientId: cl.id, name: renamed ? keapCompanyName : cl.name, keapCompanyId, oldKeapId, renamedFrom: renamed ? cl.name : undefined });
+  send(res, 200, { ok: true, renamed, newName: renamed ? keapCompanyName : cl.name });
 });
 /* Reconciliation for the "inactive here, but Keap still shows active" audit flag —
  * a yes/no a human answers after actually looking at Keap. "No, still active" flips
