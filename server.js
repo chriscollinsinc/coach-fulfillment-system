@@ -1698,8 +1698,12 @@ async function keapFindCompaniesByName(query){
   for(const c of companies){
     const n = normName(c.company_name);
     if(!n) continue;
+    // Only match when the COMPANY's name contains the full search phrase (or is an
+    // exact match) — not the reverse. The reverse direction (query includes company
+    // name) false-positives badly: a short/generic Keap company name like "Nissan "
+    // or "M." is trivially a substring of almost any longer dealership name typed in.
     if(n === key) scored.push({ c, rank: 0 });
-    else if(n.includes(key) || key.includes(n)) scored.push({ c, rank: 1 });
+    else if(n.includes(key)) scored.push({ c, rank: 1 });
   }
   scored.sort((a, b) => a.rank - b.rank);
   return scored.map(s => s.c);
