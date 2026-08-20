@@ -156,7 +156,12 @@ const err = (res, code, msg) => send(res, code, { error: msg });
 /* ---------- shared checks ---------- */
 function canEditTeam(user, team){
   if(user.role === 'admin') return true;
-  if(user.role === 'lead') return !team || user.team === team;
+  // lead/sales/coach are all scoped to their own single team the same way — this
+  // only matters on routes whose own role allowlist admits sales/coach in the first
+  // place (currently just the week-block route below), so broadening it here can't
+  // widen access to contracts, visit placement, etc. which stay admin/lead-only via
+  // their route-level allowlists regardless of what this function returns.
+  if(user.role === 'lead' || user.role === 'sales' || user.role === 'coach') return !team || user.team === team;
   return false;
 }
 function snapMonday(iso){
@@ -391,8 +396,14 @@ route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin','lead'], (req, res, m, 
   send(res, 200, { ok: true });
 });
 
-/* ----- week blocks ----- */
-route('PUT', /^\/api\/blocks$/, ['admin','lead'], (req, res, m, body, user) => {
+/* ----- week blocks -----
+ * sales/coach can set/clear open-week labels (Home/Off/Training/etc.) for coaches
+ * on their own team — the same team scope lead already had — but this route never
+ * touches the visits table, so it can't be used to place or remove a scheduled
+ * visit: an occupied week only accepts kind='open', which just clears any stale
+ * blocks row underneath it (a no-op when the cell is occupied by a real visit,
+ * since occupied cells don't carry a blocks row in the first place). */
+route('PUT', /^\/api\/blocks$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const c = getCoach(body.coach); if(!c) return err(res, 400, 'unknown coach');
   if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
   if(!/^\d{4}-\d{2}-\d{2}$/.test(body.week || '')) return err(res, 400, 'bad week');
@@ -865,11 +876,6 @@ route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], asyn
   if(pc.keap_contact_id){
     const c = await keapGet(`/v1/contacts/${pc.keap_contact_id}?optional_properties=company`);
     out.contact = { ok: c.ok, status: c.status, json: c.json };
-    // The same id tried as a COMPANY record — subscriptions here are usually created
-    // on the company itself, whose id the contacts endpoint refuses to serve.
-    const co = await keapGet(`/v1/companies/${pc.keap_contact_id}`);
-    out.companyById = { ok: co.ok, status: co.status, json: co.json };
-    out.resolved = await keapResolveSubscriptionParty(pc.keap_contact_id);
   }
   send(res, 200, out);
 });
@@ -1390,34 +1396,11 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
     }
   }
   if(body.name !== undefined && String(body.name).trim()){
-    try{ renameClientEverywhere(cl.id, String(body.name).trim(), user.email); }
-    catch(e){ if(e.isCollision) return err(res, 400, e.message); throw e; }
+    db.prepare('UPDATE clients SET name=? WHERE id=?').run(String(body.name).trim(), cl.id);
+    log(user.email, 'client.rename', { clientId: cl.id, name: body.name });
   }
   send(res, 200, result);
 });
-/* Renaming a client only updates clients.name by itself — visits.client is a
- * separate, denormalized copy of the name taken at visit-creation time (not a live
- * join), and it's what actually shows on the Schedule Board, Today view, and LID
- * Inventory rows for every visit already generated. Skipping this cascade leaves
- * old/wrong names plastered across every existing visit for a renamed client, so
- * every rename path (the manual "rename" field and the Keap relink-and-rename flow)
- * must funnel through here rather than touching clients.name directly. */
-function renameClientEverywhere(clientId, newName, actorEmail){
-  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(clientId);
-  if(!cl || cl.name === newName) return { changed: false };
-  const oldName = cl.name;
-  const newNorm = normName(newName);
-  const collision = db.prepare('SELECT id, name FROM clients WHERE norm=? AND id!=?').get(newNorm, clientId);
-  if(collision){
-    const e = new Error(`Renaming to "${newName}" would collide with existing client #${collision.id} ("${collision.name}") — this usually means these are actually the same client (merge them by hand) or the new name/link is wrong. Nothing was changed.`);
-    e.isCollision = true;
-    throw e;
-  }
-  db.prepare('UPDATE clients SET name=?, norm=? WHERE id=?').run(newName, newNorm, clientId);
-  const visitsUpdated = db.prepare('UPDATE visits SET client=? WHERE client_id=?').run(newName, clientId).changes;
-  log(actorEmail, 'client.rename', { clientId, oldName, newName, visitsUpdated });
-  return { changed: true, oldName, visitsUpdated };
-}
 /* ----- 30-day cancellation notice -----
    Purely a manual marker: someone read an email saying a dealership is quitting, with
    a 30-day notice — Keap itself keeps showing the subscription as active until the
@@ -1654,179 +1637,24 @@ function isCoachingSubscriptionProduct(name){
   const n = String(name || '').toLowerCase();
   return n.includes('chris collins') && n.includes('signature coaching');
 }
-// Memoized by product_id — a handful of product ids cover thousands of subscriptions,
-// so this turns "one Keap call per subscription" into "one call per distinct product,"
-// which matters once something (the audit index, a full Backfill) scans every active
-// subscription in the account instead of just the one a webhook just told us about.
-const _productNameCache = new Map();
 async function keapGetProductName(s){
   const pid = s.product_id || s.subscription_plan_id;
   if(!pid) return '';
-  if(_productNameCache.has(pid)) return _productNameCache.get(pid);
   const r = await keapGet(`/v1/products/${pid}`);
-  const name = r.ok ? ((r.json || {}).product_name || (r.json || {}).name || '') : '';
-  if(r.ok) _productNameCache.set(pid, name); // only cache successes — a transient failure should retry next time
-  return name;
-}
-/* ---- resolving WHO a subscription belongs to ----
- * Root cause of the "(unknown company)" rows: in this Keap Classic account most
- * coaching subscriptions are created on the COMPANY record itself, not on a person.
- * A company shares its id with a row in the contact table (confirmed in the Aug-2026
- * XML-RPC audit: every companyId appears in its own contactIds list), but REST
- * /v1/contacts/{id} refuses to serve company-type records — it answers
- * "Unable to find this Contact" — so the old person-only lookup silently got nothing.
- * So: try the id as a person contact first (also yields their linked company), and
- * when that fails or carries no company, try the SAME id as a company. Ids can't
- * collide across the two — person and company are the same underlying id space —
- * so whichever endpoint answers is the truth. A cached companies-list scan is the
- * last resort, since single-item GETs have already proven flaky on this account
- * (see keapFindSubscriptionById). */
-let _companiesCache = { at: 0, companies: null };
-async function keapEnsureCompaniesCache(){
-  const now = Date.now();
-  if(_companiesCache.companies && (now - _companiesCache.at) <= 600000) return _companiesCache.companies; // 10 min — company names change rarely
-  const PAGE = 1000, MAX_PAGES = 15;
-  const all = [];
-  let offset = 0;
-  for(let page = 0; page < MAX_PAGES; page++){
-    const r = await keapGet(`/v1/companies?limit=${PAGE}&offset=${offset}`);
-    if(!r.ok) return _companiesCache.companies || null; // keep serving a stale cache over nothing, if we have one
-    const batch = (r.json && r.json.companies) || [];
-    all.push(...batch);
-    if(batch.length < PAGE) break;
-    offset += PAGE;
-  }
-  _companiesCache = { at: now, companies: all };
-  return all;
-}
-async function keapFindCompanyById(companyId){
-  const companies = await keapEnsureCompaniesCache();
-  if(!companies) return null;
-  return companies.find(c => String(c.id) === String(companyId)) || null;
-}
-/* Used by the "audit a client vs Keap" tool — an admin has a dealership name (from
- * the LID Inventory / Clients page) and wants to find its Keap company record.
- * Same tolerant, punctuation/case-insensitive matching as isCoachingSubscriptionProduct,
- * via the normName() helper already shared with the app's own client-name matching
- * (db.js) — so "Tom Hesser Nissan" matches "Tom Hesser Nissan" even if Keap has it
- * with different punctuation or casing. Returns every match (there can be more than
- * one store under a similar name — e.g. the M.A.G. group) rather than guessing.
- */
-async function keapFindCompaniesByName(query){
-  const companies = await keapEnsureCompaniesCache();
-  if(!companies) return [];
-  const key = normName(query);
-  if(!key) return [];
-  const scored = [];
-  for(const c of companies){
-    const n = normName(c.company_name);
-    if(!n) continue;
-    // Only match when the COMPANY's name contains the full search phrase (or is an
-    // exact match) — not the reverse. The reverse direction (query includes company
-    // name) false-positives badly: a short/generic Keap company name like "Nissan "
-    // or "M." is trivially a substring of almost any longer dealership name typed in.
-    if(n === key) scored.push({ c, rank: 0 });
-    else if(n.includes(key)) scored.push({ c, rank: 1 });
-  }
-  scored.sort((a, b) => a.rank - b.rank);
-  return scored.map(s => s.c);
-}
-async function keapResolveSubscriptionParty(contactId){
-  let companyName = '', contactName = '', companyId = '';
-  if(!contactId) return { companyName, contactName, companyId };
-  // 1) id as a PERSON contact (also carries their linked company, when set)
-  const c = await keapGet(`/v1/contacts/${contactId}?optional_properties=company`);
-  if(c.ok && c.json){
-    const cj = c.json;
-    contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
-    if(cj.company && cj.company.company_name){
-      return { companyName: cj.company.company_name, contactName, companyId: cj.company.id != null ? String(cj.company.id) : '' };
-    }
-  }
-  // 2) id as a COMPANY record (the common case for coaching subscriptions here)
-  const co = await keapGet(`/v1/companies/${contactId}`);
-  if(co.ok && co.json && co.json.company_name){
-    return { companyName: co.json.company_name, contactName, companyId: String(contactId) };
-  }
-  // 3) last resort: find the company in the (cached) full companies listing
-  const found = await keapFindCompanyById(contactId);
-  if(found && found.company_name){
-    return { companyName: found.company_name, contactName, companyId: String(contactId) };
-  }
-  return { companyName, contactName, companyId }; // genuinely unresolvable — stays visible as "(unknown company)"
-}
-/* ---- "audit a client vs Keap" support ----
- * Live equivalent of the one-time Aug-5 keap_master_v2.json audit (company -> its
- * coaching subscriptions), but computed on demand via REST only — no XML-RPC, no
- * local script. Scans every subscription in the (cached) full list, keeps active +
- * Signature-Coaching-product ones (product lookups are memoized, so this costs one
- * Keap call per distinct product, not per subscription), and resolves each to its
- * owning company via the same chain the webhook fix uses. Cached 10 min — an admin
- * running a few audits back to back doesn't re-pay this scan every time. */
-let _coachingSubIndexCache = { at: 0, rows: null };
-async function keapBuildCoachingSubscriptionIndex(){
-  const now = Date.now();
-  if(_coachingSubIndexCache.rows && (now - _coachingSubIndexCache.at) <= 600000) return _coachingSubIndexCache.rows;
-  const listing = await keapListAllSubscriptions();
-  if(!listing.ok) return _coachingSubIndexCache.rows || []; // serve stale over nothing, if we have it
-  const rows = [];
-  for(const s of listing.subs){
-    if(!s.active) continue;
-    const productName = await keapGetProductName(s);
-    if(!isCoachingSubscriptionProduct(productName)) continue;
-    const { companyName, contactName, companyId } = await keapResolveSubscriptionParty(s.contact_id);
-    rows.push({
-      subId: String(s.id), companyId, companyName, contactName, productName,
-      billingAmount: Number(s.billing_amount) || null, billingCycle: s.billing_cycle || '',
-      billingFrequency: s.billing_frequency || null, startDate: s.start_date || null,
-      nextBillDate: s.next_bill_date || null,
-    });
-  }
-  _coachingSubIndexCache = { at: now, rows };
-  return rows;
-}
-/* The "audit full LID Inventory" sweep needs EVERY active Keap subscription, not just
- * "Signature Coaching" ones — the app's own contract categories (Quarterly, Bi-Annual,
- * Monthly, Semi-Monthly, etc.) come from a variety of Keap products, and restricting to
- * isCoachingSubscriptionProduct() (which was built for "what belongs in Unassigned
- * Clients") would falsely report "no Keap match" for every client whose real Keap
- * product isn't literally Signature Coaching. Same caching/resolution machinery as
- * keapBuildCoachingSubscriptionIndex, just without the product-name filter. */
-let _allSubIndexCache = { at: 0, rows: null };
-async function keapBuildAllSubscriptionIndex(){
-  const now = Date.now();
-  if(_allSubIndexCache.rows && (now - _allSubIndexCache.at) <= 600000) return _allSubIndexCache.rows;
-  const listing = await keapListAllSubscriptions();
-  if(!listing.ok) return _allSubIndexCache.rows || [];
-  const rows = [];
-  for(const s of listing.subs){
-    if(!s.active) continue;
-    const productName = await keapGetProductName(s);
-    const { companyName, contactName, companyId } = await keapResolveSubscriptionParty(s.contact_id);
-    rows.push({
-      subId: String(s.id), companyId, companyName, contactName, productName,
-      billingAmount: Number(s.billing_amount) || null, billingCycle: s.billing_cycle || '',
-      billingFrequency: s.billing_frequency || null, startDate: s.start_date || null,
-      nextBillDate: s.next_bill_date || null,
-    });
-  }
-  _allSubIndexCache = { at: now, rows };
-  return rows;
+  if(!r.ok) return '';
+  const pj = r.json || {};
+  return pj.product_name || pj.name || '';
 }
 async function queueSubscriptionAsPending(s, opts = {}){
   const subId = String(s.id);
   const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(subId);
   if(existingContract) return { subId, skipped: true, reason: 'already has a real contract' };
-  const already = db.prepare('SELECT id, status, company_name FROM pending_clients WHERE keap_subscription_id=?').get(subId);
-  // Normal webhook/backfill delivery: a pending item already queued is left alone —
-  // don't silently re-run enrichment on every retry. Two exceptions re-run it:
-  //   - opts.force (the admin "Reprocess" button): a human explicitly asked.
-  //   - a still-pending row whose company_name is BLANK: that's a row captured while
-  //     the company lookup was broken, and re-running enrichment can only improve it
-  //     (the ON CONFLICT update below refreshes it in place). This is what lets one
-  //     Backfill click self-heal every "(unknown company)" row.
-  const isBlankPending = already && already.status === 'pending' && !(already.company_name || '').trim();
-  if(already && !opts.force && !isBlankPending) return { subId, skipped: true, reason: 'already queued' };
+  const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(subId);
+  // Normal webhook/backfill delivery: a pending item already queued (even a blank/
+  // placeholder one from a past failed lookup) is left alone — don't silently re-run
+  // enrichment on every retry. opts.force (used by the admin "Reprocess" button)
+  // overrides this on purpose: a human explicitly asked to re-fetch and refresh it.
+  if(already && !opts.force) return { subId, skipped: true, reason: 'already queued' };
 
   // Only real, currently-active Signature Coaching subscriptions belong in Unassigned
   // Clients — anything cancelled, or any other Keap product entirely, is skipped here
@@ -1837,7 +1665,15 @@ async function queueSubscriptionAsPending(s, opts = {}){
     return { subId, skipped: true, reason: `product "${productName || '(unknown product)'}" is not Chris Collins' Signature Coaching` };
   }
 
-  const { companyName, contactName, companyId } = await keapResolveSubscriptionParty(s.contact_id);
+  let companyName = '', contactName = '';
+  if(s.contact_id){
+    const c = await keapGet(`/v1/contacts/${s.contact_id}?optional_properties=company`);
+    if(c.ok){
+      const cj = c.json || {};
+      companyName = cj.company?.company_name || '';
+      contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
+    }
+  }
   db.prepare(`INSERT INTO pending_clients
     (keap_subscription_id,keap_contact_id,keap_company_id,company_name,contact_name,product_desc,billing_amount,billing_cycle,billing_frequency,start_date,status,created)
     VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?)
@@ -1848,7 +1684,7 @@ async function queueSubscriptionAsPending(s, opts = {}){
       billing_cycle=excluded.billing_cycle, billing_frequency=excluded.billing_frequency,
       start_date=excluded.start_date, status='pending'
     WHERE pending_clients.status != 'assigned'`)
-    .run(subId, s.contact_id ? String(s.contact_id) : null, companyId || '', companyName, contactName,
+    .run(subId, s.contact_id ? String(s.contact_id) : null, s.contact_id_company || '', companyName, contactName,
       productName || (s.subscription_plan_id ? String(s.subscription_plan_id) : (s.product_id ? String(s.product_id) : '')),
       Number(s.billing_amount) || null, s.billing_cycle || '', s.billing_frequency || null, s.start_date || null,
       new Date().toISOString());
@@ -1932,285 +1768,6 @@ route('POST', /^\/api\/admin\/keap-backfill-subscriptions$/, ['admin'], async (r
   }
   log(user.email, 'keap.backfill_subscriptions', { checked: summary.checked, queuedCount: summary.queued.length, alreadyTracked: summary.alreadyTracked, notCoachingProduct: summary.notCoachingProduct, cancelled: summary.cancelled, errorCount: summary.errors.length });
   send(res, 200, summary);
-});
-/* "Audit a client vs Keap" — given a dealership name (typed off the LID Inventory /
- * Clients page), find its real Keap company + coaching subscription(s), and compare
- * that against whatever this app already has for the same client. Read-only: it
- * only reports drift, it never writes anything — a person decides what to do with
- * what it finds, same principle as the rest of the Keap integration (see
- * Keap_App_Source_of_Truth_SOP.md). Returns one block per matched Keap company,
- * since a name can match more than one store (e.g. a multi-brand group). */
-route('GET', /^\/api\/admin\/keap-client-audit$/, ['admin'], async (req, res, m, body, user) => {
-  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
-  const name = (new URL(req.url, 'http://x').searchParams.get('name') || '').trim();
-  if(!name) return err(res, 400, 'name is required, e.g. ?name=Tom Hesser Nissan');
-  const companies = await keapFindCompaniesByName(name);
-  if(!companies.length) return send(res, 200, { name, matches: [] });
-  const index = await keapBuildCoachingSubscriptionIndex();
-  const matches = companies.slice(0, 5).map(co => {
-    const companyId = String(co.id);
-    const subs = index.filter(r => r.companyId === companyId);
-    // App side: prefer the durable keap_id link; fall back to normalized-name match
-    // (the same fragile-but-only-option path documented as the norm until a client
-    // has a keap_id — see the SOP's "Identity rules" section).
-    let client = db.prepare('SELECT * FROM clients WHERE keap_id=?').get(companyId);
-    if(!client) client = db.prepare('SELECT * FROM clients WHERE norm=?').get(normName(co.company_name));
-    const contracts = client ? db.prepare('SELECT * FROM contracts WHERE client_id=? ORDER BY created DESC').all(client.id) : [];
-    const flags = [];
-    if(!client) flags.push('No matching client found in the app at all (by Keap ID or name) — this dealership may be missing from LID Inventory entirely.');
-    else if(!client.keap_id) flags.push(`Client "${client.name}" exists in the app but isn't linked to this Keap company id (${companyId}) yet.`);
-    for(const sub of subs){
-      const linked = contracts.find(c => c.keap_subscription_id === sub.subId);
-      if(!linked) flags.push(`Keap has an active subscription (#${sub.subId}, ${fmtCents(sub.billingAmount)}/${sub.billingCycle}) with no matching contract in the app.`);
-      else{
-        if(Number(linked.price) !== sub.billingAmount) flags.push(`Contract #${linked.id} price ($${linked.price ?? '—'}) doesn't match Keap's billing amount ($${sub.billingAmount}).`);
-        if(linked.status !== 'active') flags.push(`Contract #${linked.id} is marked "${linked.status}" in the app, but Keap shows subscription #${sub.subId} as active.`);
-      }
-    }
-    for(const c of contracts){
-      if(c.status === 'active' && c.keap_subscription_id && !subs.some(s => s.subId === c.keap_subscription_id))
-        flags.push(`App contract #${c.id} points at Keap subscription #${c.keap_subscription_id}, which is no longer active/found in Keap.`);
-    }
-    return { keapCompanyId: companyId, keapCompanyName: co.company_name, subscriptions: subs, client, contracts, flags };
-  });
-  send(res, 200, { name, matches });
-});
-function fmtCents(n){ return n == null ? '—' : `$${n}`; }
-/* Buckets a free-text program/product name into a cadence category so an app
- * contract's `program` (e.g. "6 Visits Monthly") can be compared against a Keap
- * product name (e.g. "...Mastermind and Monthly Live-in-Drive") even though the two
- * systems never share a controlled vocabulary. Order matters — check the more
- * specific phrases (Semi-Monthly, Coaching Only) before the generic "month" catch-all. */
-function cadenceCategory(text){
-  const t = String(text || '').toLowerCase();
-  if(!t) return 'Unknown';
-  if(t.includes('coaching only')) return 'Coaching Only';
-  if(t.includes('semi') && t.includes('month')) return 'Semi-Monthly';
-  if(t.includes('quarter')) return 'Quarterly';
-  if(t.includes('bi-annual') || t.includes('biannual') || t.includes('bi annual')) return 'Bi-Annual';
-  if(t.includes('lid') && t.includes('purchase')) return 'LID (Purchase)';
-  // Keap's plain "...Signature Coaching Program" (no "and X Live-in-Drive" suffix)
-  // is the base coaching-only product — no scheduled LID visits attached.
-  if(t.includes('signature coaching program') && !t.includes('live-in-drive')) return 'Coaching Only';
-  if(t.includes('month')) return 'Monthly'; // catches "Monthly", "6 Visits Monthly", and Keap's "...Monthly Live-in-Drive"
-  return 'Other';
-}
-// The subset of cadenceCategory()'s possible outputs that are also real, selectable
-// program values in the app (public/app.js's PROGRAMS list) — 'Other' and 'Unknown'
-// are Keap product names cadenceCategory() couldn't confidently bucket, so there's
-// nothing safe to auto-apply for those; a person has to look at the raw product name.
-const KNOWN_APP_PROGRAMS = new Set(['Coaching Only', 'Semi-Monthly', 'Quarterly', 'Bi-Annual', 'LID (Purchase)', 'Monthly']);
-/* "Audit full LID Inventory" — the button version of the single-name lookup above.
- * Sweeps every non-deleted app client against the (cached) coaching-subscription
- * index in one pass — no per-client Keap calls, since the index already has every
- * active coaching company's name/id. Returns summary counts (how many clients have
- * a Keap match, broken down by program/product cadence) plus the list of clients
- * that need a human look — a clean match isn't listed individually, just counted,
- * so the exceptions list stays focused on what actually needs reconciling. */
-route('GET', /^\/api\/admin\/keap-lid-audit$/, ['admin'], async (req, res, m, body, user) => {
-  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
-  const index = await keapBuildAllSubscriptionIndex();
-  const byCompanyId = new Map(), byNormName = new Map();
-  for(const r of index){
-    if(r.companyId){ if(!byCompanyId.has(r.companyId)) byCompanyId.set(r.companyId, []); byCompanyId.get(r.companyId).push(r); }
-    const nn = normName(r.companyName);
-    if(nn){ if(!byNormName.has(nn)) byNormName.set(nn, []); byNormName.get(nn).push(r); }
-  }
-  const coachingCompanyIds = new Set(byCompanyId.keys());
-  const clients = db.prepare('SELECT * FROM clients WHERE deleted_at IS NULL ORDER BY name').all();
-  // Keap company IDs already claimed by an existing client's keap_id — a suggestion
-  // pointing a different, unmatched client at one of these is exactly the collision
-  // that corrupted the Bowman Chevrolet records, so these are never offered as candidates.
-  const claimedKeapIds = new Set(clients.filter(c => c.keap_id).map(c => c.keap_id));
-  const summary = { totalClients: clients.length, activeClients: 0, matched: 0, unmatched: 0, byCategory: {} };
-  const exceptions = [];
-  for(const cl of clients){
-    const activeContracts = db.prepare("SELECT * FROM contracts WHERE client_id=? AND status='active'").all(cl.id);
-    let keapSubs = [], matchType = null;
-    if(cl.keap_id && byCompanyId.has(cl.keap_id)){ keapSubs = byCompanyId.get(cl.keap_id); matchType = 'id'; }
-    else{
-      const nn = normName(cl.name);
-      if(byNormName.has(nn)){ keapSubs = byNormName.get(nn); matchType = 'name'; }
-    }
-    const matched = keapSubs.length > 0;
-    const keapCategories = new Set(keapSubs.map(s => cadenceCategory(s.productName)));
-    const appCats = activeContracts.map(c => ({ contract: c, category: cadenceCategory(c.program) }));
-    if(cl.status === 'active'){
-      summary.activeClients++;
-      if(matched) summary.matched++; else summary.unmatched++;
-      for(const { category } of appCats){
-        const b = (summary.byCategory[category] ||= { appCount: 0, keapConfirmed: 0, keapMismatched: 0 });
-        b.appCount++;
-        if(matched){ if(keapCategories.has(category)) b.keapConfirmed++; else b.keapMismatched++; }
-      }
-    }
-    const flags = [];
-    let flagType = null;
-    if(cl.status === 'active' && !matched){ flags.push('No Keap match found (by Keap ID or name).'); flagType = 'no_match'; }
-    if(matched && appCats.length && !appCats.some(a => keapCategories.has(a.category))){
-      flags.push(`App program (${appCats.map(a => a.category).join(', ') || '—'}) doesn't match Keap's product type (${[...keapCategories].join(', ') || '—'}).`);
-      flagType = flagType || 'program_mismatch';
-    }
-    if(cl.status !== 'active' && matched){
-      flags.push(`Client is "${cl.status}" in the app, but Keap still shows an active subscription — worth confirming it's really cancelled.`);
-      flagType = flagType || 'inactive_but_keap_active';
-    }
-    if(!flags.length) continue; // clean match — counted above, not listed individually
-    let suggestions = [];
-    if(!matched && cl.status === 'active'){
-      // Not restricted to companies with a live subscription anymore — a dealership can be
-      // in Keap (as a company record) with no subscription yet, or its subscription may use
-      // a product name cadenceCategory() doesn't recognize; either way it's still worth
-      // showing as a candidate. hasActiveSub flags whether linking will actually clear the
-      // "no match" flag on the next audit, so it's never a silent dead end.
-      const candidates = await keapFindCompaniesByName(cl.name);
-      suggestions = candidates.filter(co => !claimedKeapIds.has(String(co.id))).slice(0, 3).map(co => {
-        const subs = byCompanyId.get(String(co.id)) || [];
-        return { keapCompanyId: String(co.id), keapCompanyName: co.company_name, subs, hasActiveSub: subs.length > 0 };
-      });
-    }
-    // For the common, unambiguous shape of a program mismatch — exactly one active Keap
-    // sub, exactly one active app contract, and Keap's cadence maps to a program the app
-    // actually has — offer a one-click "make the app match Keap" fix instead of only a
-    // manual-edit hint. Anything more ambiguous (multiple subs/contracts, or a Keap
-    // product name cadenceCategory() can't confidently bucket) still requires a person.
-    let autoSync = null;
-    if(flagType === 'program_mismatch' && keapSubs.length === 1 && appCats.length === 1){
-      const keapCat = cadenceCategory(keapSubs[0].productName);
-      if(KNOWN_APP_PROGRAMS.has(keapCat)){
-        autoSync = { contractId: appCats[0].contract.id, keapSubscriptionId: keapSubs[0].subId, category: keapCat, billingAmount: keapSubs[0].billingAmount };
-      }
-    }
-    exceptions.push({
-      clientId: cl.id, clientName: cl.name, status: cl.status, keapId: cl.keap_id || '', matchType, flagType,
-      keapSubs, appContracts: appCats.map(a => ({ id: a.contract.id, program: a.contract.program, category: a.category, price: a.contract.price, keap_subscription_id: a.contract.keap_subscription_id })),
-      flags, suggestions, autoSync,
-    });
-  }
-  log(user.email, 'keap.lid_audit', { totalClients: summary.totalClients, activeClients: summary.activeClients, matched: summary.matched, unmatched: summary.unmatched, exceptions: exceptions.length });
-  send(res, 200, { summary, exceptions });
-});
-/* Reconcile step for an unmatched client found by the audit above — an admin has
- * confirmed (by eye) that this app client really is this Keap company, and wants to
- * link them the durable way (by keap_id), same as the one-time Aug-7 reconciliation
- * pass described in Keap_App_Source_of_Truth_SOP.md. Never overwrites an existing
- * link — that would be a silent identity change, which is exactly the kind of thing
- * this whole integration is designed to never do without a person explicitly acting. */
-route('POST', /^\/api\/admin\/clients\/(\d+)\/link-keap$/, ['admin'], (req, res, m, body, user) => {
-  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
-  if(!cl) return err(res, 404, 'not found');
-  const keapCompanyId = String((body && body.keapCompanyId) || '').trim();
-  if(!keapCompanyId) return err(res, 400, 'keapCompanyId is required.');
-  const force = !!(body && body.force);
-  // Already linked to a DIFFERENT Keap company — this is the "the app's link is wrong,
-  // point it at the real one instead" case (e.g. a stale/duplicate Keap company id that
-  // has no subscription on it). Requires force:true so the frontend gets a chance to
-  // show a confirmation first; a same-id "relink" is always a no-op either way.
-  if(cl.keap_id && cl.keap_id !== keapCompanyId){
-    if(!force) return err(res, 400, `This client is already linked to Keap company ${cl.keap_id} — unlink first if that's wrong.`);
-  }
-  // A different existing client already claiming this exact Keap company is the collision
-  // that bit us on Bowman Chevrolet — a stale link plus a rename can quietly point two
-  // distinct real clients at the same Keap subscription. Block it outright; whoever is
-  // fixing this needs to look at both records by hand, not have the app silently merge them.
-  const claimedBy = db.prepare('SELECT id, name FROM clients WHERE keap_id=? AND id!=?').get(keapCompanyId, cl.id);
-  if(claimedBy) return err(res, 400, `Keap company ${keapCompanyId} is already linked to a different client — #${claimedBy.id} ("${claimedBy.name}"). These may be duplicate client records; resolve that first rather than linking both to the same Keap company.`);
-  const oldKeapId = cl.keap_id || null;
-  const keapCompanyName = String((body && body.keapCompanyName) || '').trim();
-  let renamed = false, visitsUpdated = 0;
-  db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(keapCompanyId, cl.id);
-  // Rewriting the app's name to match Keap only happens on an explicit relink (force),
-  // and only if a name was actually supplied — never on a fresh first-time link, so a
-  // normal "no Keap match yet" Link doesn't silently rename anything. Goes through
-  // renameClientEverywhere so every already-scheduled visit's displayed name (Schedule
-  // Board, Today view, LID Inventory) updates too, not just the client record itself.
-  if(force && keapCompanyName && normName(keapCompanyName) !== normName(cl.name)){
-    let r;
-    try{ r = renameClientEverywhere(cl.id, keapCompanyName, user.email); }
-    catch(e){
-      if(e.isCollision){
-        // Roll back the keap_id write so we don't leave the client half-linked.
-        db.prepare('UPDATE clients SET keap_id=? WHERE id=?').run(oldKeapId, cl.id);
-        return err(res, 400, e.message);
-      }
-      throw e;
-    }
-    renamed = r.changed; visitsUpdated = r.visitsUpdated || 0;
-  }
-  log(user.email, 'client.link_keap', { clientId: cl.id, name: renamed ? keapCompanyName : cl.name, keapCompanyId, oldKeapId, renamedFrom: renamed ? cl.name : undefined, visitsUpdated });
-  send(res, 200, { ok: true, renamed, newName: renamed ? keapCompanyName : cl.name, visitsUpdated });
-});
-/* "Update app to match Keap" for the audit's program-mismatch flag — Keap is the
- * source of truth for what a client is actually being billed for, so when there's
- * exactly one active Keap subscription and exactly one active app contract (no
- * ambiguity about which maps to which — see the `autoSync` gate in the audit route
- * above), this rewrites the contract's program label and price to match Keap and
- * links keap_subscription_id, all in one click instead of a manual edit.
- * Deliberately does NOT touch the visits table — the existing due-date/visit-count
- * cadence stays exactly as scheduled. Changing cadence (e.g. Bi-Annual -> Quarterly)
- * only relabels going forward; it does not retroactively add/remove visits, since
- * silently rewriting a client's visit history/schedule out from under a coach is a
- * different, riskier kind of change than a label+price correction. If the actual
- * visit cadence needs to change, that's still a manual call — this just stops the
- * app's own program label from lying about what Keap is billing for. */
-route('POST', /^\/api\/admin\/contracts\/(\d+)\/sync-from-keap$/, ['admin'], (req, res, m, body, user) => {
-  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
-  if(!contract) return err(res, 404, 'not found');
-  const keapSubscriptionId = String((body && body.keapSubscriptionId) || '').trim();
-  const category = String((body && body.category) || '').trim();
-  const billingAmount = Number(body && body.billingAmount);
-  if(!keapSubscriptionId) return err(res, 400, 'keapSubscriptionId is required.');
-  if(!KNOWN_APP_PROGRAMS.has(category)) return err(res, 400, `"${category}" isn't a program this app recognizes — nothing was changed.`);
-  const before = { program: contract.program, price: contract.price, keap_subscription_id: contract.keap_subscription_id };
-  db.prepare('UPDATE contracts SET program=?, price=?, keap_subscription_id=? WHERE id=?')
-    .run(category, Number.isFinite(billingAmount) && billingAmount > 0 ? billingAmount : contract.price, keapSubscriptionId, contract.id);
-  log(user.email, 'contract.sync_from_keap', { contractId: contract.id, before, after: { program: category, price: Number.isFinite(billingAmount) && billingAmount > 0 ? billingAmount : contract.price, keap_subscription_id: keapSubscriptionId }, note: 'label + price only — visit schedule left untouched' });
-  send(res, 200, { ok: true });
-});
-/* Manual admin correction for a contract's program/price/Keap-subscription-link —
- * used for hand-fixing bad data (e.g. reverting a wrong auto-sync), not part of any
- * automated flow. Unlike sync-from-keap above, keapSubscriptionId may be explicitly
- * cleared to null by passing an empty string, since a revert needs to be able to
- * unlink, not just relink. */
-route('POST', /^\/api\/admin\/contracts\/(\d+)\/manual-edit$/, ['admin'], (req, res, m, body, user) => {
-  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
-  if(!contract) return err(res, 404, 'not found');
-  const before = { program: contract.program, price: contract.price, keap_subscription_id: contract.keap_subscription_id };
-  const program = body && body.program !== undefined ? String(body.program).trim() : contract.program;
-  const price = body && body.price !== undefined ? Number(body.price) : contract.price;
-  const keapSubscriptionId = body && body.keapSubscriptionId !== undefined ? (String(body.keapSubscriptionId).trim() || null) : contract.keap_subscription_id;
-  if(body && body.program !== undefined && !KNOWN_APP_PROGRAMS.has(program)) return err(res, 400, `"${program}" isn't a program this app recognizes — nothing was changed.`);
-  if(body && body.price !== undefined && !Number.isFinite(price)) return err(res, 400, 'price must be a number.');
-  db.prepare('UPDATE contracts SET program=?, price=?, keap_subscription_id=? WHERE id=?').run(program, price, keapSubscriptionId, contract.id);
-  log(user.email, 'contract.manual_edit', { contractId: contract.id, before, after: { program, price, keap_subscription_id: keapSubscriptionId } });
-  send(res, 200, { ok: true });
-});
-/* Reconciliation for the "inactive here, but Keap still shows active" audit flag —
- * a yes/no a human answers after actually looking at Keap. "No, still active" flips
- * the client (and any of their contracts that Keap's billing_amount/cycle line up
- * with an active sub for) back to active — same effect as a person editing the
- * client by hand, just one click. "Yes, really cancelled" doesn't change any data —
- * Keap itself is the thing that needs fixing (cancel the subscription there), so this
- * just records that a human looked at it and confirmed the app's status is correct;
- * the flag will keep resurfacing until Keap agrees, which is the intended nudge. */
-route('POST', /^\/api\/admin\/clients\/(\d+)\/confirm-keap-status$/, ['admin'], (req, res, m, body, user) => {
-  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
-  if(!cl) return err(res, 404, 'not found');
-  const action = (body && body.action) || '';
-  if(action === 'reactivate'){
-    // Flips the client back to active only — contracts are left as-is, since which
-    // specific contract Keap's subscription corresponds to isn't something this
-    // endpoint can safely guess. Re-open/edit the actual contract from the client
-    // profile if it also needs reactivating.
-    if(cl.status !== 'active') db.prepare("UPDATE clients SET status='active' WHERE id=?").run(cl.id);
-    log(user.email, 'client.reactivate_from_keap_audit', { clientId: cl.id, name: cl.name });
-    send(res, 200, { ok: true });
-  } else if(action === 'confirm_cancelled'){
-    log(user.email, 'client.confirm_cancelled_from_keap_audit', { clientId: cl.id, name: cl.name, note: 'Human confirmed app status is correct — Keap subscription still needs to be cancelled there.' });
-    send(res, 200, { ok: true });
-  } else {
-    err(res, 400, 'action must be "reactivate" or "confirm_cancelled"');
-  }
 });
 
 async function onSubscriptionChange(subId, eventKey, opts = {}){

@@ -74,6 +74,11 @@ const coach = id => D.coaches.find(c=>c.id===id);
 const status = v => v.completed?'completed': v.cal_week?'on_calendar': (v.due&&v.due<TODAY?'overdue': v.due?'needs_scheduling':'unknown');
 const isOpen = (cid,w) => !occ[cid+'|'+w];
 const canEdit = () => ['admin','lead'].includes(D.user.role);
+// Broader than canEdit(): sales/coach can see the Schedule Board and set/clear a
+// coach's open-week label (Home/Off/Training/etc.), but never place, move, or
+// unschedule an actual visit card — that stays canEdit()-only (admin/lead), and is
+// enforced server-side regardless of what the UI shows.
+const canEditWeeks = () => ['admin','lead','sales','coach'].includes(D.user.role);
 // A coach can complete a visit only if they're the one who scheduled it (cal_coach)
 // or the one permanently assigned to the client (client_assigned_coach_id) — this is
 // a UI convenience mirror of the server-side check in server.js's canCompleteVisit;
@@ -148,7 +153,7 @@ function render(){
   const r = D.user.role;
   const hasPending = (r==='admin'||r==='lead');
   views.dashboard='Today';
-  if(hasPending) views.board='Schedule Board';
+  if(canEditWeeks()) views.board='Schedule Board'; // admin/lead/sales/coach — see canEditWeeks()
   views.inventory = r==='coach' ? 'My Visits' : 'LID Inventory';
   views.clients='Clients'; // dropdown for admin/lead (Active Clients + Unassigned Clients); plain link otherwise
   views.availability='Availability';
@@ -515,17 +520,24 @@ function board(){
       let cls='slot', inner='', click='';
       if(!o){
         cls+=' s-open'+(past?' s-past':'');
-        if(placing && !past){ cls+=' target'; inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
-        else if(canEdit() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        // Placing (moving a card onto an open week) stays admin/lead-only — st.placing
+        // is only ever set from buttons already gated on canEdit() below, so this
+        // branch is unreachable for sales/coach in practice, but it's guarded here too.
+        if(placing && !past && canEdit()){ cls+=' target'; inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
+        else if(canEditWeeks() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= v.completed?' s-done':' s-visit';
         inner=`<b>${v.completed?'':healthDot(v.client_id)}${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>`;
-        if(canEdit()) click=` onclick="st.detail=${v.id};st.placing=null;render()"`;
+        // Viewing a visit's detail box is read-only by itself — Complete/Move/Unschedule
+        // inside it are individually gated (see the detail box below), so anyone who can
+        // see the board can click through to look, but only canEdit() (or the owning
+        // coach, for Complete) sees anything actionable there.
+        click=` onclick="st.detail=${v.id};st.placing=null;render()"`;
       } else {
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
         inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
-        if(canEdit() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        if(canEditWeeks() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       }
       html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
     }
@@ -535,7 +547,7 @@ function board(){
   <div class="legend"><span><i style="background:var(--visit)"></i>Visit</span><span><i style="background:var(--done)"></i>Completed</span>
     <span><i style="background:var(--open);border:1px dashed var(--openb)"></i>Open</span><span><i style="background:var(--launch)"></i>Launch slot</span>
     <span><i style="background:#e2f0f0"></i>Mills</span><span><i style="background:var(--offc)"></i>Blocked (home/off/etc.)</span></div>
-  <p class="small">Click a visit to manage it · click an open or blocked week to set Home/Off/Training/etc. ·
+  <p class="small">${canEdit() ? 'Click a visit to manage it · ' : 'Click a visit to view it · '}click an open or blocked week to set Home/Off/Training/etc. ·
   <span style="color:var(--bad)">●</span> client at risk · <span style="color:var(--warn)">●</span> client behind — hover a dot for details, open the client's profile for the full story.</p>
   </div>`;
 
@@ -547,9 +559,9 @@ function board(){
       ${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}<br>
       <span class="small">wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}</span>
       <div class="btnrow">
-        <button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Complete</button>
-        <button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>
-        <button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>
+        ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Complete</button>` : ''}
+        ${canEdit() ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>` : ''}
+        ${canEdit() ? `<button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
         <button class="btn tiny" onclick="st.detail=null;render()">Close</button>
       </div></div>`;
   }
@@ -559,7 +571,7 @@ function board(){
     list.slice(0,40).forEach(v=>{
       h+=`<div class="duecard ${v.due&&v.due<TODAY?'over':''}"><b>${healthDot(v.client_id)}${esc(v.client)}</b>
         <div class="meta">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</div>
-        <button class="btn tiny primary" onclick="st.placing=${v.id};st.detail=null;render()">Place on calendar</button></div>`;
+        ${canEdit() ? `<button class="btn tiny primary" onclick="st.placing=${v.id};st.detail=null;render()">Place on calendar</button>` : ''}</div>`;
     });
     return h;
   };
@@ -1843,21 +1855,7 @@ function adminDataView(){
   <button class="btn primary" id="keapBackfillBtn" onclick="backfillKeapSubscriptions()">Backfill missed subscriptions</button></div>
   <div id="keapHooksOut" class="small"></div>
   <div id="keapBackfillOut" class="small"></div>
-  <div id="keapEventsOut" class="small">Loading…</div></div>
-  <div class="panel"><h2>Audit full LID Inventory vs Keap</h2>
-  <p class="small" style="margin-bottom:12px">One button, sweeps every client in the LID Inventory against Keap: matches each one to its Keap
-  company by Keap ID (or name if not yet linked), confirms the program/product type lines up (Coaching, Monthly, Semi-Monthly, etc.), and
-  shows how many matched vs. didn't. Clients with a problem show up below with suggested fixes — read-only until you click "Link" on a
-  suggestion.</p>
-  <div class="controls"><button class="btn primary" id="lidAuditBtn" onclick="runLidAudit()">Audit full LID Inventory</button></div>
-  <div id="lidAuditOut" class="small"></div></div>
-  <div class="panel"><h2>Audit a client vs Keap</h2>
-  <p class="small" style="margin-bottom:12px">Type a dealership name (as it appears on the LID Inventory / Clients page) to find its
-  real Keap company record and subscription, and check that against what this app already has for it — same idea as
-  "Sync with Keap," but for any client by name, not just ones already linked. Read-only: nothing here is written back.</p>
-  <div class="controls"><input id="auditClientName" placeholder="e.g. Tom Hesser Nissan" style="min-width:260px">
-  <button class="btn primary" id="auditClientBtn" onclick="auditClientVsKeap()">Audit</button></div>
-  <div id="auditClientOut" class="small"></div></div>`;
+  <div id="keapEventsOut" class="small">Loading…</div></div>`;
   return html;
 }
 function adminHistoryView(){
@@ -2053,131 +2051,6 @@ async function backfillKeapSubscriptions(){
     if(rows.length) toast(`${rows.length} subscription(s) queued to Unassigned Clients`);
   }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
   finally{ if(btn){ btn.disabled = false; btn.textContent = 'Backfill missed subscriptions'; } }
-}
-async function auditClientVsKeap(){
-  const nameEl = $('#auditClientName'), out = $('#auditClientOut'), btn = $('#auditClientBtn'); if(!out) return;
-  const name = (nameEl.value||'').trim();
-  if(!name){ out.innerHTML = '<p class="small">Type a name first.</p>'; return; }
-  if(btn){ btn.disabled = true; btn.textContent = 'Checking Keap…'; }
-  out.innerHTML = 'Looking up "'+esc(name)+'" in Keap…';
-  try{
-    const r = await api('GET', '/api/admin/keap-client-audit?name='+encodeURIComponent(name));
-    if(!r.matches.length){ out.innerHTML = `<p class="small">No Keap company matched "${esc(name)}". Check the spelling, or it may not exist in Keap under this name.</p>`; return; }
-    out.innerHTML = r.matches.map(mtch => {
-      const c = mtch.client;
-      return `<div style="border:1px solid var(--border,#ddd);border-radius:8px;padding:12px;margin-top:10px">
-        <h4 style="margin:0 0 6px">${esc(mtch.keapCompanyName)} <span class="small mono">Keap company #${esc(mtch.keapCompanyId)}</span></h4>
-        <p class="small"><b>App client:</b> ${c ? `<a onclick="openClientProfile(${c.id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a> — status ${esc(c.status)}${c.keap_id?'':' <span class="pill p-over">not linked to Keap</span>'}` : '<span class="pill p-over">no matching client in the app</span>'}</p>
-        ${mtch.subscriptions.length ? `<table><tr><th>Keap sub</th><th>Product</th><th class="num">Amount</th><th>Billing</th><th>Next bill</th></tr>` +
-          mtch.subscriptions.map(s=>`<tr><td class="mono">#${esc(s.subId)}</td><td class="small">${esc(s.productName)}</td><td class="num">${s.billingAmount!=null?fmtMoney(s.billingAmount):'—'}</td><td class="small">${esc(s.billingCycle)}×${s.billingFrequency||1}</td><td class="small">${esc(s.nextBillDate||'—')}</td></tr>`).join('') +
-          `</table>` : '<p class="small">No active Signature Coaching subscription found in Keap for this company.</p>'}
-        ${mtch.contracts.length ? `<table style="margin-top:8px"><tr><th>App contract</th><th>Program</th><th class="num">Price</th><th>Status</th><th>Keap sub</th></tr>` +
-          mtch.contracts.map(co=>`<tr><td>#${co.id}</td><td class="small">${esc(co.program||'—')}</td><td class="num">${co.price!=null?fmtMoney(co.price):'—'}</td><td>${esc(co.status)}</td><td class="mono small">${esc(co.keap_subscription_id||'—')}</td></tr>`).join('') +
-          `</table>` : ''}
-        ${mtch.flags.length ? `<ul style="margin:8px 0 0;padding-left:18px">` + mtch.flags.map(f=>`<li class="small" style="color:var(--danger,#c0392b)">${esc(f)}</li>`).join('') + `</ul>` : '<p class="small" style="color:var(--good,#2a8f4d);margin:8px 0 0">No drift found — Keap and the app agree.</p>'}
-      </div>`;
-    }).join('');
-  }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
-  finally{ if(btn){ btn.disabled = false; btn.textContent = 'Audit'; } }
-}
-async function runLidAudit(){
-  const out = $('#lidAuditOut'), btn = $('#lidAuditBtn'); if(!out) return;
-  if(btn){ btn.disabled = true; btn.textContent = 'Auditing…'; }
-  out.innerHTML = 'Pulling every client and checking each against Keap — this can take a little while on a full sweep…';
-  try{
-    const r = await api('GET', '/api/admin/keap-lid-audit');
-    const s = r.summary;
-    const cats = Object.keys(s.byCategory).sort();
-    let html = `<div class="controls" style="flex-wrap:wrap;gap:16px;margin:6px 0 14px">
-      <div><b style="font-size:20px">${s.totalClients}</b><br><span class="small">Total clients</span></div>
-      <div><b style="font-size:20px">${s.activeClients}</b><br><span class="small">Active clients</span></div>
-      <div><b style="font-size:20px;color:var(--good,#2a8f4d)">${s.matched}</b><br><span class="small">Matched in Keap</span></div>
-      <div><b style="font-size:20px;color:var(--danger,#c0392b)">${s.unmatched}</b><br><span class="small">No Keap match</span></div>
-    </div>`;
-    if(cats.length){
-      html += `<table><tr><th>Program category</th><th class="num">App count</th><th class="num">Keap-confirmed</th><th class="num">Mismatched</th></tr>` +
-        cats.map(c=>{ const b=s.byCategory[c]; return `<tr><td>${esc(c)}</td><td class="num">${b.appCount}</td><td class="num" style="color:var(--good,#2a8f4d)">${b.keapConfirmed}</td><td class="num" style="color:${b.keapMismatched?'var(--danger,#c0392b)':'inherit'}">${b.keapMismatched}</td></tr>`; }).join('') +
-        `</table>`;
-    }
-    if(!r.exceptions.length){
-      html += `<p class="small" style="color:var(--good,#2a8f4d);margin-top:12px">No drift found — every active client matches Keap by company and program.</p>`;
-    } else {
-      html += `<h4 style="margin:16px 0 6px">Needs attention (${r.exceptions.length})</h4>`;
-      html += r.exceptions.map(x => {
-        const subsRows = x.keapSubs.length ? `<table style="margin-top:6px"><tr><th>Keap sub</th><th>Product</th><th class="num">Amount</th><th>Billing</th></tr>` +
-          x.keapSubs.map(sub=>`<tr><td class="mono">#${esc(sub.subId)}</td><td class="small">${esc(sub.productName)}</td><td class="num">${sub.billingAmount!=null?fmtMoney(sub.billingAmount):'—'}</td><td class="small">${esc(sub.billingCycle)}×${sub.billingFrequency||1}</td></tr>`).join('') + `</table>` : '';
-        const contractRows = x.appContracts.length ? `<table style="margin-top:6px"><tr><th>App contract</th><th>Program</th><th>Category</th><th class="num">Price</th></tr>` +
-          x.appContracts.map(co=>`<tr><td>#${co.id}</td><td class="small">${esc(co.program||'—')}</td><td class="small">${esc(co.category)}</td><td class="num">${co.price!=null?fmtMoney(co.price):'—'}</td></tr>`).join('') + `</table>` : '';
-        const suggestions = (x.suggestions||[]).length ? `<div style="margin-top:8px"><p class="small" style="margin-bottom:4px"><b>Possible Keap matches:</b></p>` +
-          x.suggestions.map(sg=>`<div class="small" style="margin-bottom:4px">${esc(sg.keapCompanyName)} <span class="mono">#${esc(sg.keapCompanyId)}</span>${sg.hasActiveSub?'':' <span class="pill">no active subscription in Keap</span>'}
-            <button class="btn" style="padding:2px 8px;font-size:12px" onclick="linkClientToKeap(${x.clientId},'${esc(sg.keapCompanyId)}','${encodeURIComponent(sg.keapCompanyName||'')}',this)">Link</button></div>`).join('') + `</div>`
-          : (x.flagType==='no_match' ? '<p class="small" style="margin-top:8px;color:var(--muted)">No plausible Keap company found by name — this dealership may not exist in Keap at all yet, or is filed under a very different name. Worth checking Keap directly.</p>' : '');
-        const mismatchHint = x.flagType==='program_mismatch' ? (x.autoSync
-          ? `<div class="controls" style="margin-top:8px">
-              <button class="btn primary" style="padding:2px 10px;font-size:12px" onclick="syncContractFromKeap(${x.autoSync.contractId},'${esc(x.autoSync.keapSubscriptionId)}','${esc(x.autoSync.category)}',${x.autoSync.billingAmount!=null?x.autoSync.billingAmount:'null'},this)">Update app to match Keap (${esc(x.autoSync.category)})</button>
-              <span class="small" style="color:var(--muted)">Updates this contract's program label and price to match Keap, and links it so price/status keep syncing automatically. Does not add or remove any scheduled visits — review the schedule by hand if the actual cadence changed.</span>
-            </div>`
-          : `<p class="small" style="margin-top:8px;color:var(--muted)">Click the client name above to open their profile and correct the program in the app if the app is wrong — or confirm the correct product directly in Keap if Keap is wrong. Nothing here writes to Keap automatically.</p>`)
-          : '';
-        const reconcileButtons = x.flagType==='inactive_but_keap_active' ? `<div class="controls" style="margin-top:8px">
-            <span class="small" style="margin-right:4px">Is this really cancelled?</span>
-            <button class="btn" style="padding:2px 10px;font-size:12px" onclick="confirmKeapStatus(${x.clientId},'confirm_cancelled',this)">Yes, dismiss</button>
-            <button class="btn primary" style="padding:2px 10px;font-size:12px" onclick="confirmKeapStatus(${x.clientId},'reactivate',this)">No, reactivate in app</button>
-          </div>` : '';
-        return `<div style="border:1px solid var(--border,#ddd);border-radius:8px;padding:12px;margin-top:10px">
-          <h4 style="margin:0 0 6px"><a onclick="openClientProfile(${x.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(x.clientName)}</a>
-          <span class="small">— status ${esc(x.status)}${x.keapId?` · Keap #${esc(x.keapId)}`:''}</span></h4>
-          <ul style="margin:4px 0 0;padding-left:18px">${x.flags.map(f=>`<li class="small" style="color:var(--danger,#c0392b)">${esc(f)}</li>`).join('')}</ul>
-          ${subsRows}${contractRows}${suggestions}${mismatchHint}${reconcileButtons}
-        </div>`;
-      }).join('');
-    }
-    out.innerHTML = html;
-  }catch(e){ out.innerHTML = `<p style="color:var(--danger,#c0392b)">${esc(e.message||String(e))}</p>`; }
-  finally{ if(btn){ btn.disabled = false; btn.textContent = 'Audit full LID Inventory'; } }
-}
-async function linkClientToKeap(clientId, keapCompanyId, keapCompanyNameEnc, btn){
-  const keapCompanyName = decodeURIComponent(keapCompanyNameEnc||'');
-  if(btn){ btn.disabled = true; btn.textContent = 'Linking…'; }
-  try{
-    await api('POST', '/api/admin/clients/'+clientId+'/link-keap', { keapCompanyId, keapCompanyName });
-    toast('Linked to Keap company #'+keapCompanyId);
-    await runLidAudit();
-  }catch(e){
-    const msg = e.message||String(e);
-    if(/already linked to Keap company/i.test(msg)){
-      if(btn) btn.disabled = false;
-      const ok = await uiConfirm(
-        `${msg}\n\nThis usually means the app is linked to the wrong (or a stale, subscription-less) Keap company. ` +
-        `Relink to ${keapCompanyName||'Keap company #'+keapCompanyId} and rename this client in the app to match?`,
-        'Relink & rename');
-      if(!ok){ if(btn) btn.textContent = 'Link'; return; }
-      if(btn){ btn.disabled = true; btn.textContent = 'Relinking…'; }
-      try{
-        const r = await api('POST', '/api/admin/clients/'+clientId+'/link-keap', { keapCompanyId, keapCompanyName, force: true });
-        toast(r.renamed ? `Relinked and renamed to "${r.newName}"${r.visitsUpdated?` (${r.visitsUpdated} scheduled visit${r.visitsUpdated===1?'':'s'} updated too)`:''}` : 'Relinked to Keap company #'+keapCompanyId);
-        await runLidAudit();
-      }catch(e2){ uiAlert(e2.message||String(e2)); if(btn){ btn.disabled = false; btn.textContent = 'Link'; } }
-    } else {
-      uiAlert(msg); if(btn){ btn.disabled = false; btn.textContent = 'Link'; }
-    }
-  }
-}
-async function syncContractFromKeap(contractId, keapSubscriptionId, category, billingAmount, btn){
-  if(btn){ btn.disabled = true; btn.textContent = 'Updating…'; }
-  try{
-    await api('POST', '/api/admin/contracts/'+contractId+'/sync-from-keap', { keapSubscriptionId, category, billingAmount });
-    toast(`Contract #${contractId} updated to match Keap (${category})`);
-    await runLidAudit();
-  }catch(e){ uiAlert(e.message||String(e)); if(btn){ btn.disabled = false; } }
-}
-async function confirmKeapStatus(clientId, action, btn){
-  if(btn){ btn.disabled = true; btn.textContent = '…'; }
-  try{
-    await api('POST', '/api/admin/clients/'+clientId+'/confirm-keap-status', { action });
-    toast(action==='reactivate' ? 'Client reactivated in the app' : 'Confirmed — Keap still needs to be cancelled there');
-    await runLidAudit();
-  }catch(e){ uiAlert(e.message||String(e)); if(btn){ btn.disabled = false; } }
 }
 async function loadBackupStatus(){
   try{
