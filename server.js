@@ -180,6 +180,26 @@ const getCoach = id => db.prepare('SELECT * FROM coaches WHERE id=?').get(id);
 
 /* ----- contracts & visits (shared so Keap-assigned contracts generate the same way) ----- */
 const INTERVAL = { 'Monthly':1, 'Semi-Monthly':2, 'Quarterly':3, 'Bi-Annual':6, 'LID (Purchase)':0, '6 Visits Monthly':1 };
+const CYCLE_LEN = { 'Monthly':12, 'Semi-Monthly':6, 'Quarterly':4, 'Bi-Annual':2, 'LID (Purchase)':1, '6 Visits Monthly':6, 'Coaching Only':0 };
+const PROGRAM_NAMES = Object.keys(CYCLE_LEN);
+/* Mirrors the client-side guessProgram() in app.js — used only to SUGGEST a program
+ * label from a Keap subscription's billing_cycle/billing_frequency, never to write
+ * it automatically. A resync/relink surfaces this as "Keap suggests X" for a human
+ * to accept or ignore; it is deliberately never applied by the webhook path or the
+ * bulk "Sync with Keap" sweep, since a wrong guess there would silently mutate every
+ * Keap-linked contract's program with no review, not just the one row a person is
+ * actually looking at. */
+function guessProgramFromCycle(cycle, freq){
+  const c = (cycle || '').toUpperCase(); const f = +freq || 1;
+  if(c === 'MONTH'){
+    if(f >= 6) return 'Bi-Annual';
+    if(f === 3) return 'Quarterly';
+    if(f === 2) return 'Semi-Monthly';
+    return 'Monthly';
+  }
+  if(c === 'YEAR') return 'Bi-Annual';
+  return 'Quarterly';
+}
 function createContractAndVisits({ clientName, program, n, first, team, source, keapSubscriptionId, price, keapCompanyId, actorEmail }){
   const clientId = resolveClient(clientName, { billing_start: first, keap_id: keapCompanyId || '', fromKeap: source === 'keap' });
   const cr = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,keap_subscription_id,created)
@@ -952,7 +972,16 @@ route('POST', /^\/api\/contracts\/(\d+)\/keap-resync$/, ['admin'], async (req, r
     const r = await onSubscriptionChange(contract.keap_subscription_id, 'subscription.edit', { source: 'manual_resync' });
     if(r.error) return err(res, 502, `Keap lookup failed: ${r.error}`);
     log(user.email, 'contract.keap_resync', { contractId: contract.id, subId: contract.keap_subscription_id, statusChanged: !!r.statusChanged, priceChanged: !!r.priceChanged });
-    send(res, 200, { ok: true, ...r });
+    // Program/cadence is never auto-corrected (see guessProgramFromCycle above) —
+    // just surfaced as a suggestion if Keap's billing shape implies something
+    // different from what's on the contract right now.
+    const sub = await keapFindSubscriptionById(contract.keap_subscription_id);
+    let programSuggestion = null;
+    if(sub.ok && sub.json){
+      const guessed = guessProgramFromCycle(sub.json.billing_cycle, sub.json.billing_frequency);
+      if(guessed !== contract.program) programSuggestion = { guessed, current: contract.program };
+    }
+    send(res, 200, { ok: true, ...r, programSuggestion });
   }catch(e){ err(res, 500, String(e && e.message || e)); }
 });
 /* Re-point a contract at a different Keap subscription ID — for when the link
@@ -972,14 +1001,46 @@ route('POST', /^\/api\/contracts\/(\d+)\/keap-relink$/, ['admin'], async (req, r
   const oldSubId = contract.keap_subscription_id;
   db.prepare('UPDATE contracts SET keap_subscription_id=? WHERE id=?').run(subId, contract.id);
   log(user.email, 'contract.keap_relink', { contractId: contract.id, oldSubId: oldSubId || null, newSubId: subId });
+  // Program/cadence is never auto-corrected — just surfaced as a suggestion (see
+  // guessProgramFromCycle above) if Keap's billing shape implies something
+  // different from the program already on the contract.
+  let programSuggestion = null;
+  if(found.json){
+    const guessed = guessProgramFromCycle(found.json.billing_cycle, found.json.billing_frequency);
+    if(guessed !== contract.program) programSuggestion = { guessed, current: contract.program };
+  }
   try{
     const r = await onSubscriptionChange(subId, 'subscription.edit', { source: 'manual_relink' });
-    send(res, 200, { ok: true, relinked: true, oldSubId: oldSubId || null, newSubId: subId, ...r });
+    send(res, 200, { ok: true, relinked: true, oldSubId: oldSubId || null, newSubId: subId, ...r, programSuggestion });
   }catch(e){
     // The relink itself already committed — report the resync failure but don't
     // pretend the whole operation failed, since the link change did take effect.
-    send(res, 200, { ok: true, relinked: true, oldSubId: oldSubId || null, newSubId: subId, resyncError: String(e && e.message || e) });
+    send(res, 200, { ok: true, relinked: true, oldSubId: oldSubId || null, newSubId: subId, resyncError: String(e && e.message || e), programSuggestion });
   }
+});
+/* Manual correction of a contract's program/cadence label — e.g. after a resync or
+ * relink surfaces a mismatch against what Keap's billing actually implies. This
+ * only ever changes the contract row's own program/visits fields; it never touches
+ * the visits table, so already-generated visits keep whatever program/cycle label
+ * they were created with (that's what the per-visit Edit button on the profile's
+ * Visit history table is for) — no auto-regeneration of anyone's calendar. */
+route('PATCH', /^\/api\/contracts\/(\d+)$/, ['admin'], (req, res, m, body, user) => {
+  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
+  if(!contract) return err(res, 404, 'not found');
+  const f = {};
+  if(body.program !== undefined){
+    if(!PROGRAM_NAMES.includes(body.program)) return err(res, 400, 'unknown program');
+    f.program = body.program;
+  }
+  if(body.visits !== undefined){
+    const n = +body.visits;
+    if(!Number.isFinite(n) || n < 0) return err(res, 400, 'bad visit count');
+    f.visits = n;
+  }
+  if(!Object.keys(f).length) return err(res, 400, 'nothing to update');
+  db.prepare(`UPDATE contracts SET ${Object.keys(f).map(k=>k+'=?').join(',')} WHERE id=?`).run(...Object.values(f), contract.id);
+  log(user.email, 'contract.edit', { contractId: contract.id, ...f, oldProgram: contract.program, oldVisits: contract.visits });
+  send(res, 200, { ok: true });
 });
 route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) => {
   send(res, 200, db.prepare(`

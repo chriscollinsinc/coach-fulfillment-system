@@ -1362,6 +1362,10 @@ async function contractKeapResync(contractId){
     if(r.found===false) parts.push('no matching contract found on Keap\'s side');
     await refresh();
     toast(parts.length ? `Resynced — ${parts.join(', ')}` : 'Resynced — no changes needed');
+    // Program/cadence is a suggestion only, never applied automatically — if Keap's
+    // billing shape implies something different, offer the fix as a one-click dialog
+    // instead of silently rewriting it.
+    if(r.programSuggestion) offerProgramFix(contractId, r.programSuggestion);
   }catch(e){ uiAlert(e.message||'Resync failed'); }
 }
 function contractKeapRelinkDlg(contractId, currentSubId){
@@ -1383,7 +1387,36 @@ async function doContractKeapRelink(contractId){
     if(r.resyncError) parts.push(`resync afterward failed: ${r.resyncError}`);
     await refresh();
     toast(`Linked to subscription ${subscriptionId}${parts.length?' — '+parts.join(', '):''}`);
+    if(r.programSuggestion) offerProgramFix(contractId, r.programSuggestion);
   }catch(e){ uiAlert(e.message||'Link failed'); }
+}
+function offerProgramFix(contractId, suggestion){
+  openDlg(`<h3>Program cadence looks off</h3>
+    <p class="small">Keap's billing on this subscription implies <b>${esc(suggestion.guessed)}</b>, but this contract is currently set to <b>${esc(suggestion.current||'—')}</b>. This is only a suggestion from the billing cycle — it's never applied automatically. Fix it now?</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Leave as-is</button>
+    <button class="btn primary" onclick="closeDlg();editContractProgramDlg(${contractId},'${esc(suggestion.current||'').replace(/'/g,"\\'")}',null,'${esc(suggestion.guessed).replace(/'/g,"\\'")}')">Review &amp; fix</button></div>`);
+}
+/* Manual override of a contract's program/cadence label — the fix for exactly the
+ * kind of mismatch offerProgramFix() surfaces, or just a direct correction any time.
+ * Only ever edits the contract row itself; never touches already-generated visits
+ * (those are fixed individually via the Edit button on Visit history below). */
+function editContractProgramDlg(contractId, currentProgram, currentVisits, suggestedProgram){
+  const startProgram = suggestedProgram || currentProgram;
+  openDlg(`<h3>Edit program &amp; cadence</h3>
+    <label>Program</label><select id="ecpProg" onchange="$('#ecpN').value=CYCLE_LEN[this.value]||0">${progOpts(startProgram)}</select>
+    <label>Cadence (visits per cycle)</label><input type="number" id="ecpN" min="0" max="24" value="${currentVisits!=null?currentVisits:(CYCLE_LEN[startProgram]||0)}">
+    <p class="small">This only relabels the contract itself — it does not add, remove, or reschedule any already-generated visits.</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveContractProgram(${contractId})">Save</button></div>`);
+}
+async function saveContractProgram(contractId){
+  const program = $('#ecpProg').value;
+  const visits = +$('#ecpN').value;
+  try{
+    await api('PATCH', `/api/contracts/${contractId}`, { program, visits });
+    closeDlg(); await refresh();
+    toast('Contract updated');
+  }catch(e){ uiAlert(e.message||'Update failed'); }
 }
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
 async function loadClientProfile(id){
@@ -1445,7 +1478,7 @@ function clientProfileView(data, notes){
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
   html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th></tr>` +
-    contracts.map(c=>`<tr><td>${esc(c.program||'—')}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
+    contracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
       <td class="num">${c.price?'$'+c.price:'—'}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">completed</span>'}</td>
       <td class="small">${esc(c.source||'—')}</td>
