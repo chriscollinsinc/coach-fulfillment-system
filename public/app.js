@@ -1392,7 +1392,7 @@ async function doContractKeapRelink(contractId){
 }
 function offerProgramFix(contractId, suggestion){
   openDlg(`<h3>Program cadence looks off</h3>
-    <p class="small">Keap's billing on this subscription implies <b>${esc(suggestion.guessed)}</b>, but this contract is currently set to <b>${esc(suggestion.current||'—')}</b>. This is only a suggestion from the billing cycle — it's never applied automatically. Fix it now?</p>
+    <p class="small">Based on ${esc(suggestion.basis||'the billing cycle')}, this subscription looks like <b>${esc(suggestion.guessed)}</b>, but this contract is currently set to <b>${esc(suggestion.current||'—')}</b>. This is only a suggestion — it's never applied automatically. Fix it now?</p>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Leave as-is</button>
     <button class="btn primary" onclick="closeDlg();editContractProgramDlg(${contractId},'${esc(suggestion.current||'').replace(/'/g,"\\'")}',null,'${esc(suggestion.guessed).replace(/'/g,"\\'")}')">Review &amp; fix</button></div>`);
 }

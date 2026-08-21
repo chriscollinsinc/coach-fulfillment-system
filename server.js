@@ -882,6 +882,19 @@ route('GET', /^\/api\/admin\/keap-diag$/, ['admin'], async (req, res) => {
     const r = await keapGet(`/v1/contacts/${knownContactId}?optional_properties=company`);
     out.results.push({ label: `single contact fetch, KNOWN-GOOD id ${knownContactId}`, path: `/v1/contacts/${knownContactId}`, ok: r.ok, status: r.status, json: summarize(r.json) });
   }
+  // End-to-end check against the exact real case in question: resolve subscription
+  // 7202 (Steven Kia) through the list-based lookup, resolve its product name the
+  // same way, and show exactly what program the resync flow would now suggest.
+  const testSubId = new URL(req.url, 'http://x').searchParams.get('testSubId');
+  if(testSubId){
+    const sub = await keapFindSubscriptionById(testSubId, { force: true });
+    if(sub.ok){
+      const suggestion = await suggestProgramForSubscription(sub.json);
+      out.testSubscription = { subId: testSubId, billing_cycle: sub.json.billing_cycle, billing_frequency: sub.json.billing_frequency, product_id: sub.json.product_id, productName: await keapGetProductName(sub.json), suggestion };
+    } else {
+      out.testSubscription = { subId: testSubId, error: sub.error || sub.status };
+    }
+  }
   send(res, 200, out);
 });
 route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], async (req, res, m) => {
@@ -972,14 +985,15 @@ route('POST', /^\/api\/contracts\/(\d+)\/keap-resync$/, ['admin'], async (req, r
     const r = await onSubscriptionChange(contract.keap_subscription_id, 'subscription.edit', { source: 'manual_resync' });
     if(r.error) return err(res, 502, `Keap lookup failed: ${r.error}`);
     log(user.email, 'contract.keap_resync', { contractId: contract.id, subId: contract.keap_subscription_id, statusChanged: !!r.statusChanged, priceChanged: !!r.priceChanged });
-    // Program/cadence is never auto-corrected (see guessProgramFromCycle above) —
-    // just surfaced as a suggestion if Keap's billing shape implies something
-    // different from what's on the contract right now.
+    // Program/cadence is never auto-corrected — just surfaced as a suggestion, and
+    // the product name (e.g. "...and Quarterly Live-in-Drive") is checked first
+    // since that's the real cadence; billing_cycle/frequency reflects how the
+    // subscription is BILLED, which can differ from how often it's actually visited.
     const sub = await keapFindSubscriptionById(contract.keap_subscription_id);
     let programSuggestion = null;
     if(sub.ok && sub.json){
-      const guessed = guessProgramFromCycle(sub.json.billing_cycle, sub.json.billing_frequency);
-      if(guessed !== contract.program) programSuggestion = { guessed, current: contract.program };
+      const suggestion = await suggestProgramForSubscription(sub.json);
+      if(suggestion.guessed !== contract.program) programSuggestion = { guessed: suggestion.guessed, current: contract.program, basis: suggestion.basis };
     }
     send(res, 200, { ok: true, ...r, programSuggestion });
   }catch(e){ err(res, 500, String(e && e.message || e)); }
@@ -1001,13 +1015,13 @@ route('POST', /^\/api\/contracts\/(\d+)\/keap-relink$/, ['admin'], async (req, r
   const oldSubId = contract.keap_subscription_id;
   db.prepare('UPDATE contracts SET keap_subscription_id=? WHERE id=?').run(subId, contract.id);
   log(user.email, 'contract.keap_relink', { contractId: contract.id, oldSubId: oldSubId || null, newSubId: subId });
-  // Program/cadence is never auto-corrected — just surfaced as a suggestion (see
-  // guessProgramFromCycle above) if Keap's billing shape implies something
-  // different from the program already on the contract.
+  // Program/cadence is never auto-corrected — just surfaced as a suggestion, product
+  // name checked first (see suggestProgramForSubscription above) since billing_cycle
+  // reflects payment frequency, not necessarily visit frequency.
   let programSuggestion = null;
   if(found.json){
-    const guessed = guessProgramFromCycle(found.json.billing_cycle, found.json.billing_frequency);
-    if(guessed !== contract.program) programSuggestion = { guessed, current: contract.program };
+    const suggestion = await suggestProgramForSubscription(found.json);
+    if(suggestion.guessed !== contract.program) programSuggestion = { guessed: suggestion.guessed, current: contract.program, basis: suggestion.basis };
   }
   try{
     const r = await onSubscriptionChange(subId, 'subscription.edit', { source: 'manual_relink' });
@@ -1760,7 +1774,11 @@ function isCoachingSubscriptionProduct(name){
 async function keapGetProductName(s){
   const pid = s.product_id || s.subscription_plan_id;
   if(!pid) return '';
-  const r = await keapGet(`/v1/products/${pid}`);
+  // Resolved through the cached list-based lookup (keapFindProductById, defined
+  // below) rather than a direct /v1/products/{id} fetch — see the comment on that
+  // function for why: the single-item GET pattern is already proven broken for
+  // subscriptions on this account, so this never trusts it for products either.
+  const r = await keapFindProductById(pid);
   if(!r.ok) return '';
   const pj = r.json || {};
   return pj.product_name || pj.name || '';
@@ -1844,6 +1862,60 @@ async function onSubscriptionAdd(subId, opts = {}){
   const sub = await keapFindSubscriptionById(subId);
   if(!sub.ok) return { subId, error: `keap lookup failed (${sub.error || sub.status}) — nothing was queued or changed` };
   return queueSubscriptionAsPending({ ...(sub.json || {}), id: subId }, opts);
+}
+/* Same list-based fix as keapFindSubscriptionById above, applied to products — Keap's
+ * single-item "get one product by id" may have the same broken-GET-by-id shape we
+ * already proved for subscriptions, so keapGetProductName below never trusts a direct
+ * /v1/products/{id} fetch; it always resolves through this cached full listing. */
+let _productsCache = { at: 0, products: null };
+async function keapListAllProducts(){
+  const PAGE = 200, MAX_PAGES = 25;
+  const all = [];
+  let offset = 0, hitCap = false;
+  for(let page = 0; page < MAX_PAGES; page++){
+    const r = await keapGet(`/v1/products?limit=${PAGE}&offset=${offset}`);
+    if(!r.ok) return { ok:false, error: `Keap returned an error (HTTP ${r.status || 'network'}) while listing products.` };
+    const batch = (r.json && (r.json.products || r.json.results)) || (Array.isArray(r.json) ? r.json : []);
+    all.push(...batch);
+    if(batch.length < PAGE) break;
+    offset += PAGE;
+    if(page === MAX_PAGES - 1) hitCap = true;
+  }
+  return { ok:true, products: all, hitCap };
+}
+async function keapFindProductById(productId, opts = {}){
+  if(!productId) return { ok:false, status:400, error:'no product id' };
+  const now = Date.now();
+  if(opts.force || !_productsCache.products || (now - _productsCache.at) > 60000){
+    const listing = await keapListAllProducts();
+    if(!listing.ok) return { ok:false, error: listing.error };
+    _productsCache = { at: now, products: listing.products };
+  }
+  const match = _productsCache.products.find(p => String(p.id) === String(productId));
+  if(!match){
+    if(!opts._retried) return keapFindProductById(productId, { force: true, _retried: true });
+    return { ok:false, status: 404, error: 'not found in Keap products list' };
+  }
+  return { ok:true, status: 200, json: match };
+}
+/* Product names encode the real visit cadence in words (e.g. "...and Quarterly
+ * Live-in-Drive") — that's the authoritative source, since a subscription can be
+ * BILLED monthly for a program that's actually visited quarterly (billing_cycle
+ * reflects payment frequency, not visit frequency). Only falls back to the
+ * billing-cycle guess when the product name has no cadence keyword at all. */
+function programFromProductName(name){
+  const n = String(name || '').toLowerCase();
+  if(n.includes('bi-annual') || n.includes('biannual') || n.includes('semi-annual')) return 'Bi-Annual';
+  if(n.includes('semi-monthly') || n.includes('semimonthly')) return 'Semi-Monthly';
+  if(n.includes('quarterly')) return 'Quarterly';
+  if(n.includes('monthly')) return 'Monthly';
+  return null;
+}
+async function suggestProgramForSubscription(sub){
+  const name = await keapGetProductName(sub);
+  const fromName = programFromProductName(name);
+  if(fromName) return { guessed: fromName, basis: `the product name ("${name}")` };
+  return { guessed: guessProgramFromCycle(sub.billing_cycle, sub.billing_frequency), basis: 'the billing cycle (no cadence keyword found in the product name)' };
 }
 
 /* ---------- backfill sweep: catch anything the webhook ever missed ----------
