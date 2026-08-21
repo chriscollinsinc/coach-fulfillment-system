@@ -233,7 +233,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -2030,6 +2030,10 @@ function adminDataView(){
   <div class="panel"><h2>Recently deleted</h2>
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
   <div id="deletedOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Duplicate visits</h2>
+  <p class="small" style="margin-bottom:12px">Finds not-yet-scheduled visits sitting on the same contract as an already-completed visit with the exact same cycle number (e.g. two "2 of 4"s) — that combination is always a stray leftover, most likely from the original spreadsheet import, never a legitimate visit. This is read-only until you click Clean up below, and only ever deletes visits matching this exact pattern — nothing else.</p>
+  <div class="controls"><button class="btn" onclick="loadDuplicateVisitsAudit()">Refresh</button></div>
+  <div id="dupVisitsOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Keap webhook activity</h2>
   <p class="small" style="margin-bottom:12px">Diagnostic tool for "I added something in Keap and it never showed up." <b>Recent events</b> is every raw hit Keap has sent this app, whether it was acted on or not — if a store you added isn't in here at all, Keap never reached this app for it (check the subscription actually exists in Keap, not just a contact). <b>Hook status</b> checks live with Keap whether the <code>subscription.add/edit/delete</code> hooks are registered and Verified against this app's URL right now. <b>Backfill</b> below is the fix for missed webhooks — it checks every subscription in Keap (not just recent ones — Keap's own date filters aren't reliable enough to trust) against what this app already knows, and queues anything untracked, including ones that start in the future.</p>
   <div class="controls"><button class="btn" onclick="loadKeapEvents()">Refresh events</button>
@@ -2065,6 +2069,27 @@ async function loadCancelledContracts(){
       rows.map(r=>`<tr><td>${esc(r.client_name)}</td><td>${esc(r.team||'—')}</td><td>${esc(r.program||'—')}</td></tr>`).join('') + `</table>`
       : `<p>None yet.</p>`;
   }catch(e){ $('#cancelledOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function loadDuplicateVisitsAudit(){
+  try{
+    const r = await api('GET','/api/admin/duplicate-visits-audit');
+    if(!r.count){ $('#dupVisitsOut').innerHTML = '<p>None found. ✔</p>'; return; }
+    $('#dupVisitsOut').innerHTML = `<p><b>${r.count} stray visit(s)</b> across ${r.contracts.length} contract(s):</p>
+      <table><tr><th>Client</th><th>Program</th><th>Duplicate cycles</th></tr>` +
+      r.contracts.map(c=>`<tr><td><a onclick="openClientProfile(${c.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.client)}</a></td>
+        <td>${esc(c.program||'—')}</td>
+        <td class="small">${c.duplicates.map(d=>`${esc(d.cycle)} (due ${fmt(d.due)})`).join(', ')}</td></tr>`).join('') +
+      `</table>
+      <div class="controls" style="margin-top:10px"><button class="btn danger" onclick="cleanupDuplicateVisits(${r.count})">Clean up all ${r.count} stray visit(s)</button></div>`;
+  }catch(e){ $('#dupVisitsOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function cleanupDuplicateVisits(expectedCount){
+  if(!(await uiConfirm(`Delete ${expectedCount} stray duplicate visit(s) across every client? Each one is a not-yet-scheduled visit whose cycle number is already completed under the same contract — this can't be undone.`,'Clean up'))) return;
+  try{
+    const r = await api('POST','/api/admin/duplicate-visits-cleanup',{});
+    toast(`Deleted ${r.deleted} stray visit(s) across ${r.affectedContracts.length} contract(s)`);
+    await refresh(); await loadDuplicateVisitsAudit();
+  }catch(e){ uiAlert(e.message||'Cleanup failed'); }
 }
 async function loadClientHistoryPeriods(){
   try{

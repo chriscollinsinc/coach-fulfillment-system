@@ -1127,6 +1127,24 @@ route('POST', /^\/api\/contracts\/(\d+)\/regenerate$/, ['admin'], (req, res, m, 
   }
   if(!anchorDate) return err(res, 400, 'This contract has no start date — set an anchor date (or a first pay date) to regenerate from.');
   if(!/^\d{4}-\d{2}-\d{2}$/.test(anchorDate)) return err(res, 400, 'Anchor date must be YYYY-MM-DD');
+  // Guard against exactly the failure mode that produced the Bowman Chevrolet
+  // duplicates: regenerating a contract whose cycle numbers (e.g. "2 of 4") are
+  // ALREADY completed just creates a second, stray, never-scheduled copy of the
+  // same slot — it can never be a legitimate correction, only a duplicate. Block
+  // by default; the UI surfaces this as a hard stop rather than a silently-created
+  // mess, and a caller can pass force:true only if they've confirmed this really
+  // is intentional (which in practice it never should be — completed cycles need
+  // a NEW contract for a renewal, not a regenerate on the old one).
+  const completedCycles = db.prepare('SELECT cycle, due FROM visits WHERE contract_id=? AND completed=1').all(contract.id);
+  const completedCycleSet = new Set(completedCycles.map(r => r.cycle));
+  const collisions = [];
+  for(let k = 0; k < n; k++){
+    const label = `${k+1} of ${n}`;
+    if(completedCycleSet.has(label)) collisions.push(label);
+  }
+  if(collisions.length && !body.force){
+    return err(res, 409, `This contract already has a COMPLETED visit for ${collisions.join(', ')} — regenerating would create duplicate, never-scheduled copies of already-finished cycles, not fix anything. If this client genuinely renewed, that needs a new contract, not a regenerate on this one. Pass force:true only if you're certain this is intentional.`);
+  }
   // Same team every not-completed visit under this contract already carries — a
   // contract's visits are always created on one team, so the first row's team is as
   // good as any; fall back to the caller's own team only if none exist yet.
@@ -1178,6 +1196,50 @@ route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) 
       (SELECT v.team FROM visits v WHERE v.contract_id=c.id ORDER BY v.id LIMIT 1) AS team
     FROM contracts c JOIN clients cl ON cl.id=c.client_id
     WHERE c.status='cancelled' ORDER BY c.id DESC LIMIT 50`).all());
+});
+/* System-wide duplicate-visit finder — the Bowman Chevrolet of Clinton case
+ * (found 2026-08-21) generalized: a not-completed, never-scheduled visit sitting
+ * under the same contract as an already-COMPLETED visit with the identical cycle
+ * label (e.g. two "2 of 4"s). That combination can never be legitimate — a cycle
+ * label only repeats on a contract if something (almost certainly the original
+ * sheet-import reconstruction, which infers contract boundaries from cycle-reset
+ * heuristics — see migratePhase1 in db.js) generated a stray duplicate of a slot
+ * that was already fulfilled. Deliberately narrow/conservative: it does NOT flag
+ * a not-completed visit just for sharing a contract with completed ones (that's
+ * completely normal — most active contracts look like that) — only when its
+ * exact cycle label is duplicated by a completed sibling. Read-only; the actual
+ * deletion happens only via the confirm step below, and re-derives this same
+ * query itself rather than trusting a client-submitted id list. */
+function findDuplicateVisits(){
+  return db.prepare(`
+    SELECT DISTINCT v1.id AS dupId, v1.contract_id, v1.client_id, v1.client, v1.program, v1.cycle, v1.due AS dupDue
+    FROM visits v1
+    JOIN visits v2 ON v2.contract_id = v1.contract_id AND v2.cycle = v1.cycle AND v2.completed = 1 AND v2.id != v1.id
+    WHERE v1.completed = 0 AND v1.cal_week IS NULL AND v1.contract_id IS NOT NULL
+    ORDER BY v1.contract_id, v1.cycle
+  `).all();
+}
+route('GET', /^\/api\/admin\/duplicate-visits-audit$/, ['admin'], (req, res) => {
+  const dups = findDuplicateVisits();
+  const byContract = {};
+  for(const d of dups){
+    (byContract[d.contract_id] ||= { contractId: d.contract_id, clientId: d.client_id, client: d.client, program: d.program, duplicates: [] })
+      .duplicates.push({ visitId: d.dupId, cycle: d.cycle, due: d.dupDue });
+  }
+  send(res, 200, { count: dups.length, contracts: Object.values(byContract) });
+});
+route('POST', /^\/api\/admin\/duplicate-visits-cleanup$/, ['admin'], (req, res, m, body, user) => {
+  const dups = findDuplicateVisits();
+  const del = db.prepare('DELETE FROM visits WHERE id=?');
+  let deleted = 0;
+  const affected = new Set();
+  for(const d of dups){
+    del.run(d.dupId);
+    deleted++;
+    affected.add(`${d.client} (contract #${d.contract_id})`);
+  }
+  log(user.email, 'admin.duplicate_visits_cleanup', { deleted, affected: [...affected] });
+  send(res, 200, { ok: true, deleted, affectedContracts: [...affected] });
 });
 
 /* ----- Keap webhook diagnostics (admin only) -----
