@@ -1349,6 +1349,42 @@ async function clearClientNotice(id){
   await refresh();
   toast('Notice cleared');
 }
+/* Per-contract Keap resync/relink — see the "Keap link" column in the Assignment
+ * &amp; Keap details table. Resync re-checks the currently-linked subscription;
+ * Relink re-points the contract at a different subscription ID entirely (for when
+ * the link itself is wrong, not just stale) and resyncs from the corrected one. */
+async function contractKeapResync(contractId){
+  try{
+    const r = await api('POST', `/api/contracts/${contractId}/keap-resync`, {});
+    const parts = [];
+    if(r.statusChanged) parts.push('status updated');
+    if(r.priceChanged) parts.push('price updated');
+    if(r.found===false) parts.push('no matching contract found on Keap\'s side');
+    await refresh();
+    toast(parts.length ? `Resynced — ${parts.join(', ')}` : 'Resynced — no changes needed');
+  }catch(e){ uiAlert(e.message||'Resync failed'); }
+}
+function contractKeapRelinkDlg(contractId, currentSubId){
+  openDlg(`<h3>Link to Keap subscription</h3>
+    <p class="small">${currentSubId?`Currently linked to subscription <span class="mono">${esc(currentSubId)}</span>. `:''}Enter the correct Keap subscription ID for this contract. It's validated against Keap before anything changes, and price/status is resynced from it immediately after linking.</p>
+    <label>Keap subscription ID</label><input id="krSubId" placeholder="e.g. 7304">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="doContractKeapRelink(${contractId})">Link &amp; resync</button></div>`);
+}
+async function doContractKeapRelink(contractId){
+  const subscriptionId = $('#krSubId').value.trim();
+  if(!subscriptionId){ uiAlert('Subscription ID required'); return; }
+  try{
+    const r = await api('POST', `/api/contracts/${contractId}/keap-relink`, { subscriptionId });
+    closeDlg();
+    const parts = [];
+    if(r.statusChanged) parts.push('status updated');
+    if(r.priceChanged) parts.push('price updated');
+    if(r.resyncError) parts.push(`resync afterward failed: ${r.resyncError}`);
+    await refresh();
+    toast(`Linked to subscription ${subscriptionId}${parts.length?' — '+parts.join(', '):''}`);
+  }catch(e){ uiAlert(e.message||'Link failed'); }
+}
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
 async function loadClientProfile(id){
   try{
@@ -1408,21 +1444,25 @@ function clientProfileView(data, notes){
   } else {
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
-  html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th></tr>` +
+  html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th></tr>` +
     contracts.map(c=>`<tr><td>${esc(c.program||'—')}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
       <td class="num">${c.price?'$'+c.price:'—'}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">completed</span>'}</td>
-      <td class="small">${esc(c.source||'—')}</td></tr>`).join('') +
+      <td class="small">${esc(c.source||'—')}</td>
+      <td class="small">${c.keap_subscription_id?`<span class="mono">${esc(c.keap_subscription_id)}</span>`:'<span style="color:var(--muted)">not linked</span>'}
+        ${D.user.role==='admin' ? `<div style="margin-top:4px;white-space:nowrap">${c.keap_subscription_id?`<button class="btn tiny" onclick="contractKeapResync(${c.id})">Resync</button> `:''}<button class="btn tiny" onclick="contractKeapRelinkDlg(${c.id},'${esc(c.keap_subscription_id||'').replace(/'/g,"\\'")}')">${c.keap_subscription_id?'Change link':'Link to Keap'}</button></div>` : ''}
+      </td></tr>`).join('') +
     `</table>
-    <p class="small" style="margin-top:8px">Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span>${activeContract&&activeContract.keap_subscription_id?` · Active subscription ID: <span class="mono">${esc(activeContract.keap_subscription_id)}</span>`:''}</p>
+    <p class="small" style="margin-top:8px">Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span></p>
   </div>`;
 
-  html += `<div class="panel"><h2>Visit history</h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th></tr>` +
+  html += `<div class="panel"><h2>Visit history</h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?'<span class="pill p-done">completed</span>'
         : v.cal_week?(v.due&&v.due<TODAY?'<span class="pill p-due">late — on calendar</span>':'<span class="pill p-cal">on calendar</span>')
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
-      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td></tr>`;
+      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td>
+        <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
     }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 

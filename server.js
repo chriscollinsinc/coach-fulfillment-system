@@ -940,6 +940,47 @@ route('POST', /^\/api\/keap\/sync$/, ['admin'], (req, res, m, body, user) => {
     .then(summary => send(res, 200, { ok: true, ...summary }))
     .catch(e => { console.error('keap sync failed:', e); err(res, 500, 'Sync failed: ' + String(e && e.message || e)); });
 });
+/* Per-contract version of the button above, from a client's own profile — same
+ * underlying check (re-fetch the linked subscription, update price/status if it's
+ * drifted), just scoped to one contract instead of sweeping every Keap-linked
+ * contract in the system. */
+route('POST', /^\/api\/contracts\/(\d+)\/keap-resync$/, ['admin'], async (req, res, m, body, user) => {
+  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
+  if(!contract) return err(res, 404, 'not found');
+  if(!contract.keap_subscription_id) return err(res, 400, `This contract isn't linked to Keap yet — use "Link to Keap" to attach a subscription ID first.`);
+  try{
+    const r = await onSubscriptionChange(contract.keap_subscription_id, 'subscription.edit', { source: 'manual_resync' });
+    if(r.error) return err(res, 502, `Keap lookup failed: ${r.error}`);
+    log(user.email, 'contract.keap_resync', { contractId: contract.id, subId: contract.keap_subscription_id, statusChanged: !!r.statusChanged, priceChanged: !!r.priceChanged });
+    send(res, 200, { ok: true, ...r });
+  }catch(e){ err(res, 500, String(e && e.message || e)); }
+});
+/* Re-point a contract at a different Keap subscription ID — for when the link
+ * itself is wrong, not just stale. Validates the new ID is real (via the same
+ * list-based lookup everything else uses — see keapFindSubscriptionById) and isn't
+ * already claimed by another contract before touching anything, then relinks and
+ * immediately resyncs price/status from the corrected subscription in one step. */
+route('POST', /^\/api\/contracts\/(\d+)\/keap-relink$/, ['admin'], async (req, res, m, body, user) => {
+  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
+  if(!contract) return err(res, 404, 'not found');
+  const subId = String(body.subscriptionId || '').trim();
+  if(!subId) return err(res, 400, 'Subscription ID required');
+  const conflict = db.prepare('SELECT c.id, cl.name FROM contracts c JOIN clients cl ON cl.id=c.client_id WHERE c.keap_subscription_id=? AND c.id!=?').get(subId, contract.id);
+  if(conflict) return err(res, 409, `Subscription ${subId} is already linked to ${conflict.name}'s contract (#${conflict.id}) — unlink it there first.`);
+  const found = await keapFindSubscriptionById(subId, { force: true });
+  if(!found.ok) return err(res, 400, `Keap doesn't have a subscription with ID ${subId} (${found.error || found.status}). Double-check the ID in Keap and try again.`);
+  const oldSubId = contract.keap_subscription_id;
+  db.prepare('UPDATE contracts SET keap_subscription_id=? WHERE id=?').run(subId, contract.id);
+  log(user.email, 'contract.keap_relink', { contractId: contract.id, oldSubId: oldSubId || null, newSubId: subId });
+  try{
+    const r = await onSubscriptionChange(subId, 'subscription.edit', { source: 'manual_relink' });
+    send(res, 200, { ok: true, relinked: true, oldSubId: oldSubId || null, newSubId: subId, ...r });
+  }catch(e){
+    // The relink itself already committed — report the resync failure but don't
+    // pretend the whole operation failed, since the link change did take effect.
+    send(res, 200, { ok: true, relinked: true, oldSubId: oldSubId || null, newSubId: subId, resyncError: String(e && e.message || e) });
+  }
+});
 route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) => {
   send(res, 200, db.prepare(`
     SELECT c.id, c.program, c.status, cl.name AS client_name,
