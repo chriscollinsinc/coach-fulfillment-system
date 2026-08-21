@@ -895,6 +895,22 @@ route('GET', /^\/api\/admin\/keap-diag$/, ['admin'], async (req, res) => {
       out.testSubscription = { subId: testSubId, error: sub.error || sub.status };
     }
   }
+  // Investigating "first pay date" for the 90-day due-date rule: does Keap expose
+  // actual order/payment history via list endpoints (already proven reliable for
+  // subscriptions/products/contacts), and if so what do the date fields look like?
+  // Nothing downstream depends on this yet — this is purely to observe real shapes
+  // against a known contact before writing any code that assumes a field name.
+  const ordersList = await keapGet('/v1/orders?limit=1');
+  out.results.push({ label: 'orders list (no filter)', path: '/v1/orders?limit=1', ok: ordersList.ok, status: ordersList.status, json: summarize(ordersList.json) });
+  const txList = await keapGet('/v1/transactions?limit=1');
+  out.results.push({ label: 'transactions list (no filter)', path: '/v1/transactions?limit=1', ok: txList.ok, status: txList.status, json: summarize(txList.json) });
+  const testContactId = new URL(req.url, 'http://x').searchParams.get('testContactId');
+  if(testContactId){
+    const ordersForContact = await keapGet(`/v1/orders?contact_id=${encodeURIComponent(testContactId)}&limit=50`);
+    out.testContactOrders = { contactId: testContactId, path: `/v1/orders?contact_id=${testContactId}&limit=50`, ok: ordersForContact.ok, status: ordersForContact.status, json: summarize(ordersForContact.json) };
+    const txForContact = await keapGet(`/v1/transactions?contact_id=${encodeURIComponent(testContactId)}&limit=50`);
+    out.testContactTransactions = { contactId: testContactId, path: `/v1/transactions?contact_id=${testContactId}&limit=50`, ok: txForContact.ok, status: txForContact.status, json: summarize(txForContact.json) };
+  }
   send(res, 200, out);
 });
 route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], async (req, res, m) => {
