@@ -1072,6 +1072,48 @@ route('PATCH', /^\/api\/contracts\/(\d+)$/, ['admin'], (req, res, m, body, user)
   log(user.email, 'contract.edit', { contractId: contract.id, ...f, oldProgram: contract.program, oldVisits: contract.visits });
   send(res, 200, { ok: true });
 });
+/* Regenerate a contract's remaining visit schedule from scratch on its CURRENT
+ * program/cadence — for when the contract's program was corrected (e.g. Monthly ->
+ * Quarterly) after visits had already been generated under the old cadence, or when
+ * an anchor date needs to move and the rest of the schedule should follow it (the
+ * "butterfly effect" — pass a new anchorDate to re-space everything from there).
+ * Completed visits are NEVER touched — only not-yet-completed visits under this
+ * contract are deleted and replaced. The anchor date defaults to the contract's own
+ * start_date, but can be overridden per-call; either way it's saved back onto the
+ * contract so "Started" in the UI always reflects the schedule actually on the board.
+ * NOTE: this does not (yet) implement the 90-days-after-first-Keap-charge rule for
+ * brand-new contracts — that's still pending confirmation of which Keap field/list
+ * endpoint reliably exposes an actual charge date. Until then, the anchor is always
+ * either the contract's existing start_date or whatever date is explicitly passed in. */
+route('POST', /^\/api\/contracts\/(\d+)\/regenerate$/, ['admin'], (req, res, m, body, user) => {
+  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
+  if(!contract) return err(res, 404, 'not found');
+  const client = db.prepare('SELECT name FROM clients WHERE id=?').get(contract.client_id);
+  if(!client) return err(res, 404, 'client not found');
+  const n = +contract.visits;
+  if(!Number.isFinite(n) || n <= 0) return err(res, 400, `${contract.program} has no fixed visit count to schedule — nothing to regenerate.`);
+  let anchorDate = body.anchorDate !== undefined && body.anchorDate !== null && body.anchorDate !== ''
+    ? String(body.anchorDate).trim() : (contract.start_date || null);
+  if(!anchorDate) return err(res, 400, 'This contract has no start date — set an anchor date to regenerate from.');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(anchorDate)) return err(res, 400, 'Anchor date must be YYYY-MM-DD');
+  // Same team every not-completed visit under this contract already carries — a
+  // contract's visits are always created on one team, so the first row's team is as
+  // good as any; fall back to the caller's own team only if none exist yet.
+  const teamRow = db.prepare(`SELECT team FROM visits WHERE contract_id=? ORDER BY id LIMIT 1`).get(contract.id);
+  const team = (teamRow && teamRow.team) || user.team || null;
+  const deletedVisits = db.prepare('DELETE FROM visits WHERE contract_id=? AND completed=0').run(contract.id).changes;
+  const iv = INTERVAL[contract.program] ?? 3;
+  const ids = [];
+  for(let k = 0; k < n; k++){
+    const d = new Date(anchorDate + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
+    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(client.name, contract.program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, 'app', new Date().toISOString().slice(0,10), contract.client_id, contract.id);
+    ids.push(Number(r.lastInsertRowid));
+  }
+  db.prepare('UPDATE contracts SET start_date=? WHERE id=?').run(anchorDate, contract.id);
+  log(user.email, 'contract.regenerate', { contractId: contract.id, client: client.name, program: contract.program, anchorDate, deletedVisits, createdVisits: n });
+  send(res, 200, { ok: true, deletedVisits, createdVisits: n, anchorDate });
+});
 /* Delete a contract outright — for duplicates (e.g. a leftover sheet-import row
  * sitting alongside the correctly Keap-linked one) or ones created by mistake.
  * Completed visit history is never destroyed: a completed visit generated under
