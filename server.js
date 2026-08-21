@@ -1200,22 +1200,30 @@ route('GET', /^\/api\/keap\/cancelled-contracts$/, ['admin','lead'], (req, res) 
 /* System-wide duplicate-visit finder — the Bowman Chevrolet of Clinton case
  * (found 2026-08-21) generalized: a not-completed, never-scheduled visit sitting
  * under the same contract as an already-COMPLETED visit with the identical cycle
- * label (e.g. two "2 of 4"s). That combination can never be legitimate — a cycle
- * label only repeats on a contract if something (almost certainly the original
- * sheet-import reconstruction, which infers contract boundaries from cycle-reset
- * heuristics — see migratePhase1 in db.js) generated a stray duplicate of a slot
- * that was already fulfilled. Deliberately narrow/conservative: it does NOT flag
- * a not-completed visit just for sharing a contract with completed ones (that's
- * completely normal — most active contracts look like that) — only when its
- * exact cycle label is duplicated by a completed sibling. Read-only; the actual
- * deletion happens only via the confirm step below, and re-derives this same
- * query itself rather than trusting a client-submitted id list. */
+ * label (e.g. two "2 of 4"s), landing close in time to it.
+ *
+ * IMPORTANT — confirmed against the Coach Master File and directly from Mike
+ * 2026-08-21: a contract's "k of n" cycle is NOT a one-time batch. It repeats
+ * forever at the same cadence (wrapping back to "1 of n" every n visits) until
+ * the client cancels or the program changes. That means the SAME cycle label
+ * legitimately recurs roughly every n*interval months for the life of a healthy,
+ * ongoing contract — e.g. Bowman Chevrolet's real "1 of 4" for cycle 2 (Sep 2025)
+ * is a full year after cycle 1's real, completed "1 of 4" (Sep 2024), and that's
+ * correct, not a duplicate. The ORIGINAL version of this query didn't check
+ * timing at all, so it would have wrongly flagged that legitimate year-later
+ * repeat. The fix: only flag a cycle-label match when the two due dates are
+ * within 45 days of each other — a real duplicate (like the stray same-quarter
+ * copies this was built to catch) sits days apart, never anywhere near a full
+ * cycle length apart. Read-only; the actual deletion happens only via the
+ * confirm step below, and re-derives this same query itself rather than trusting
+ * a client-submitted id list. */
 function findDuplicateVisits(){
   return db.prepare(`
     SELECT DISTINCT v1.id AS dupId, v1.contract_id, v1.client_id, v1.client, v1.program, v1.cycle, v1.due AS dupDue
     FROM visits v1
     JOIN visits v2 ON v2.contract_id = v1.contract_id AND v2.cycle = v1.cycle AND v2.completed = 1 AND v2.id != v1.id
     WHERE v1.completed = 0 AND v1.cal_week IS NULL AND v1.contract_id IS NOT NULL
+      AND ABS(julianday(v1.due) - julianday(v2.due)) <= 45
     ORDER BY v1.contract_id, v1.cycle
   `).all();
 }
@@ -1390,10 +1398,122 @@ function snapshotClientHealth(){
   for(const level of Object.values(map)) counts[level] = (counts[level] || 0) + 1;
   return { counts, dropped, improved, comparedTo: prevDate || null };
 }
+
+/* ---------- rolling schedule generator ----------
+ * Confirmed with Mike 2026-08-21 (against the Coach Master File — Bowman
+ * Chevrolet of Clinton was the case that surfaced this): a contract's "k of n"
+ * cycle is not a one-time batch — it repeats forever at the program's cadence,
+ * wrapping back to "1 of n" every n visits, until the client cancels or the
+ * program changes. Nothing in the app was keeping that repetition going once the
+ * most recently generated batch ran out, so a long-lived contract's visits would
+ * just silently stop appearing (Bowman Chevrolet had nothing past Dec 2025).
+ * This keeps a rolling ROLLING_MONTHS-out window of future visits populated for
+ * every active, fixed-cadence contract — "visits for a calendar year should be
+ * visible from today's date," per Mike's own framing. Purely additive: it reads
+ * whatever the contract's own most recent visit already is (completed or not)
+ * and only ever adds visits past that point, at the program's interval, wrapping
+ * the cycle counter — never deletes or edits an existing row, so it's safe to run
+ * unattended every night. It intentionally doesn't know or care about program
+ * CHANGE history — once the reanchor-on-Keap-cadence-change feature exists (the
+ * next phase), this will just keep counting forward from whatever fresh anchor
+ * that produces, the same as it does today from a plain completed visit. */
+const ROLLING_MONTHS = 12;
+/* dryRun:true computes the exact same list without writing anything — used both
+ * by the preview endpoint (so this can be reviewed before it ever touches real
+ * data or a coach's in-progress manual audit) and by the nightly job itself,
+ * which currently runs in dry-run/report-only mode until Mike has reviewed a
+ * real preview and explicitly turns on auto-apply — see runNightlyMaintenance. */
+function extendRollingSchedule(contract, opts = {}){
+  const dryRun = !!opts.dryRun;
+  const n = +contract.visits;
+  const iv = INTERVAL[contract.program] ?? 0;
+  // Coaching Only (visits=0), LID (Purchase) (iv=0, genuinely one-and-done), or
+  // any contract with an unrecognized/blank program — nothing to repeat.
+  if(!Number.isFinite(n) || n <= 0 || !iv) return { created: 0, visits: [] };
+  const last = db.prepare('SELECT due, cycle, team FROM visits WHERE contract_id=? ORDER BY due DESC, id DESC LIMIT 1').get(contract.id);
+  let nextDue, nextK, team;
+  if(last && last.due){
+    const parsed = /^(\d+)\s*of\s*(\d+)/i.exec(last.cycle || '');
+    const k = parsed ? +parsed[1] : n; // unparsable cycle label — safest assumption is it was the last slot in its cycle
+    nextK = (k % n) + 1;
+    const d = new Date(last.due + 'T12:00:00'); d.setMonth(d.getMonth() + iv);
+    nextDue = d.toISOString().slice(0, 10);
+    team = last.team || null;
+  } else {
+    // No visits at all yet under this contract (shouldn't normally happen —
+    // create/regenerate always seed at least one — but don't skip silently).
+    nextK = 1;
+    nextDue = contract.start_date || new Date().toISOString().slice(0, 10);
+    team = null;
+  }
+  if(!team){
+    const teamRow = db.prepare('SELECT team FROM visits WHERE contract_id=? ORDER BY id LIMIT 1').get(contract.id);
+    team = (teamRow && teamRow.team) || null;
+  }
+  const horizon = new Date(); horizon.setMonth(horizon.getMonth() + ROLLING_MONTHS);
+  const horizonStr = horizon.toISOString().slice(0, 10);
+  const visits = [];
+  let guard = 0; // safety valve, not a real cap — see note below if it's ever hit
+  while(nextDue <= horizonStr && guard < 60){
+    const cycle = `${nextK} of ${n}`;
+    if(dryRun){
+      visits.push({ due: nextDue, cycle });
+    } else {
+      const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id)
+        VALUES(?,?,?,?,?,?,?,?,?)`).run(contract.client_name, contract.program, cycle, nextDue, team, 'app', new Date().toISOString().slice(0, 10), contract.client_id, contract.id);
+      visits.push({ id: Number(r.lastInsertRowid), due: nextDue, cycle });
+    }
+    nextK = (nextK % n) + 1;
+    const d = new Date(nextDue + 'T12:00:00'); d.setMonth(d.getMonth() + iv);
+    nextDue = d.toISOString().slice(0, 10);
+    guard++;
+  }
+  // guard===60 would mean a contract was over a decade stale — surfaced, not
+  // silently truncated, so it gets a human look rather than quietly staying short.
+  return { created: visits.length, visits, cappedAt60: guard >= 60 };
+}
+function sweepRollingSchedule(opts = {}){
+  const contracts = db.prepare(`
+    SELECT c.*, cl.name AS client_name FROM contracts c
+    JOIN clients cl ON cl.id = c.client_id
+    WHERE c.status='active' AND cl.deleted_at IS NULL AND cl.status != 'cancelled'
+  `).all();
+  let totalCreated = 0;
+  const perClient = [];
+  const capped = [];
+  for(const c of contracts){
+    const r = extendRollingSchedule(c, opts);
+    if(r.created){ totalCreated += r.created; perClient.push({ client: c.client_name, clientId: c.client_id, contractId: c.id, program: c.program, created: r.created, visits: r.visits }); }
+    if(r.cappedAt60) capped.push(`${c.client_name} (contract #${c.id})`);
+  }
+  return { dryRun: !!opts.dryRun, contractsChecked: contracts.length, totalCreated, perClient, capped };
+}
+// Preview: computes the full list without writing anything — review this before
+// ever applying it, and before relying on it to judge whether a coach's manual
+// audit still needs to happen.
+route('GET', /^\/api\/admin\/rolling-schedule\/preview$/, ['admin'], (req, res) => {
+  send(res, 200, sweepRollingSchedule({ dryRun: true }));
+});
+// Apply: the only route that actually writes. Deliberately separate from preview
+// and from the nightly job (which stays dry-run-only — see runNightlyMaintenance)
+// so nothing gets created without an explicit, reviewed action.
+route('POST', /^\/api\/admin\/rolling-schedule\/run-now$/, ['admin'], (req, res, m, body, user) => {
+  const r = sweepRollingSchedule({ dryRun: false });
+  log(user.email, 'admin.rolling_schedule_run', { contractsChecked: r.contractsChecked, totalCreated: r.totalCreated, capped: r.capped });
+  send(res, 200, r);
+});
+
 async function runNightlyMaintenance(actorEmail){
   const summary = { startedAt: new Date().toISOString() };
   try{ summary.sync = await keapSyncAllLinkedContracts(actorEmail); }
   catch(e){ summary.sync = { error: String(e && e.message || e) }; }
+  // Dry-run only for now, by design: Mike asked to see the real list before this
+  // ever auto-applies against live data, since coaches are actively doing a
+  // manual audit and this shouldn't create visits underneath that work
+  // unreviewed. Flip to {dryRun:false} once he's reviewed a preview and says go —
+  // until then this only reports what it WOULD do, same as everything else here.
+  try{ summary.rollingSchedule = sweepRollingSchedule({ dryRun: true }); }
+  catch(e){ summary.rollingSchedule = { error: String(e && e.message || e) }; }
   try{ summary.revenue = recordRevenueSnapshot(); }
   catch(e){ summary.revenue = { error: String(e && e.message || e) }; }
   try{ summary.purge = purgeOldSoftDeletes(); }
@@ -1423,6 +1543,7 @@ async function runNightlyMaintenance(actorEmail){
       `Coach Fulfillment System — nightly summary for ${new Date().toISOString().slice(0,10)}`,
       '',
       `Keap sync: ${summary.sync.error ? 'FAILED — ' + summary.sync.error : `checked ${summary.sync.checked}, price updated ${summary.sync.priceChanged}, status changed ${summary.sync.statusChanged}, errors ${syncErrors}`}`,
+      `Rolling schedule (PREVIEW ONLY — not yet applied): ${summary.rollingSchedule.error ? 'FAILED — ' + summary.rollingSchedule.error : `would add ${summary.rollingSchedule.totalCreated} visit(s) across ${summary.rollingSchedule.perClient.length} contract(s) to keep the next ${ROLLING_MONTHS} months populated (${summary.rollingSchedule.contractsChecked} active contract(s) checked) — review at Admin → Data → Rolling schedule before applying`}`,
       `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
       `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
       `Database backup: ${summary.backup.ok ? `sent (${Math.round((summary.backup.sizeBytes||0)/1024)} KB)` : 'FAILED — ' + (summary.backup.error || 'see results')}`,
@@ -1438,6 +1559,9 @@ async function runNightlyMaintenance(actorEmail){
     if(summary.holds && !summary.holds.error){
       if(summary.holds.expired.length) lines.push(`Prospect holds auto-released (expired): ${summary.holds.expired.join(', ')}`);
       if(summary.holds.expiring.length) lines.push(`Prospect holds expiring within 7 days: ${summary.holds.expiring.join(', ')}`);
+    }
+    if(summary.rollingSchedule && !summary.rollingSchedule.error && summary.rollingSchedule.capped.length){
+      lines.push(`Rolling schedule hit its per-run safety cap (over a decade stale) for: ${summary.rollingSchedule.capped.join(', ')} — needs a manual look, not fully caught up yet.`);
     }
     if(summary.health && !summary.health.error){
       const h = summary.health;

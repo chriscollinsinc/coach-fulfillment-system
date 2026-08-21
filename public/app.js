@@ -2015,7 +2015,7 @@ function adminDataView(){
   board on purpose — clear or reassign them from the Inventory screen once you've confirmed.</p>
   <div id="cancelledOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Backups &amp; nightly maintenance</h2>
-  <p class="small" style="margin-bottom:12px">Every night (around 3-4am Eastern) the app checks Keap-linked contracts for drift, snapshots the revenue total, purges any client past its 30-day
+  <p class="small" style="margin-bottom:12px">Every night (around 3-4am Eastern) the app checks Keap-linked contracts for drift, keeps every active contract's repeating cycle populated 12 months out (never touching completed visits or deleting anything — purely adds what's missing), snapshots the revenue total, purges any client past its 30-day
   delete window, and emails every admin a full database backup (a gzipped copy of the actual database file) plus a summary — overdue visits, stale Pending Clients items, and whether the backup went out.
   There's no separate storage location — the emailed attachment (or a direct download below) <b>is</b> the backup; save a copy of it somewhere you control if you want a copy outside of email.
   To restore: gunzip the file and replace the running server's database file, then restart the app.</p>
@@ -2030,6 +2030,11 @@ function adminDataView(){
   <div class="panel"><h2>Recently deleted</h2>
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
   <div id="deletedOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Rolling schedule</h2>
+  <p class="small" style="margin-bottom:12px">Keeps every active contract's repeating cycle populated 12 months out — never touches completed history or deletes anything, only adds visits past whatever's already there. <b>Currently preview-only</b> — the nightly job reports what it would add but doesn't create anything yet, and it stays that way until you click Apply below. Review the list carefully before applying, especially against any manual calendar audit already in progress — this reads off the LAST visit already on each contract, so if a coach has already added a visit for the next cycle by hand, this should count forward from that and not duplicate it, but it's worth spot-checking a few before trusting it at scale.</p>
+  <div class="controls"><button class="btn primary" onclick="loadRollingSchedulePreview()">Preview</button>
+  <button class="btn danger" id="rollingApplyBtn" onclick="applyRollingSchedule()" disabled>Apply (run a Preview first)</button></div>
+  <div id="rollingScheduleOut" class="small">Click Preview to see what this would add.</div></div>
   <div class="panel"><h2>Duplicate visits</h2>
   <p class="small" style="margin-bottom:12px">Finds not-yet-scheduled visits sitting on the same contract as an already-completed visit with the exact same cycle number (e.g. two "2 of 4"s) — that combination is always a stray leftover, most likely from the original spreadsheet import, never a legitimate visit. This is read-only until you click Clean up below, and only ever deletes visits matching this exact pattern — nothing else.</p>
   <div class="controls"><button class="btn" onclick="loadDuplicateVisitsAudit()">Refresh</button></div>
@@ -2069,6 +2074,35 @@ async function loadCancelledContracts(){
       rows.map(r=>`<tr><td>${esc(r.client_name)}</td><td>${esc(r.team||'—')}</td><td>${esc(r.program||'—')}</td></tr>`).join('') + `</table>`
       : `<p>None yet.</p>`;
   }catch(e){ $('#cancelledOut').innerHTML = '<p>Could not load.</p>'; }
+}
+let _rollingPreviewCount = 0;
+async function loadRollingSchedulePreview(){
+  $('#rollingScheduleOut').innerHTML = 'Loading…';
+  $('#rollingApplyBtn').disabled = true;
+  try{
+    const r = await api('GET','/api/admin/rolling-schedule/preview');
+    _rollingPreviewCount = r.totalCreated;
+    if(!r.totalCreated){
+      $('#rollingScheduleOut').innerHTML = '<p>Nothing to add — every active contract already has the next 12 months populated. ✔</p>';
+      return;
+    }
+    $('#rollingScheduleOut').innerHTML = `<p><b>${r.totalCreated} visit(s)</b> would be added across ${r.perClient.length} contract(s) (${r.contractsChecked} active contract(s) checked):</p>
+      <table><tr><th>Client</th><th>Program</th><th>Would add</th></tr>` +
+      r.perClient.map(c=>`<tr><td><a onclick="openClientProfile(${c.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.client)}</a></td>
+        <td>${esc(c.program||'—')}</td>
+        <td class="small">${c.visits.map(v=>`${esc(v.cycle)} (due ${fmt(v.due)})`).join(', ')}</td></tr>`).join('') +
+      `</table>
+      ${r.capped.length?`<p class="small" style="color:var(--bad)">⚠ Hit the safety cap (over a decade stale — needs a manual look, list above may be incomplete for): ${esc(r.capped.join(', '))}</p>`:''}`;
+    const btn = $('#rollingApplyBtn'); btn.disabled = false; btn.textContent = `Apply — create ${r.totalCreated} visit(s)`;
+  }catch(e){ $('#rollingScheduleOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function applyRollingSchedule(){
+  if(!(await uiConfirm(`Create ${_rollingPreviewCount} visit(s) across every active contract that needs them, exactly as shown in the preview? This can be cleaned up afterward with Delete/Regenerate if anything looks wrong, but it's a real write to every active contract at once.`,'Apply'))) return;
+  try{
+    const r = await api('POST','/api/admin/rolling-schedule/run-now',{});
+    toast(`Created ${r.totalCreated} visit(s) across ${r.perClient.length} contract(s)`);
+    await refresh(); await loadRollingSchedulePreview();
+  }catch(e){ uiAlert(e.message||'Apply failed'); }
 }
 async function loadDuplicateVisitsAudit(){
   try{
@@ -2284,13 +2318,14 @@ async function runNightlyNow(){
     const r = await api('POST','/api/admin/run-nightly-now',{});
     const lines=[
       r.sync.error?`Keap sync: FAILED — ${esc(r.sync.error)}`:`Keap sync: checked ${r.sync.checked}, priced ${r.sync.priceChanged}, status changed ${r.sync.statusChanged}, errors ${(r.sync.errors||[]).length}`,
+      r.rollingSchedule.error?`Rolling schedule: FAILED — ${esc(r.rollingSchedule.error)}`:`Rolling schedule: ${r.rollingSchedule.totalCreated} visit(s) added across ${r.rollingSchedule.perClient.length} contract(s)${r.rollingSchedule.capped&&r.rollingSchedule.capped.length?` — ⚠ ${r.rollingSchedule.capped.length} contract(s) hit the safety cap, needs a look`:''}`,
       r.revenue.error?`Revenue snapshot: FAILED — ${esc(r.revenue.error)}`:`Revenue snapshot: ${fmtMoney(r.revenue.totalRevenue)} across ${r.revenue.activeClients} active client(s)`,
       r.purge.error?`Purge: FAILED — ${esc(r.purge.error)}`:`Purge: ${r.purge.purged} client(s) purged`,
       r.backup.ok?`Backup: sent (${Math.round((r.backup.sizeBytes||0)/1024)} KB)`:`Backup: FAILED`,
       `Digest emailed to ${r.digestSentTo||0} of ${r.digestAttempted||0} admin(s).`,
     ];
     $('#maintenanceOut').innerHTML = `<ul style="margin:0;padding-left:18px">${lines.map(l=>`<li>${l}</li>`).join('')}</ul>`;
-    await loadRevenueHistory(); await loadDeletedClients(); await loadBackupStatus();
+    await loadRevenueHistory(); await loadDeletedClients(); await loadBackupStatus(); await loadDuplicateVisitsAudit();
   }catch(e){ $('#maintenanceOut').innerHTML = `<p>Run failed: ${esc(e.message||e)}</p>`; }
   finally{ if(btn){btn.disabled=false;btn.textContent='Run full nightly check now';} }
 }
