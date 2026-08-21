@@ -795,13 +795,22 @@ async function bulkDeleteVisits(){
 const clientNames=()=>[...new Set(D.visits.map(v=>v.client))].sort();
 const teamOpts=sel=>myTeams().map(t=>`<option ${t===sel?'selected':''}>${t}</option>`).join('');
 const progOpts=sel=>PROGRAMS.map(p=>`<option ${p===sel?'selected':''}>${p}</option>`).join('');
+/* First pay date, not first visit due date — new clients' first visit isn't due
+ * until 90 days after they were actually first charged, so this collects the real
+ * charge date and shows the computed due date as a preview; the server (not this
+ * client-side math) is the one that actually applies the +90 days when saving. */
+function addDaysClient(iso, days){
+  const d = new Date(iso+'T12:00:00'); d.setDate(d.getDate()+days);
+  return d.toISOString().slice(0,10);
+}
 function contractDlg(){
   openDlg(`<h3>New contract</h3>
     <label>Client / dealership</label><input id="cName" list="cl"><datalist id="cl">${clientNames().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
     <label>Program</label><select id="cProg" onchange="onContractProgramChange()">${progOpts('Quarterly')}</select>
     <div id="cVisitFields">
       <label>Number of visits</label><input type="number" id="cN" value="4" min="1" max="24">
-      <label>First visit due</label><input type="date" id="cFirst" value="${TODAY}">
+      <label>First pay date</label><input type="date" id="cFirstPay" value="${TODAY}" onchange="onFirstPayDateChange()" oninput="onFirstPayDateChange()">
+      <p class="small" id="cFirstPayPreview" style="color:var(--muted)"></p>
       <label>Team</label><select id="cTeam">${teamOpts(D.user.team)}</select>
     </div>
     <div id="cCoachFields" style="display:none">
@@ -811,6 +820,7 @@ function contractDlg(){
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveContract()">Create</button></div>`);
   onContractProgramChange();
+  onFirstPayDateChange();
 }
 function onContractProgramChange(){
   const prog = $('#cProg').value;
@@ -818,6 +828,12 @@ function onContractProgramChange(){
   $('#cN').value = CYCLE_LEN[prog] || 4;
   $('#cVisitFields').style.display = isCoachingOnly ? 'none' : '';
   $('#cCoachFields').style.display = isCoachingOnly ? '' : 'none';
+}
+function onFirstPayDateChange(){
+  const v = $('#cFirstPay').value;
+  const el = $('#cFirstPayPreview');
+  if(!el) return;
+  el.textContent = v ? `First visit due: ${fmt(addDaysClient(v,90))} (90 days later)` : '';
 }
 async function saveContract(){
   const client = $('#cName').value.trim();
@@ -831,9 +847,11 @@ async function saveContract(){
     closeDlg(); await refresh(); toast(`${client} added — Coaching Only, assigned to ${coach.name}`);
     return;
   }
-  const b={client,program,n:+$('#cN').value,first:$('#cFirst').value,team:$('#cTeam').value};
-  await api('POST','/api/contracts',b); closeDlg(); await refresh();
-  toast(`${b.client}: ${b.n} ${b.program} visits added`);
+  const firstPayDate = $('#cFirstPay').value;
+  if(!firstPayDate){ uiAlert('First pay date required'); return; }
+  const b={client,program,n:+$('#cN').value,firstPayDate,team:$('#cTeam').value};
+  const r = await api('POST','/api/contracts',b); closeDlg(); await refresh();
+  toast(`${b.client}: ${b.n} ${b.program} visits added — first due ${fmt(r.firstVisitDue)}`);
 }
 function visitDlg(id){
   const v=D.visits.find(x=>x.id===id)||{client:'',program:'Quarterly',cycle:'1 of 1',due:TODAY,team:D.user.team||D.teams[0]};

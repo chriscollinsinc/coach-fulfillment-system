@@ -119,6 +119,12 @@ ensureColumn('visits', 'client_id', 'INTEGER');
 ensureColumn('visits', 'contract_id', 'INTEGER');
 ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS ict_keapsub ON contracts(keap_subscription_id)');
+/* The date the client's first charge actually happened, as manually entered when
+ * the contract is created — start_date (the first VISIT due date) is always this
+ * date + 90 days for any contract that has one. Null for contracts created before
+ * this existed, or for ones where start_date was set/edited directly (Keap-linked,
+ * Coaching Only, or via Regenerate schedule/the program edit dialog). */
+ensureColumn('contracts', 'first_pay_date', 'TEXT');
 ensureColumn('clients', 'assigned_coach_id', 'TEXT');
 /* For cases like Castle (one Keap invoice covering multiple separately-visited
    locations): the linked client's own contract price stays $0, and this field

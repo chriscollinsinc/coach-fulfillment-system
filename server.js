@@ -200,11 +200,18 @@ function guessProgramFromCycle(cycle, freq){
   if(c === 'YEAR') return 'Bi-Annual';
   return 'Quarterly';
 }
-function createContractAndVisits({ clientName, program, n, first, team, source, keapSubscriptionId, price, keapCompanyId, actorEmail }){
+/* first + 90 days, for the "new clients: first visit isn't due until 90 days after
+ * the first actual charge" rule. Plain calendar-day math (no month-length quirks
+ * to worry about, unlike the visit-spacing-by-month math below). */
+function addDays(iso, days){
+  const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function createContractAndVisits({ clientName, program, n, first, firstPayDate, team, source, keapSubscriptionId, price, keapCompanyId, actorEmail }){
   const clientId = resolveClient(clientName, { billing_start: first, keap_id: keapCompanyId || '', fromKeap: source === 'keap' });
-  const cr = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,keap_subscription_id,created)
-    VALUES(?,?,?,?,?,?,?,?,?)`)
-    .run(clientId, program, n, first, price ?? null, 'active', source || 'app', keapSubscriptionId || null, new Date().toISOString());
+  const cr = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,keap_subscription_id,first_pay_date,created)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .run(clientId, program, n, first, price ?? null, 'active', source || 'app', keapSubscriptionId || null, firstPayDate || null, new Date().toISOString());
   const contractId = Number(cr.lastInsertRowid);
   const iv = INTERVAL[program] ?? 3;
   const ids = [];
@@ -305,16 +312,28 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
 });
 
 /* ----- contracts & visits ----- */
+/* New clients: the first visit isn't due until 90 days after the date they were
+ * actually first charged. That date has to be entered manually here (Keap doesn't
+ * reliably expose a real charge date through this account's API — see keap-diag),
+ * so the form collects "First pay date" and this route does the +90 day math itself
+ * rather than trusting a client-computed due date. `first` (a due date passed
+ * directly, no +90 days applied) still works for callers that already know the
+ * exact first visit due date and aren't going through the new-client flow. */
 route('POST', /^\/api\/contracts$/, ['admin','lead'], (req, res, m, body, user) => {
-  const { client, program, n, first, team, coachId } = body;
+  const { client, program, n, first, firstPayDate, team, coachId } = body;
   const isCoachingOnly = program === 'Coaching Only';
   if(!client) return err(res, 400, 'client name required');
-  if(!isCoachingOnly && (!first || !(n > 0))) return err(res, 400, 'client, first due date and visit count required');
+  let dueDate = first || null;
+  if(!isCoachingOnly && firstPayDate){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(firstPayDate)) return err(res, 400, 'First pay date must be YYYY-MM-DD');
+    dueDate = addDays(firstPayDate, 90);
+  }
+  if(!isCoachingOnly && (!dueDate || !(n > 0))) return err(res, 400, 'client, first pay date and visit count required');
   if(!canEditTeam(user, team)) return err(res, 403, 'You can only add to your own team');
   if(coachId && !getCoach(coachId)) return err(res, 400, 'unknown coach');
-  const { clientId, ids } = createContractAndVisits({ clientName: client, program, n: isCoachingOnly ? 0 : n, first: first || null, team: team || user.team, source: 'app', actorEmail: user.email });
+  const { clientId, ids } = createContractAndVisits({ clientName: client, program, n: isCoachingOnly ? 0 : n, first: isCoachingOnly ? null : dueDate, firstPayDate: isCoachingOnly ? null : (firstPayDate || null), team: team || user.team, source: 'app', actorEmail: user.email });
   if(coachId) db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=? AND assigned_coach_id IS NULL').run(coachId, clientId);
-  send(res, 200, { ok: true, ids });
+  send(res, 200, { ok: true, ids, firstVisitDue: dueDate });
 });
 route('POST', /^\/api\/visits$/, ['admin','lead'], (req, res, m, body, user) => {
   if(!body.client) return err(res, 400, 'client required');
