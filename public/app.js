@@ -1445,22 +1445,29 @@ async function saveContractProgram(contractId){
  * "butterfly effect" for correcting an existing client's first-pay date). Completed
  * visits are never touched. Counts are previewed from the already-loaded client
  * profile, same pattern as deleteContractDlg below. */
-function regenerateContractDlg(contractId, program, visitsN, startDate){
+function regenerateContractDlg(contractId, program, visitsN, startDate, firstPayDate){
   const visits = ((st.clientProfile && st.clientProfile.visits) || []).filter(v => v.contract_id === contractId);
   const notCompleted = visits.filter(v => !v.completed).length;
   const completed = visits.length - notCompleted;
   openDlg(`<h3>Regenerate schedule</h3>
     <p class="small">This will remove ${notCompleted} not-yet-completed visit${notCompleted===1?'':'s'} under this ${esc(program||'')} contract and create ${visitsN} new one${visitsN===1?'':'s'}, spaced on the ${esc(program||'')} cadence starting from the date below.${completed?` ${completed} completed visit${completed===1?'':'s'} will be left exactly as-is.`:''}</p>
+    <label>First pay date (leave blank if unknown/not applicable)</label>
+    <input type="date" id="rgFirstPay" value="${esc(firstPayDate||'')}" onchange="onRgFirstPayChange()" oninput="onRgFirstPayChange()">
     <label>Anchor date (first visit due)</label><input type="date" id="rgAnchor" value="${esc(startDate||'')}">
-    <p class="small" style="color:var(--muted)">Changing this date re-spaces the whole remaining schedule from that new date forward — use it to correct an existing client's first-pay date.</p>
+    <p class="small" style="color:var(--muted)">Entering a first pay date fills the anchor date 90 days later automatically. You can also edit the anchor date directly instead (e.g. for Keap-linked contracts with no clean pay date on record). Either way, changing it re-spaces the whole remaining schedule from that new date forward — this is how you correct an existing client's first-pay date one-off.</p>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="doRegenerateContract(${contractId})">Regenerate</button></div>`);
 }
+function onRgFirstPayChange(){
+  const v = $('#rgFirstPay').value;
+  if(v) $('#rgAnchor').value = addDaysClient(v, 90);
+}
 async function doRegenerateContract(contractId){
   const anchorDate = $('#rgAnchor').value;
+  const firstPayDate = $('#rgFirstPay').value || '';
   if(!anchorDate) return uiAlert('Pick an anchor date');
   try{
-    const r = await api('POST', `/api/contracts/${contractId}/regenerate`, { anchorDate });
+    const r = await api('POST', `/api/contracts/${contractId}/regenerate`, { anchorDate, firstPayDate });
     closeDlg(); await refresh();
     toast(`Schedule regenerated — ${r.deletedVisits} removed, ${r.createdVisits} created`);
   }catch(e){ uiAlert(e.message||'Regenerate failed'); }
@@ -1561,7 +1568,7 @@ function clientProfileView(data, notes){
       <td class="small">${c.keap_subscription_id?`<span class="mono">${esc(c.keap_subscription_id)}</span>`:'<span style="color:var(--muted)">not linked</span>'}
         ${D.user.role==='admin' ? `<div style="margin-top:4px;white-space:nowrap">${c.keap_subscription_id?`<button class="btn tiny" onclick="contractKeapResync(${c.id})">Resync</button> `:''}<button class="btn tiny" onclick="contractKeapRelinkDlg(${c.id},'${esc(c.keap_subscription_id||'').replace(/'/g,"\\'")}')">${c.keap_subscription_id?'Change link':'Link to Keap'}</button></div>` : ''}
       </td>
-      ${D.user.role==='admin' ? `<td style="white-space:nowrap">${c.visits>0?`<button class="btn tiny" onclick="regenerateContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits},'${esc(c.start_date||'').replace(/'/g,"\\'")}')">Regenerate schedule</button> `:''}<button class="btn tiny danger" onclick="deleteContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}')">Delete</button></td>` : ''}
+      ${D.user.role==='admin' ? `<td style="white-space:nowrap">${c.visits>0?`<button class="btn tiny" onclick="regenerateContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits},'${esc(c.start_date||'').replace(/'/g,"\\'")}','${esc(c.first_pay_date||'').replace(/'/g,"\\'")}')">Regenerate schedule</button> `:''}<button class="btn tiny danger" onclick="deleteContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}')">Delete</button></td>` : ''}
       </tr>`).join('') +
     `</table>
     <p class="small" style="margin-top:8px">Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span></p>

@@ -1095,15 +1095,19 @@ route('PATCH', /^\/api\/contracts\/(\d+)$/, ['admin'], (req, res, m, body, user)
  * program/cadence — for when the contract's program was corrected (e.g. Monthly ->
  * Quarterly) after visits had already been generated under the old cadence, or when
  * an anchor date needs to move and the rest of the schedule should follow it (the
- * "butterfly effect" — pass a new anchorDate to re-space everything from there).
- * Completed visits are NEVER touched — only not-yet-completed visits under this
- * contract are deleted and replaced. The anchor date defaults to the contract's own
- * start_date, but can be overridden per-call; either way it's saved back onto the
- * contract so "Started" in the UI always reflects the schedule actually on the board.
- * NOTE: this does not (yet) implement the 90-days-after-first-Keap-charge rule for
- * brand-new contracts — that's still pending confirmation of which Keap field/list
- * endpoint reliably exposes an actual charge date. Until then, the anchor is always
- * either the contract's existing start_date or whatever date is explicitly passed in. */
+ * "butterfly effect" — pass a new anchorDate, or a corrected firstPayDate, to
+ * re-space everything from there). Completed visits are NEVER touched — only
+ * not-yet-completed visits under this contract are deleted and replaced.
+ * Two ways to set where the new schedule starts:
+ *   - firstPayDate: the corrected "actually charged" date — the due date is always
+ *     that + 90 days (same rule new contracts use), and the corrected pay date is
+ *     saved back onto the contract for next time.
+ *   - anchorDate: the due date itself, for contracts with no clean pay date on
+ *     record (e.g. Keap-linked legacy contracts) — bypasses the 90-day math.
+ * If neither is passed, falls back to the contract's own existing start_date.
+ * Whichever way is used, first_pay_date is saved to match what was actually
+ * submitted (cleared to null if the field was submitted empty), so it never sits
+ * out of sync with the due date it's supposed to explain. */
 route('POST', /^\/api\/contracts\/(\d+)\/regenerate$/, ['admin'], (req, res, m, body, user) => {
   const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
   if(!contract) return err(res, 404, 'not found');
@@ -1111,9 +1115,17 @@ route('POST', /^\/api\/contracts\/(\d+)\/regenerate$/, ['admin'], (req, res, m, 
   if(!client) return err(res, 404, 'client not found');
   const n = +contract.visits;
   if(!Number.isFinite(n) || n <= 0) return err(res, 400, `${contract.program} has no fixed visit count to schedule — nothing to regenerate.`);
-  let anchorDate = body.anchorDate !== undefined && body.anchorDate !== null && body.anchorDate !== ''
-    ? String(body.anchorDate).trim() : (contract.start_date || null);
-  if(!anchorDate) return err(res, 400, 'This contract has no start date — set an anchor date to regenerate from.');
+  const firstPayDateProvided = body.firstPayDate !== undefined;
+  let firstPayDate = firstPayDateProvided ? String(body.firstPayDate || '').trim() : null;
+  let anchorDate;
+  if(firstPayDate){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(firstPayDate)) return err(res, 400, 'First pay date must be YYYY-MM-DD');
+    anchorDate = addDays(firstPayDate, 90);
+  } else {
+    anchorDate = body.anchorDate !== undefined && body.anchorDate !== null && body.anchorDate !== ''
+      ? String(body.anchorDate).trim() : (contract.start_date || null);
+  }
+  if(!anchorDate) return err(res, 400, 'This contract has no start date — set an anchor date (or a first pay date) to regenerate from.');
   if(!/^\d{4}-\d{2}-\d{2}$/.test(anchorDate)) return err(res, 400, 'Anchor date must be YYYY-MM-DD');
   // Same team every not-completed visit under this contract already carries — a
   // contract's visits are always created on one team, so the first row's team is as
@@ -1129,9 +1141,18 @@ route('POST', /^\/api\/contracts\/(\d+)\/regenerate$/, ['admin'], (req, res, m, 
       VALUES(?,?,?,?,?,?,?,?,?)`).run(client.name, contract.program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, 'app', new Date().toISOString().slice(0,10), contract.client_id, contract.id);
     ids.push(Number(r.lastInsertRowid));
   }
-  db.prepare('UPDATE contracts SET start_date=? WHERE id=?').run(anchorDate, contract.id);
-  log(user.email, 'contract.regenerate', { contractId: contract.id, client: client.name, program: contract.program, anchorDate, deletedVisits, createdVisits: n });
-  send(res, 200, { ok: true, deletedVisits, createdVisits: n, anchorDate });
+  if(firstPayDateProvided){
+    // Explicit from the dialog (always sends this field, even blank) — save exactly
+    // what was submitted, clearing to null if the field was left empty, so the
+    // stored pay date never claims a relationship to a due date it didn't produce.
+    db.prepare('UPDATE contracts SET start_date=?, first_pay_date=? WHERE id=?').run(anchorDate, firstPayDate || null, contract.id);
+  } else {
+    // Called without the field at all (e.g. a future non-UI caller) — don't touch
+    // whatever first_pay_date already exists on the contract.
+    db.prepare('UPDATE contracts SET start_date=? WHERE id=?').run(anchorDate, contract.id);
+  }
+  log(user.email, 'contract.regenerate', { contractId: contract.id, client: client.name, program: contract.program, anchorDate, firstPayDate: firstPayDate || null, deletedVisits, createdVisits: n });
+  send(res, 200, { ok: true, deletedVisits, createdVisits: n, anchorDate, firstPayDate: firstPayDate || null });
 });
 /* Delete a contract outright — for duplicates (e.g. a leftover sheet-import row
  * sitting alongside the correctly Keap-linked one) or ones created by mistake.
