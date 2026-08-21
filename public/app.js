@@ -1418,6 +1418,35 @@ async function saveContractProgram(contractId){
     toast('Contract updated');
   }catch(e){ uiAlert(e.message||'Update failed'); }
 }
+/* Delete a contract outright — for duplicates (e.g. a leftover sheet-import row
+ * sitting alongside the correctly Keap-linked one) or ones created by mistake.
+ * The server never destroys completed visit history: a completed visit under this
+ * contract is only detached, not deleted — only not-yet-completed visits (which
+ * would otherwise be dangling duplicates) are removed. This preview counts both
+ * from the already-loaded client profile so the confirm dialog is accurate before
+ * anything happens server-side. */
+function deleteContractDlg(contractId, program){
+  const visits = ((st.clientProfile && st.clientProfile.visits) || []).filter(v => v.contract_id === contractId);
+  const notCompleted = visits.filter(v => !v.completed).length;
+  const completed = visits.length - notCompleted;
+  const parts = [];
+  if(notCompleted) parts.push(`${notCompleted} not-yet-completed visit${notCompleted>1?'s':''} generated under it will be removed (freeing any calendar slot they're on)`);
+  if(completed) parts.push(`${completed} completed visit${completed>1?'s':''} will stay on record, just detached from this contract`);
+  openDlg(`<h3>Delete contract</h3>
+    <p class="small">Delete this ${esc(program||'')} contract? ${parts.length?parts.join('. ')+'. ':'No visits are tied to this contract. '}This can't be undone.</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary danger" onclick="doDeleteContract(${contractId})">Delete contract</button></div>`);
+}
+async function doDeleteContract(contractId){
+  try{
+    const r = await api('DELETE', `/api/contracts/${contractId}`, {});
+    closeDlg(); await refresh();
+    const parts = [];
+    if(r.deletedVisits) parts.push(`${r.deletedVisits} visit(s) removed`);
+    if(r.detachedCompletedVisits) parts.push(`${r.detachedCompletedVisits} completed visit(s) detached`);
+    toast(`Contract deleted${parts.length?' — '+parts.join(', '):''}`);
+  }catch(e){ uiAlert(e.message||'Delete failed'); }
+}
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
 async function loadClientProfile(id){
   try{
@@ -1477,14 +1506,16 @@ function clientProfileView(data, notes){
   } else {
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
-  html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th></tr>` +
+  html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
     contracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
       <td class="num">${c.price?'$'+c.price:'—'}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">completed</span>'}</td>
       <td class="small">${esc(c.source||'—')}</td>
       <td class="small">${c.keap_subscription_id?`<span class="mono">${esc(c.keap_subscription_id)}</span>`:'<span style="color:var(--muted)">not linked</span>'}
         ${D.user.role==='admin' ? `<div style="margin-top:4px;white-space:nowrap">${c.keap_subscription_id?`<button class="btn tiny" onclick="contractKeapResync(${c.id})">Resync</button> `:''}<button class="btn tiny" onclick="contractKeapRelinkDlg(${c.id},'${esc(c.keap_subscription_id||'').replace(/'/g,"\\'")}')">${c.keap_subscription_id?'Change link':'Link to Keap'}</button></div>` : ''}
-      </td></tr>`).join('') +
+      </td>
+      ${D.user.role==='admin' ? `<td><button class="btn tiny danger" onclick="deleteContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}')">Delete</button></td>` : ''}
+      </tr>`).join('') +
     `</table>
     <p class="small" style="margin-top:8px">Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span></p>
   </div>`;
