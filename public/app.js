@@ -73,6 +73,29 @@ async function refresh(){
 const coach = id => D.coaches.find(c=>c.id===id);
 const status = v => v.completed?'completed': v.cal_week?'on_calendar': (v.due&&v.due<TODAY?'overdue': v.due?'needs_scheduling':'unknown');
 const isOpen = (cid,w) => !occ[cid+'|'+w];
+/* Jumps straight to the Schedule Board cell a visit is sitting on — the calendar
+ * link behind every "on calendar" / "Late — on calendar" badge. Switches to the
+ * visit's own team and the month its cal_week falls in (which may not be the
+ * viewer's current team/month), and opens its detail box the same way clicking
+ * the card on the board itself does. Read-only navigation — available to anyone
+ * who can see the board (canEditWeeks()), same as clicking a card there. */
+function jumpToCalendar(id){
+  const v = D.visits.find(x=>x.id===id);
+  if(!v || !v.cal_week){ uiAlert("This visit isn't on the calendar yet."); return; }
+  st.view='board'; st.boardTeam=v.team||myTeams()[0];
+  st.boardY=+v.cal_week.slice(0,4); st.boardM=+v.cal_week.slice(5,7)-1;
+  st.detail=v.id; st.placing=null; render();
+}
+/* Shared "on calendar" / "Late — on calendar" badge — used anywhere a visit is
+ * referenced (Inventory list, a client's Visit history). Hovering shows the due
+ * date and the scheduled week; clicking jumps straight to that cell on the
+ * Schedule Board (stopPropagation so it doesn't also trigger a row's own onclick,
+ * e.g. Inventory rows opening the visit drawer underneath it). */
+function calendarPill(v){
+  const late = v.due && v.due < TODAY;
+  const tip = `Due ${fmt(v.due)} — scheduled for week of ${fmtW(v.cal_week)}${v.cal_coach?' — '+(coach(v.cal_coach)?.name||''):''}`;
+  return `<span class="pill ${late?'p-due':'p-cal'}" style="cursor:pointer" title="${esc(tip)}" onclick="event.stopPropagation();jumpToCalendar(${v.id})">${late?'Late — on calendar':'On calendar'}</span>`;
+}
 const canEdit = () => ['admin','lead'].includes(D.user.role);
 // Broader than canEdit(): sales/coach can see the Schedule Board and set/clear a
 // coach's open-week label (Home/Off/Training/etc.), but never place, move, or
@@ -714,7 +737,7 @@ function inventory(){
       : v.cal_week?`wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}`:'—';
     const pill=v.completed?'<span class="pill p-done">Completed</span>'
       :s==='overdue'?`<span class="pill p-over">Overdue — no plan${od>=30?` · ${od}d`:''}</span>`
-      :s==='on_calendar'?(v.due&&v.due<TODAY?'<span class="pill p-due">Late — on calendar</span>':'<span class="pill p-cal">On calendar</span>')
+      :s==='on_calendar'?calendarPill(v)
       :s==='needs_scheduling'?'<span class="pill p-due">Needs scheduling</span>':'<span class="pill p-fut">—</span>';
     html+=`<tr style="cursor:pointer" onclick="visitDrawer(${v.id})">
       ${showChecks?`<td onclick="event.stopPropagation()"><input type="checkbox" ${sel.has(v.id)?'checked':''} onclick="toggleInvSel(${v.id},this.checked)"></td>`:''}
@@ -769,6 +792,7 @@ function visitDrawer(id){
     <div class="btnrow">
       ${v.client_id?`<button class="btn tiny" onclick="closeDlg();openClientProfile(${v.client_id})">View client</button>`:''}
       ${canDo?`<button class="btn tiny" onclick="closeDlg();visitDlg(${v.id})">Edit</button>`:''}
+      ${v.cal_week&&canEditWeeks()?`<button class="btn tiny" onclick="closeDlg();jumpToCalendar(${v.id})">View on calendar</button>`:''}
       ${canDo&&!v.completed&&!v.cal_week&&v.team?`<button class="btn tiny" onclick="closeDlg();st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()">Place on calendar</button>`:''}
       ${!v.completed&&(canDo||ownsVisit(v))?`<button class="btn tiny primary" onclick="closeDlg();completeVisitDlg(${v.id})">Complete</button>`:''}
       ${canDo&&v.completed?`<button class="btn tiny" onclick="closeDlg();reopenVisit(${v.id})">Reopen</button>`:''}
@@ -1577,7 +1601,7 @@ function clientProfileView(data, notes){
   html += `<div class="panel"><h2>Visit history</h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?'<span class="pill p-done">completed</span>'
-        : v.cal_week?(v.due&&v.due<TODAY?'<span class="pill p-due">late — on calendar</span>':'<span class="pill p-cal">on calendar</span>')
+        : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td>
         <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
