@@ -125,6 +125,15 @@ db.exec('CREATE INDEX IF NOT EXISTS ict_keapsub ON contracts(keap_subscription_i
  * this existed, or for ones where start_date was set/edited directly (Keap-linked,
  * Coaching Only, or via Regenerate schedule/the program edit dialog). */
 ensureColumn('contracts', 'first_pay_date', 'TEXT');
+/* Set when this contract was folded into another one via the contract-splits
+ * merge tool (2026-08-23) — the archive/Keap-link split found across ~20 clients
+ * where the real visit history and the Keap subscription ended up on two separate
+ * active contract rows. A contract with merged_into_contract_id set is never the
+ * one to act on directly; look at the contract it points to instead. Status is set
+ * to 'completed' at the same time (no separate 'merged' value — the CHECK
+ * constraint on contracts.status only allows active/completed/cancelled). */
+ensureColumn('contracts', 'merged_into_contract_id', 'INTEGER');
+ensureColumn('contracts', 'merged_at', 'TEXT');
 ensureColumn('clients', 'assigned_coach_id', 'TEXT');
 /* For cases like Castle (one Keap invoice covering multiple separately-visited
    locations): the linked client's own contract price stays $0, and this field

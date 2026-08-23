@@ -1362,6 +1362,131 @@ route('GET', /^\/api\/admin\/contract-splits-audit$/, ['admin'], (req, res) => {
   send(res, 200, { count: rows.length, rows });
 });
 
+/* Actually merges a split: folds one or more "secondary" active contracts into
+ * one "primary" active contract on the same client. Confirmed against real cases
+ * 2026-08-23 (Mike): Tinney Chevrolet GMC's split ties to a CANCELLED Keap
+ * subscription (handle via Resync/Link to Keap, not this merge — the cancelled
+ * status needs to surface, not get papered over); Cox Chevrolet's "secondary" is
+ * a genuinely separate Coaching Only subscription ("SUB - Chris Collins Signature
+ * Coaching Program"), not a duplicate at all; Toyota of Ann Arbor is a real
+ * mid-cycle program-change-plus-billing-credit situation that needs Mike's manual
+ * input, not automated merging. This function does not filter those out itself —
+ * the caller decides which clients to actually merge.
+ *
+ * What it does, per client:
+ *  - Every visit on every secondary contract moves onto the primary contract.
+ *  - A COMPLETED visit's cycle label is never touched — it's the ground-truth
+ *    archive history.
+ *  - A NOT-completed visit's cycle label IS recomputed, in due-date order,
+ *    continuing the wrap (1..n) from whatever the last completed cycle was —
+ *    same logic as the rolling schedule generator's anchor detection — so the
+ *    merged contract's history reads as one coherent, correctly-numbered cycle
+ *    instead of two contracts each independently numbering from "1". Due dates
+ *    and calendar placement (cal_week) are never changed, only the label.
+ *  - If two not-completed visits land within 45 days of each other after the
+ *    merge (a real duplicate, not just the next cycle), only one survives —
+ *    preferring whichever is already on the calendar — and the other is deleted.
+ *  - The secondary's keap_subscription_id/price/first_pay_date move onto the
+ *    primary only where the primary doesn't already have one.
+ *  - The secondary contract is then set to status='completed' (contracts.status
+ *    has no "merged" value to use instead) with merged_into_contract_id/merged_at
+ *    stamped, so it's never mistaken for a still-open contract again but the row
+ *    survives for audit trail. */
+function planContractMerge(clientId, primaryId, secondaryIds){
+  const primary = db.prepare('SELECT * FROM contracts WHERE id=? AND client_id=?').get(primaryId, clientId);
+  if(!primary) throw new Error(`Contract #${primaryId} not found on client #${clientId}`);
+  if(primary.merged_into_contract_id) throw new Error(`Contract #${primary.id} was already merged into #${primary.merged_into_contract_id} — pick that one as primary instead.`);
+  const secondaries = secondaryIds.map(id => {
+    const c = db.prepare('SELECT * FROM contracts WHERE id=? AND client_id=?').get(id, clientId);
+    if(!c) throw new Error(`Contract #${id} not found on client #${clientId}`);
+    if(c.merged_into_contract_id) throw new Error(`Contract #${id} was already merged into #${c.merged_into_contract_id} — nothing left to move.`);
+    return c;
+  });
+  const n = +primary.visits || 0;
+  const iv = INTERVAL[primary.program] ?? 3;
+  const allIds = [primary.id, ...secondaries.map(s => s.id)];
+  const visits = db.prepare(`SELECT * FROM visits WHERE contract_id IN (${allIds.map(()=>'?').join(',')})`).all(...allIds);
+  const completed = visits.filter(v => v.completed).sort((a,b) => (a.due||'').localeCompare(b.due||''));
+  const notCompleted = visits.filter(v => !v.completed).sort((a,b) => (a.due||'').localeCompare(b.due||''));
+
+  // dedupe not-completed visits that land within 45 days of each other
+  const kept = [];
+  const dropped = [];
+  for(const v of notCompleted){
+    const near = kept.find(k => k.due && v.due && Math.abs((new Date(k.due) - new Date(v.due)) / 864e5) <= 45);
+    if(near){
+      // prefer whichever is already on the calendar; tie-break lower id
+      const loser = (near.cal_week ? v : (v.cal_week ? near : (near.id <= v.id ? v : near)));
+      const winner = loser === v ? near : v;
+      if(loser === near){ kept.splice(kept.indexOf(near), 1); kept.push(winner); }
+      dropped.push(loser);
+    } else {
+      kept.push(v);
+    }
+  }
+  kept.sort((a,b) => (a.due||'').localeCompare(b.due||''));
+
+  // relabel kept not-completed visits, continuing the wrap from the last completed cycle
+  let nextK = 1;
+  if(completed.length){
+    const last = completed[completed.length - 1];
+    const parsed = /^(\d+)\s*of\s*(\d+)/i.exec(last.cycle || '');
+    const k = parsed ? +parsed[1] : n;
+    nextK = n ? (k % n) + 1 : k + 1;
+  }
+  const relabeled = kept.map(v => {
+    const newCycle = n ? `${nextK} of ${n}` : v.cycle;
+    nextK = n ? (nextK % n) + 1 : nextK + 1;
+    return { ...v, newCycle };
+  });
+
+  const keapMove = !primary.keap_subscription_id && secondaries.find(s => s.keap_subscription_id) || null;
+  const priceMove = (primary.price == null) && secondaries.find(s => s.price != null) || null;
+  const firstPayMove = !primary.first_pay_date && secondaries.find(s => s.first_pay_date) || null;
+
+  return {
+    clientId, primaryId: primary.id, secondaryIds: secondaries.map(s => s.id),
+    keapMove: keapMove ? { fromContractId: keapMove.id, keapSubscriptionId: keapMove.keap_subscription_id } : null,
+    priceMove: priceMove ? { fromContractId: priceMove.id, price: priceMove.price } : null,
+    firstPayMove: firstPayMove ? { fromContractId: firstPayMove.id, firstPayDate: firstPayMove.first_pay_date } : null,
+    completed: completed.map(v => ({ id: v.id, cycle: v.cycle, due: v.due, fromContractId: v.contract_id })),
+    relabeled: relabeled.map(v => ({ id: v.id, oldCycle: v.cycle, newCycle: v.newCycle, due: v.due, fromContractId: v.contract_id, onCalendar: !!v.cal_week })),
+    dropped: dropped.map(v => ({ id: v.id, cycle: v.cycle, due: v.due, fromContractId: v.contract_id })),
+  };
+}
+function applyContractMerge(plan, actorEmail){
+  const moveVisit = db.prepare('UPDATE visits SET contract_id=? WHERE id=?');
+  const relabelVisit = db.prepare('UPDATE visits SET contract_id=?, cycle=? WHERE id=?');
+  const deleteVisit = db.prepare('DELETE FROM visits WHERE id=?');
+  for(const v of plan.completed) moveVisit.run(plan.primaryId, v.id);
+  for(const v of plan.relabeled) relabelVisit.run(plan.primaryId, v.newCycle, v.id);
+  for(const v of plan.dropped) deleteVisit.run(v.id);
+  const sets = [], vals = [];
+  if(plan.keapMove){ sets.push('keap_subscription_id=?'); vals.push(plan.keapMove.keapSubscriptionId); }
+  if(plan.priceMove){ sets.push('price=?'); vals.push(plan.priceMove.price); }
+  if(plan.firstPayMove){ sets.push('first_pay_date=?'); vals.push(plan.firstPayMove.firstPayDate); }
+  if(sets.length) db.prepare(`UPDATE contracts SET ${sets.join(', ')} WHERE id=?`).run(...vals, plan.primaryId);
+  const now = new Date().toISOString();
+  for(const secId of plan.secondaryIds){
+    db.prepare(`UPDATE contracts SET status='completed', merged_into_contract_id=?, merged_at=?, keap_subscription_id=NULL WHERE id=?`)
+      .run(plan.primaryId, now, secId);
+  }
+  log(actorEmail, 'admin.contract_merge', plan);
+}
+route('POST', /^\/api\/admin\/contract-splits\/preview$/, ['admin'], (req, res, m, body) => {
+  try{
+    const plan = planContractMerge(body.clientId, body.primaryId, body.secondaryIds || []);
+    send(res, 200, plan);
+  }catch(e){ err(res, 400, e.message); }
+});
+route('POST', /^\/api\/admin\/contract-splits\/apply$/, ['admin'], (req, res, m, body, user) => {
+  try{
+    const plan = planContractMerge(body.clientId, body.primaryId, body.secondaryIds || []);
+    applyContractMerge(plan, user.email);
+    send(res, 200, { ok: true, plan });
+  }catch(e){ err(res, 400, e.message); }
+});
+
 /* ----- Keap webhook diagnostics (admin only) -----
    Two separate questions when "I added a store in Keap and it never showed up":
    1. Did ANYTHING from Keap ever reach this app? (raw keap_events — every inbound
