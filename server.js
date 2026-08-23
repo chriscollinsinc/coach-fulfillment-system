@@ -2613,7 +2613,11 @@ async function suggestProgramForSubscription(sub){
 async function detectCadenceChanges(){
   const out = { checked: 0, changes: [], errors: [] };
   if(!KEAP_TOKEN){ out.errors.push('KEAP_TOKEN is not configured on this server — cadence check skipped.'); return out; }
-  const rows = db.prepare("SELECT id, client_id, program, keap_subscription_id FROM contracts WHERE status='active' AND keap_subscription_id IS NOT NULL AND keap_subscription_id != ''").all();
+  // Exclude 'Coaching Only' contracts: that's a product type, not a visit cadence, and
+  // it's billed monthly in Keap — so guessProgramFromCycle would always "suggest Monthly"
+  // and falsely flag every Coaching-Only client. A genuine Coaching-Only → LID conversion
+  // is a different, rarer event handled through the Unassigned/pending flow, not here.
+  const rows = db.prepare("SELECT id, client_id, program, keap_subscription_id FROM contracts WHERE status='active' AND keap_subscription_id IS NOT NULL AND keap_subscription_id != '' AND program != 'Coaching Only'").all();
   for(const c of rows){
     out.checked++;
     try{
