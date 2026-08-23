@@ -1250,6 +1250,62 @@ route('POST', /^\/api\/admin\/duplicate-visits-cleanup$/, ['admin'], (req, res, 
   send(res, 200, { ok: true, deleted, affectedContracts: [...affected] });
 });
 
+/* Archive-to-system handoff gap, found 2026-08-23 alongside Cowboy Chevrolet GMC
+ * and Bowman Chevrolet of Clinton: some completed visits imported from the sheet
+ * were never linked to a contract_id. Every contract-scoped feature (rolling
+ * schedule, Regenerate, the duplicate finder above) reads history by contract_id,
+ * so to all of them these contracts look like they have zero history — which is
+ * exactly how Bowman got 4 duplicate visits recreated from scratch, and exactly
+ * why the duplicate finder above missed it (its join requires v2.contract_id to
+ * match, and the real completed originals have contract_id = NULL).
+ *
+ * Read-only. For each orphaned completed visit, proposes which contract it
+ * belongs to: 'high' confidence when the client has exactly one contract whose
+ * program matches; 'ambiguous' when the client has more than one contract with
+ * a matching program (needs a human to pick); 'none' when no contract on that
+ * client has a matching program at all (needs a human to look directly). Nothing
+ * gets linked until a human approves — see the (not-yet-built) apply step. */
+function findOrphanedVisits(){
+  const orphans = db.prepare(`
+    SELECT id, client_id, client, program, cycle, due, completed, sold, source
+    FROM visits WHERE contract_id IS NULL
+    ORDER BY client_id, due
+  `).all();
+  const contractsByClient = {};
+  const getContracts = (clientId) => contractsByClient[clientId] ??=
+    db.prepare('SELECT id, program, status, start_date, keap_subscription_id FROM contracts WHERE client_id=?').all(clientId);
+  return orphans.map(v => {
+    const contracts = getContracts(v.client_id);
+    const sameProgram = contracts.filter(c => c.program === v.program);
+    let confidence, candidateContractId, reason;
+    if(sameProgram.length === 1){
+      confidence = 'high'; candidateContractId = sameProgram[0].id;
+      reason = `Only contract #${sameProgram[0].id} on this client is ${v.program}.`;
+    } else if(sameProgram.length > 1){
+      confidence = 'ambiguous'; candidateContractId = null;
+      reason = `${sameProgram.length} contracts on this client are ${v.program} (#${sameProgram.map(c=>c.id).join(', #')}) — needs a human pick.`;
+    } else if(contracts.length === 0){
+      confidence = 'none'; candidateContractId = null;
+      reason = `This client has no contracts at all yet.`;
+    } else {
+      confidence = 'none'; candidateContractId = null;
+      reason = `No contract on this client is program "${v.program}" (has: ${contracts.map(c=>`#${c.id} ${c.program}`).join(', ')}).`;
+    }
+    return {
+      visitId: v.id, clientId: v.client_id, client: v.client, program: v.program,
+      cycle: v.cycle, due: v.due, completed: !!v.completed, source: v.source,
+      confidence, candidateContractId,
+      candidates: sameProgram.map(c => c.id), reason,
+    };
+  });
+}
+route('GET', /^\/api\/admin\/orphaned-visits-audit$/, ['admin'], (req, res) => {
+  const rows = findOrphanedVisits();
+  const byConfidence = { high: 0, ambiguous: 0, none: 0 };
+  for(const r of rows) byConfidence[r.confidence]++;
+  send(res, 200, { count: rows.length, byConfidence, rows });
+});
+
 /* ----- Keap webhook diagnostics (admin only) -----
    Two separate questions when "I added a store in Keap and it never showed up":
    1. Did ANYTHING from Keap ever reach this app? (raw keap_events — every inbound
