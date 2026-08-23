@@ -1306,6 +1306,62 @@ route('GET', /^\/api\/admin\/orphaned-visits-audit$/, ['admin'], (req, res) => {
   send(res, 200, { count: rows.length, byConfidence, rows });
 });
 
+/* Split-contract finder, found 2026-08-23 while checking Keap sync on clients that
+ * DO match the archive: a client's real, current visit cycle is sitting on one
+ * active contract (usually no keap_subscription_id, no price — this is the sheet-
+ * imported "system of record" for the schedule), while a SEPARATE active contract
+ * on the same client holds the actual Keap subscription link and price, with only
+ * 0-1 visits attached. Same root cause as the orphaned-visit gap above: the archive
+ * and the Keap-driven billing record were never reconciled into one contract row.
+ * This matters more than the orphaned-visit gap because Keap webhooks update a
+ * contract by keap_subscription_id — so a price/cadence change from Keap lands on
+ * the near-empty contract, not the one with the real schedule, and anything that
+ * reads "this contract's history" (rolling schedule, Regenerate) would see almost
+ * nothing there and risk recreating a duplicate schedule from scratch.
+ *
+ * Read-only. For each client with 2+ active contracts, proposes a primary (the one
+ * with the most visits already attached — ties broken toward whichever already has
+ * a keap_subscription_id) and lists what would need to move onto it from each
+ * other active contract on the client: its keap_subscription_id, price, and any
+ * visits. Nothing is merged until a human approves — no apply step exists yet. */
+function findContractSplits(){
+  const contracts = db.prepare(`
+    SELECT c.*, cl.name AS client_name FROM contracts c
+    JOIN clients cl ON cl.id = c.client_id
+    WHERE c.status = 'active'
+    ORDER BY c.client_id
+  `).all();
+  const byClient = {};
+  for(const c of contracts) (byClient[c.client_id] ??= []).push(c);
+  const visitCount = db.prepare('SELECT COUNT(*) n FROM visits WHERE contract_id=?');
+  const results = [];
+  for(const [clientId, cs] of Object.entries(byClient)){
+    if(cs.length < 2) continue;
+    const withVisits = cs.map(c => ({ ...c, visits: visitCount.get(c.id).n }));
+    const primary = withVisits.slice().sort((a, b) =>
+      (b.visits - a.visits) || ((b.keap_subscription_id ? 1 : 0) - (a.keap_subscription_id ? 1 : 0)) || (a.id - b.id)
+    )[0];
+    const others = withVisits.filter(c => c.id !== primary.id);
+    results.push({
+      clientId: +clientId, client: cs[0].client_name,
+      primary: { contractId: primary.id, program: primary.program, price: primary.price, keapSubscriptionId: primary.keap_subscription_id || null, visits: primary.visits },
+      moveFrom: others.map(o => ({
+        contractId: o.id, program: o.program, price: o.price, keapSubscriptionId: o.keap_subscription_id || null, visits: o.visits,
+        wouldMove: [
+          o.keap_subscription_id && !primary.keap_subscription_id ? `keap subscription ${o.keap_subscription_id}` : null,
+          o.price != null && primary.price == null ? `price $${o.price}` : null,
+          o.visits > 0 ? `${o.visits} visit(s)` : null,
+        ].filter(Boolean),
+      })),
+    });
+  }
+  return results;
+}
+route('GET', /^\/api\/admin\/contract-splits-audit$/, ['admin'], (req, res) => {
+  const rows = findContractSplits();
+  send(res, 200, { count: rows.length, rows });
+});
+
 /* ----- Keap webhook diagnostics (admin only) -----
    Two separate questions when "I added a store in Keap and it never showed up":
    1. Did ANYTHING from Keap ever reach this app? (raw keap_events — every inbound
