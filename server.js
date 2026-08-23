@@ -1972,7 +1972,13 @@ async function runNightlyMaintenance(actorEmail){
       const orphanVisits = db.prepare('SELECT COUNT(*) c FROM visits WHERE completed=0 AND client_id IS NULL').get().c;
       const noPriceContracts = db.prepare("SELECT COUNT(*) c FROM contracts WHERE status='active' AND (price IS NULL OR price=0)").get().c;
       const noKeapClients = db.prepare("SELECT COUNT(*) c FROM clients WHERE status='active' AND deleted_at IS NULL AND (keap_id IS NULL OR keap_id='')").get().c;
+      // Phantom duplicates: an open visit sitting on the same contract as an already-
+      // completed visit with the identical cycle label, within 45 days of it (the exact
+      // Bowman-of-Clinton pattern from the Aug regenerate). Same finder the Duplicate
+      // visits panel and its one-click cleanup use, so the digest can't drift from the UI.
+      const dupPhantoms = findDuplicateVisits().length;
       const integrity = [];
+      if(dupPhantoms) integrity.push(`${dupPhantoms} phantom duplicate visit(s) — an open visit duplicating an already-completed cycle (review + one-click fix at Admin → Data → Duplicate visits)`);
       if(noTeam) integrity.push(`${noTeam} open visit(s) with no team assigned`);
       if(orphanVisits) integrity.push(`${orphanVisits} open visit(s) not linked to any client record`);
       if(noPriceContracts) integrity.push(`${noPriceContracts} active contract(s) with no price (excluding intentional $0 revenue-owner setups, review these)`);
