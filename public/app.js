@@ -177,6 +177,7 @@ function render(){
   const hasPending = (r==='admin'||r==='lead');
   views.dashboard='Today';
   if(canEditWeeks()) views.board='Schedule Board'; // admin/lead/sales/coach — see canEditWeeks()
+  if(canEditWeeks() && myTeams().length>1) views.global='Global Calendar'; // all teams' calendars in one grid
   views.inventory = r==='coach' ? 'My Visits' : 'LID Inventory';
   views.clients='Clients'; // dropdown for admin/lead (Active Clients + Unassigned Clients); plain link otherwise
   views.availability='Availability';
@@ -222,6 +223,7 @@ function render(){
   const m=$('#main');
   if(st.view==='dashboard'){ m.innerHTML=dashboard(); loadToday(); }
   if(st.view==='board') m.innerHTML=board();
+  if(st.view==='global') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
   if(st.view==='clients'){ m.innerHTML=clientsView(); loadClients(); }
@@ -237,9 +239,38 @@ function render(){
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
+  syncHistory();
   restoreFocus();
 }
 function go(v){ st.view=v; st.placing=null; st.detail=null; render(); }
+
+/* ---------- browser history / Back button ----------
+ * The app is a single page that swaps views by mutating `st` and re-rendering. Without
+ * this, the browser Back button leaves the site entirely instead of returning to the
+ * previous in-app view. syncHistory() runs at the end of every render() (the single
+ * choke point all navigation flows through) and pushes a history entry whenever the
+ * nav-relevant state changes — so Back/Forward walk the views the user actually clicked
+ * through. Only view/ids/team/adminTab count as "navigation" (not dialog open/close,
+ * data refreshes, month paging, or placing state), so we don't spam the history stack. */
+let _lastNavKey = null;
+function _navKey(){ return JSON.stringify([st.view, st.clientId, st.coachId, st.boardTeam, st.adminTab]); }
+function syncHistory(){
+  const key = _navKey();
+  if(key === _lastNavKey) return;
+  const first = _lastNavKey === null;
+  _lastNavKey = key;
+  const s = { nav:true, view:st.view, clientId:st.clientId, coachId:st.coachId, boardTeam:st.boardTeam, boardY:st.boardY, boardM:st.boardM, adminTab:st.adminTab };
+  try{ first ? history.replaceState(s, '') : history.pushState(s, ''); }catch(_){}
+}
+window.addEventListener('popstate', e => {
+  const s = e.state;
+  if(!s || !s.nav) return; // not one of ours (e.g. pre-app entry) — let the browser do its thing
+  st.view = s.view; st.clientId = s.clientId; st.coachId = s.coachId;
+  st.boardTeam = s.boardTeam; if(s.boardY!=null) st.boardY = s.boardY; if(s.boardM!=null) st.boardM = s.boardM;
+  st.adminTab = s.adminTab; st.placing = null; st.detail = null;
+  _lastNavKey = _navKey(); // prevent syncHistory() from re-pushing this restored state
+  render();
+});
 /* ---------- global search: type any dealership or coach name from anywhere ---------- */
 let _gsClients = null; // fetched once per session, on first keystroke
 async function globalSearch(q){
@@ -504,15 +535,18 @@ const healthDot = cid => {
 };
 /* ---------- schedule board ---------- */
 function board(){
+  const global = st.view==='global';
   const t=st.boardTeam, y=st.boardY, m=st.boardM;
   const weeks=mondaysInMonth(y,m);
-  const members=D.coaches.filter(c=>c.team===t);
+  const members = global
+    ? D.coaches.filter(c=>myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
+    : D.coaches.filter(c=>c.team===t);
   const placing = st.placing ? D.visits.find(v=>v.id===st.placing) : null;
 
   /* to-schedule list: overdue first, then due this month, then next month */
   const nextM = m===11?[y+1,0]:[y,m+1];
   const inMonth=(v,yy,mm)=>v.due&&+v.due.slice(0,4)===yy&&+v.due.slice(5,7)===mm+1;
-  const cand=D.visits.filter(v=>!v.completed&&!v.cal_week&&v.team===t);
+  const cand=D.visits.filter(v=>!v.completed&&!v.cal_week&&(global?myTeams().includes(v.team):v.team===t));
   const overdue=cand.filter(v=>v.due&&v.due<TODAY&&!inMonth(v,y,m)).sort((a,b)=>a.due.localeCompare(b.due));
   const thisMo=cand.filter(v=>inMonth(v,y,m));
   const nextMo=cand.filter(v=>inMonth(v,nextM[0],nextM[1]));
@@ -523,7 +557,9 @@ function board(){
       Click any open week below. <button class="btn tiny" onclick="st.placing=null;render()">Cancel</button></div>`;
   }
   html+=`<div class="controls">
-    ${myTeams().map(x=>`<button class="btn ${x===t?'primary':''}" onclick="st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
+    ${global?`<span class="btn primary" style="cursor:default" title="All teams shown together">All teams</span>`:''}
+    ${myTeams().map(x=>`<button class="btn ${(!global&&x===t)?'primary':''}" onclick="st.view='board';st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
+    ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
     <span style="flex:1"></span>
     <div class="monthnav">
       <button class="btn" onclick="bMonth(-1)">‹</button>
@@ -537,7 +573,7 @@ function board(){
     html+=`<th class="${now?'wk-now':''}">wk of ${fmtW(w)}${now?' ●':''}</th>`; });
   html+=`</tr>`;
   for(const c of members){
-    html+=`<tr><td class="cname">${esc(c.name)}</td>`;
+    html+=`<tr><td class="cname">${esc(c.name)}${global?`<br><span class="small" style="color:var(--muted)">${esc(c.team)}</span>`:''}</td>`;
     for(const w of weeks){
       const o=occ[c.id+'|'+w]; const past=w<mondayOf(new Date());
       let cls='slot', inner='', click='';
@@ -2091,10 +2127,6 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">Finds not-yet-scheduled visits sitting on the same contract as an already-completed visit with the exact same cycle number (e.g. two "2 of 4"s) — that combination is always a stray leftover, most likely from the original spreadsheet import, never a legitimate visit. This is read-only until you click Clean up below, and only ever deletes visits matching this exact pattern — nothing else.</p>
   <div class="controls"><button class="btn" onclick="loadDuplicateVisitsAudit()">Refresh</button></div>
   <div id="dupVisitsOut" class="small">Loading…</div></div>
-  <div class="panel"><h2>Cadence changes</h2>
-  <p class="small" style="margin-bottom:12px">Flags active Keap-linked contracts whose subscription now implies a different visit cadence than the stored program (e.g. a client who moved Monthly → Quarterly in Keap). <b>Detect-only</b> — nothing is rewritten. Review each, open the client, and re-anchor with the contract's <b>Regenerate schedule</b> button (which re-spaces the remaining visits from the change date). Reads live from Keap, so it takes a few seconds. This same check runs in the nightly digest.</p>
-  <div class="controls"><button class="btn" onclick="loadCadenceChangeAudit()">Check now</button></div>
-  <div id="cadenceChangesOut" class="small">Click “Check now” to run this against Keap.</div></div>
   <div class="panel"><h2>Keap webhook activity</h2>
   <p class="small" style="margin-bottom:12px">Diagnostic tool for "I added something in Keap and it never showed up." <b>Recent events</b> is every raw hit Keap has sent this app, whether it was acted on or not — if a store you added isn't in here at all, Keap never reached this app for it (check the subscription actually exists in Keap, not just a contact). <b>Hook status</b> checks live with Keap whether the <code>subscription.add/edit/delete</code> hooks are registered and Verified against this app's URL right now. <b>Backfill</b> below is the fix for missed webhooks — it checks every subscription in Keap (not just recent ones — Keap's own date filters aren't reliable enough to trust) against what this app already knows, and queues anything untracked, including ones that start in the future.</p>
   <div class="controls"><button class="btn" onclick="loadKeapEvents()">Refresh events</button>
@@ -2180,26 +2212,6 @@ async function cleanupDuplicateVisits(expectedCount){
     toast(`Deleted ${r.deleted} stray visit(s) across ${r.affectedContracts.length} contract(s)`);
     await refresh(); await loadDuplicateVisitsAudit();
   }catch(e){ uiAlert(e.message||'Cleanup failed'); }
-}
-async function loadCadenceChangeAudit(){
-  $('#cadenceChangesOut').innerHTML = 'Checking Keap… (this takes a few seconds)';
-  try{
-    const r = await api('GET','/api/admin/cadence-change-audit');
-    let h;
-    if(!r.changes || !r.changes.length){
-      h = `<p>No cadence changes detected across ${r.checked||0} linked contract(s). ✔</p>`;
-    } else {
-      h = `<p><b>${r.changes.length}</b> of ${r.checked} linked contract(s) show a possible cadence change:</p>
-      <table><tr><th>Client</th><th>Current</th><th></th><th>Keap suggests</th><th>Basis</th><th></th></tr>` +
-      r.changes.map(c=>`<tr><td><a onclick="openClientProfile(${c.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.client)}</a></td>
-        <td>${esc(c.currentProgram||'—')}</td><td>→</td><td><b>${esc(c.suggestedProgram)}</b></td>
-        <td class="small">${esc(c.basis)}</td>
-        <td><button class="btn tiny" onclick="openClientProfile(${c.clientId})">Open to re-anchor</button></td></tr>`).join('') +
-      `</table><p class="small" style="margin-top:8px">To re-anchor: open the client and use <b>Regenerate schedule</b> on that contract row, setting the anchor to the date the cadence changed.</p>`;
-    }
-    if(r.errors && r.errors.length) h += `<p class="small" style="color:var(--warn);margin-top:8px">${r.errors.length} Keap lookup issue(s): ${esc(r.errors.slice(0,5).join('; '))}${r.errors.length>5?' …':''}</p>`;
-    $('#cadenceChangesOut').innerHTML = h;
-  }catch(e){ $('#cadenceChangesOut').innerHTML = '<p>Could not load: '+esc(e.message||'error')+'</p>'; }
 }
 async function loadClientHistoryPeriods(){
   try{
