@@ -177,3 +177,6 @@ dialog select,dialog input{width:100%}
   .previewbody{padding:10px}
   .previewbar{padding:10px;flex-wrap:wrap}
 }
+
+/* Multi-store visit tag (store a visit covered, on the Schedule Board card) */
+.slot .storetag{display:block;font-size:10px;margin-top:2px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

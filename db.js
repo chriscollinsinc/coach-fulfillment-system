@@ -134,6 +134,12 @@ ensureColumn('contracts', 'first_pay_date', 'TEXT');
  * constraint on contracts.status only allows active/completed/cancelled). */
 ensureColumn('contracts', 'merged_into_contract_id', 'INTEGER');
 ensureColumn('contracts', 'merged_at', 'TEXT');
+/* App-only "stores covered" list for a single contract that funds visits across
+ * several dealerships (a shared/à-la-carte LID like Steven Auto Group or M.A.G.).
+ * Stored as a JSON array of store names. NULL/empty = ordinary single-store contract.
+ * Never written back to Keap — the LID stays on this one parent contract; the store
+ * is purely an in-app scheduling label (see visits.store). */
+ensureColumn('contracts', 'stores', 'TEXT');
 ensureColumn('clients', 'assigned_coach_id', 'TEXT');
 /* For cases like Castle (one Keap invoice covering multiple separately-visited
    locations): the linked client's own contract price stays $0, and this field
@@ -201,6 +207,10 @@ db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ucn_keap_note ON client_notes(keap_no
    or a coach leaving, never rewrites who really did the historical work. */
 ensureColumn('visits', 'completed_by_coach_id', 'TEXT');
 ensureColumn('visits', 'completed_by_email', 'TEXT');
+/* Which store this visit occurrence covered, for a multi-store contract (see
+ * contracts.stores). App-only label chosen from the parent contract's store list;
+ * NULL for ordinary single-store visits. Never sent to Keap. */
+ensureColumn('visits', 'store', 'TEXT');
 /* Basic profile fields for a coach as a person, not just as a scheduling id —
    shown on their profile page, editable by admins/leads. */
 ensureColumn('coaches', 'phone', 'TEXT');

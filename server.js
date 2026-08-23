@@ -207,11 +207,27 @@ function addDays(iso, days){
   const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
 }
-function createContractAndVisits({ clientName, program, n, first, firstPayDate, team, source, keapSubscriptionId, price, keapCompanyId, actorEmail }){
+/* --- multi-store ("stores covered") helpers ---
+ * A contract's stores are stored as a JSON array of names. normStores() cleans any
+ * input (array, or newline-separated textarea text) into a trimmed, de-duplicated,
+ * order-preserving list; parseStores() safely reads the stored JSON back to an array. */
+function normStores(input){
+  let arr = Array.isArray(input) ? input : (typeof input === 'string' ? input.split(/\r?\n/) : []);
+  arr = arr.map(s => String(s).trim()).filter(Boolean);
+  const seen = new Set(), out = [];
+  for(const s of arr){ const k = s.toLowerCase(); if(!seen.has(k)){ seen.add(k); out.push(s); } }
+  return out;
+}
+function parseStores(raw){
+  try{ const a = JSON.parse(raw || '[]'); return Array.isArray(a) ? a.filter(s => typeof s === 'string') : []; }
+  catch(_){ return []; }
+}
+function createContractAndVisits({ clientName, program, n, first, firstPayDate, team, source, keapSubscriptionId, price, keapCompanyId, stores, actorEmail }){
   const clientId = resolveClient(clientName, { billing_start: first, keap_id: keapCompanyId || '', fromKeap: source === 'keap' });
-  const cr = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,keap_subscription_id,first_pay_date,created)
-    VALUES(?,?,?,?,?,?,?,?,?,?)`)
-    .run(clientId, program, n, first, price ?? null, 'active', source || 'app', keapSubscriptionId || null, firstPayDate || null, new Date().toISOString());
+  const storeList = normStores(stores);
+  const cr = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,keap_subscription_id,first_pay_date,stores,created)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(clientId, program, n, first, price ?? null, 'active', source || 'app', keapSubscriptionId || null, firstPayDate || null, storeList.length ? JSON.stringify(storeList) : null, new Date().toISOString());
   const contractId = Number(cr.lastInsertRowid);
   const iv = INTERVAL[program] ?? 3;
   const ids = [];
@@ -298,8 +314,8 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
       (SELECT COUNT(*) FROM visits WHERE cal_coach=c.id AND completed=0) AS upcoming_count
       FROM coaches c WHERE c.active=1 ORDER BY c.team,c.name`).all(),
     blocks: db.prepare('SELECT * FROM blocks').all(),
-    visits: db.prepare(`SELECT v.*, cl.assigned_coach_id AS client_assigned_coach_id
-      FROM visits v LEFT JOIN clients cl ON cl.id = v.client_id`).all(),
+    visits: db.prepare(`SELECT v.*, cl.assigned_coach_id AS client_assigned_coach_id, ct.stores AS contract_stores
+      FROM visits v LEFT JOIN clients cl ON cl.id = v.client_id LEFT JOIN contracts ct ON ct.id = v.contract_id`).all(),
     clientHealth: computeHealthMap(),
   };
   if(user.role === 'admin' || user.role === 'lead'){
@@ -320,7 +336,7 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
  * directly, no +90 days applied) still works for callers that already know the
  * exact first visit due date and aren't going through the new-client flow. */
 route('POST', /^\/api\/contracts$/, ['admin','lead'], (req, res, m, body, user) => {
-  const { client, program, n, first, firstPayDate, team, coachId } = body;
+  const { client, program, n, first, firstPayDate, team, coachId, stores } = body;
   const isCoachingOnly = program === 'Coaching Only';
   if(!client) return err(res, 400, 'client name required');
   let dueDate = first || null;
@@ -331,7 +347,7 @@ route('POST', /^\/api\/contracts$/, ['admin','lead'], (req, res, m, body, user) 
   if(!isCoachingOnly && (!dueDate || !(n > 0))) return err(res, 400, 'client, first pay date and visit count required');
   if(!canEditTeam(user, team)) return err(res, 403, 'You can only add to your own team');
   if(coachId && !getCoach(coachId)) return err(res, 400, 'unknown coach');
-  const { clientId, ids } = createContractAndVisits({ clientName: client, program, n: isCoachingOnly ? 0 : n, first: isCoachingOnly ? null : dueDate, firstPayDate: isCoachingOnly ? null : (firstPayDate || null), team: team || user.team, source: 'app', actorEmail: user.email });
+  const { clientId, ids } = createContractAndVisits({ clientName: client, program, n: isCoachingOnly ? 0 : n, first: isCoachingOnly ? null : dueDate, firstPayDate: isCoachingOnly ? null : (firstPayDate || null), team: team || user.team, source: 'app', stores, actorEmail: user.email });
   if(coachId) db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=? AND assigned_coach_id IS NULL').run(coachId, clientId);
   send(res, 200, { ok: true, ids, firstVisitDue: dueDate });
 });
@@ -348,6 +364,20 @@ route('PATCH', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, u
   if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
   const f = {};
   for(const k of ['client','program','cycle','due','team']) if(body[k] !== undefined) f[k] = body[k];
+  // Store tag (multi-store contracts): '' clears it; otherwise must be one of the
+  // parent contract's stores when that contract defines a list (keeps labels clean).
+  if(body.store !== undefined){
+    const s = String(body.store || '').trim();
+    if(s){
+      const c = v.contract_id ? db.prepare('SELECT stores FROM contracts WHERE id=?').get(v.contract_id) : null;
+      const allowed = parseStores(c && c.stores);
+      if(allowed.length && !allowed.some(x => x.toLowerCase() === s.toLowerCase()))
+        return err(res, 400, `"${s}" isn't one of this contract's stores (${allowed.join(', ')})`);
+      f.store = allowed.find(x => x.toLowerCase() === s.toLowerCase()) || s;
+    } else {
+      f.store = null;
+    }
+  }
   // Moving an open visit to another team can't leave it sitting on the old team's
   // board: if it's scheduled under a coach who isn't on the new team, unschedule it
   // so it surfaces in the NEW team's to-schedule list instead of visually vanishing.
@@ -415,7 +445,21 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
   const creditCoachId = user.role === 'coach' ? user.coach_id : (v.cal_coach || null);
   db.prepare('UPDATE visits SET completed=1, completed_on=?, completed_by_coach_id=?, completed_by_email=? WHERE id=?')
     .run(new Date().toISOString().slice(0,10), creditCoachId, user.email, v.id);
-  log(user.email, 'visit.complete', { id: v.id, client: v.client, cycle: v.cycle });
+  // Optional store tag for multi-store contracts — record WHICH store was visited.
+  // Validated against the parent contract's store list when it defines one.
+  if(body && body.store !== undefined){
+    const s = String(body.store || '').trim();
+    if(s){
+      const c = v.contract_id ? db.prepare('SELECT stores FROM contracts WHERE id=?').get(v.contract_id) : null;
+      const allowed = parseStores(c && c.stores);
+      if(allowed.length && !allowed.some(x => x.toLowerCase() === s.toLowerCase()))
+        return err(res, 400, `"${s}" isn't one of this contract's stores (${allowed.join(', ')})`);
+      db.prepare('UPDATE visits SET store=? WHERE id=?').run(allowed.find(x => x.toLowerCase() === s.toLowerCase()) || s, v.id);
+    } else {
+      db.prepare('UPDATE visits SET store=NULL WHERE id=?').run(v.id);
+    }
+  }
+  log(user.email, 'visit.complete', { id: v.id, client: v.client, cycle: v.cycle, store: (body && body.store) || null });
   // Optional note logged in the same step, tied to this specific visit rather than
   // just general client commentary — this is how a completion becomes documented.
   if(body && body.note && String(body.note).trim()){
@@ -1135,6 +1179,10 @@ route('PATCH', /^\/api\/contracts\/(\d+)$/, ['admin'], (req, res, m, body, user)
     const n = +body.visits;
     if(!Number.isFinite(n) || n < 0) return err(res, 400, 'bad visit count');
     f.visits = n;
+  }
+  if(body.stores !== undefined){
+    const list = normStores(body.stores);
+    f.stores = list.length ? JSON.stringify(list) : null;
   }
   if(!Object.keys(f).length) return err(res, 400, 'nothing to update');
   db.prepare(`UPDATE contracts SET ${Object.keys(f).map(k=>k+'=?').join(',')} WHERE id=?`).run(...Object.values(f), contract.id);

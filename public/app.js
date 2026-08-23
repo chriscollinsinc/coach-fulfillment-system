@@ -550,7 +550,7 @@ function board(){
         else if(canEditWeeks() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= v.completed?' s-done':' s-visit';
-        inner=`<b>${v.completed?'':healthDot(v.client_id)}${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>`;
+        inner=`<b>${v.completed?'':healthDot(v.client_id)}${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
         // Viewing a visit's detail box is read-only by itself — Complete/Move/Unschedule
         // inside it are individually gated (see the detail box below), so anyone who can
         // see the board can click through to look, but only canEdit() (or the owning
@@ -578,9 +578,13 @@ function board(){
   html+=`<div class="sidebox">`;
   if(st.detail){
     const v=D.visits.find(x=>x.id===st.detail);
+    const dStores = v ? storeList(v) : [];
     if(v) html+=`<div class="detailbox"><b>${esc(v.client)}</b>
       ${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}<br>
       <span class="small">wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}</span>
+      ${dStores.length ? `<div class="small" style="margin-top:6px">Store: ${canEdit()
+        ? `<select onchange="setVisitStore(${v.id}, this.value)"><option value="">— none —</option>${dStores.map(s=>`<option value="${esc(s)}" ${v.store===s?'selected':''}>${esc(s)}</option>`).join('')}</select>`
+        : `<b>${v.store?esc(v.store):'—'}</b>`}</div>` : (v.store?`<div class="small" style="margin-top:6px">Store: <b>${esc(v.store)}</b></div>`:'')}
       <div class="btnrow">
         ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Complete</button>` : ''}
         ${canEdit() ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>` : ''}
@@ -618,10 +622,21 @@ async function unscheduleV(id){
   await api('POST',`/api/visits/${id}/unschedule`); st.detail=null; await refresh();
   toast('Unscheduled — back in the to-schedule list', async()=>api('POST',`/api/visits/${id}/place`,old));
 }
+async function setVisitStore(id, store){
+  try{ await api('PATCH',`/api/visits/${id}`,{ store }); }
+  catch(e){ uiAlert(e.message||'Could not set store'); return; }
+  await refresh();
+  toast(store ? `Store set → ${store}` : 'Store cleared');
+}
+function storeList(v){ try{ const a=JSON.parse((v&&v.contract_stores)||'[]'); return Array.isArray(a)?a:[]; }catch(_){ return []; } }
 function completeVisitDlg(id){
   const v = D.visits.find(x=>x.id===id);
+  const stores = storeList(v);
+  const storeField = stores.length ? `<label>Which store was visited?</label>
+    <select id="cvStore"><option value="">— select store —</option>${stores.map(s=>`<option value="${esc(s)}" ${v&&v.store===s?'selected':''}>${esc(s)}</option>`).join('')}</select>` : '';
   openDlg(`<h3>Complete visit${v?' — '+esc(v.client):''}</h3>
     ${v?`<p class="small">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</p>`:''}
+    ${storeField}
     <label>Note for this visit (optional)</label>
     <textarea id="cvNote" rows="4" placeholder="What happened on this visit — this gets logged on the client's notes, tied to this specific visit."></textarea>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
@@ -629,8 +644,12 @@ function completeVisitDlg(id){
 }
 async function doCompleteV(id){
   const note = ($('#cvNote')||{}).value || '';
+  const storeEl = $('#cvStore');
+  const payload = {};
+  if(note.trim()) payload.note = note.trim();
+  if(storeEl) payload.store = storeEl.value;
   try{
-    await api('POST',`/api/visits/${id}/complete`, note.trim() ? { note: note.trim() } : {});
+    await api('POST',`/api/visits/${id}/complete`, payload);
   }catch(e){ closeDlg(); uiAlert(e.message||'Could not complete that visit'); return; }
   closeDlg(); st.detail=null; await refresh();
   toast('Marked complete', async()=>api('POST',`/api/visits/${id}/reopen`));
@@ -657,6 +676,7 @@ const INV_COLS = [
   { key:'team', label:'Team', get:v=>v.team||'' },
   { key:'program', label:'Program '+hint('How often this client gets visited — Quarterly means 4 visits per year, Semi-Monthly means 6, etc.'), get:v=>v.program||'' },
   { key:'cycle', label:'Cycle '+hint('Which visit this is within the contract — "3 of 4" means the 3rd of 4 contracted visits.'), get:v=>v.cycle||'' },
+  { key:'store', label:'Store '+hint('For a shared / multi-store contract, which store this visit covered. Blank for ordinary single-store visits.'), get:v=>v.store||'' },
   { key:'due', label:'Due', get:v=>v.due||'' },
   { key:'scheduled', label:'Scheduled', get:v=>v.cal_week||'' },
   { key:'status', label:'Status', get:v=>status(v) },
@@ -836,6 +856,9 @@ function contractDlg(){
       <label>First pay date</label><input type="date" id="cFirstPay" value="${TODAY}" onchange="onFirstPayDateChange()" oninput="onFirstPayDateChange()">
       <p class="small" id="cFirstPayPreview" style="color:var(--muted)"></p>
       <label>Team</label><select id="cTeam">${teamOpts(D.user.team)}</select>
+      <label>Stores covered <span style="color:var(--muted);font-weight:400">(optional — one per line)</span></label>
+      <textarea id="cStores" rows="3" placeholder="Only for a shared / à-la-carte contract that covers multiple stores — e.g.&#10;Steven Honda&#10;Steven Hyundai&#10;Steven Ford&#10;&#10;Leave blank for a normal single-store contract."></textarea>
+      <p class="small" style="color:var(--muted)">If set, each visit can be tagged with which of these stores it covered. This stays in the app only — it never changes Keap.</p>
     </div>
     <div id="cCoachFields" style="display:none">
       <label>Assigned coach</label><select id="cCoach">${coachOptsFor()}</select>
@@ -873,7 +896,9 @@ async function saveContract(){
   }
   const firstPayDate = $('#cFirstPay').value;
   if(!firstPayDate){ uiAlert('First pay date required'); return; }
+  const stores = (($('#cStores')||{}).value || '').split('\n').map(s=>s.trim()).filter(Boolean);
   const b={client,program,n:+$('#cN').value,firstPayDate,team:$('#cTeam').value};
+  if(stores.length) b.stores = stores;
   const r = await api('POST','/api/contracts',b); closeDlg(); await refresh();
   toast(`${b.client}: ${b.n} ${b.program} visits added — first due ${fmt(r.firstVisitDue)}`);
 }
@@ -1442,6 +1467,33 @@ function offerProgramFix(contractId, suggestion){
  * kind of mismatch offerProgramFix() surfaces, or just a direct correction any time.
  * Only ever edits the contract row itself; never touches already-generated visits
  * (those are fixed individually via the Edit button on Visit history below). */
+/* Multi-store ("stores covered") display + editor on a contract row. */
+function parseContractStores(c){ try{ const a=JSON.parse((c&&c.stores)||'[]'); return Array.isArray(a)?a:[]; }catch(_){ return []; } }
+function contractStoresHtml(c){
+  const list = parseContractStores(c);
+  const admin = D.user.role==='admin';
+  if(!list.length){
+    return admin ? ` <button class="btn tiny" title="Set the stores this contract covers (for a shared / à-la-carte contract)" onclick="editStoresDlg(${c.id})">+ stores</button>` : '';
+  }
+  const chips = `<div class="small" style="margin-top:4px">🏬 ${list.map(esc).join(' · ')}${admin?` <button class="btn tiny" onclick="editStoresDlg(${c.id})">Edit</button>`:''}</div>`;
+  return chips;
+}
+function editStoresDlg(contractId){
+  const c = ((st.clientProfile&&st.clientProfile.contracts)||[]).find(x=>x.id===contractId) || {};
+  const cur = parseContractStores(c).join('\n');
+  openDlg(`<h3>Stores covered</h3>
+    <p class="small">One store per line. These are the dealerships this single contract covers — each visit can then be tagged with which store it was. App-only; never changes Keap. Leave blank to make this an ordinary single-store contract.</p>
+    <textarea id="stStores" rows="6" placeholder="Steven Honda&#10;Steven Hyundai&#10;Steven Ford">${esc(cur)}</textarea>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveStores(${contractId})">Save</button></div>`);
+}
+async function saveStores(contractId){
+  const stores = (($('#stStores')||{}).value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+  try{ await api('PATCH',`/api/contracts/${contractId}`,{ stores }); }
+  catch(e){ uiAlert(e.message||'Could not save stores'); return; }
+  closeDlg(); await refresh();
+  toast(stores.length?`Saved ${stores.length} store(s)`:'Stores cleared');
+}
 function editContractProgramDlg(contractId, currentProgram, currentVisits, suggestedProgram){
   const startProgram = suggestedProgram || currentProgram;
   openDlg(`<h3>Edit program &amp; cadence</h3>
@@ -1585,7 +1637,7 @@ function clientProfileView(data, notes){
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
   html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
-    contracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
+    contracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
       <td class="num">${c.price?'$'+c.price:'—'}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">completed</span>'}</td>
       <td class="small">${esc(c.source||'—')}</td>
