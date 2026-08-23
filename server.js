@@ -1306,6 +1306,48 @@ route('GET', /^\/api\/admin\/orphaned-visits-audit$/, ['admin'], (req, res) => {
   send(res, 200, { count: rows.length, byConfidence, rows });
 });
 
+/* Apply step for the orphaned-visit audit above. Links ONLY 'high'-confidence
+ * orphans (the client has exactly one contract whose program matches the visit's)
+ * onto that contract by setting contract_id. Never touches 'ambiguous' or 'none'
+ * orphans — those need a human to pick. The candidate contract is recomputed here
+ * server-side via findOrphanedVisits(), so the caller can never supply an arbitrary
+ * contract id; the request only chooses WHICH high-confidence orphans to link.
+ * Idempotent and safe to re-run: findOrphanedVisits() only returns visits with
+ * contract_id IS NULL, and the UPDATE is additionally guarded by contract_id IS NULL.
+ * Optional body: {visitIds:[...]} restricts the action to those visit ids (each still
+ * linked only if it classifies 'high'); {dryRun:true} returns exactly what WOULD be
+ * linked without writing anything. */
+route('POST', /^\/api\/admin\/orphaned-visits\/apply$/, ['admin'], (req, res, m, body, user) => {
+  const rows = findOrphanedVisits();
+  const only = Array.isArray(body && body.visitIds) ? new Set(body.visitIds.map(Number)) : null;
+  const toLink = [], skipped = [];
+  for(const r of rows){
+    if(only && !only.has(r.visitId)) continue;
+    if(r.confidence === 'high' && r.candidateContractId){
+      toLink.push(r);
+    } else {
+      skipped.push({ visitId: r.visitId, confidence: r.confidence, reason: r.reason });
+    }
+  }
+  const preview = toLink.map(r => ({ visitId: r.visitId, client: r.client, program: r.program, cycle: r.cycle, due: r.due, contractId: r.candidateContractId }));
+  if(body && body.dryRun){
+    return send(res, 200, { ok: true, dryRun: true, wouldLinkCount: preview.length, skippedCount: skipped.length, wouldLink: preview, skipped });
+  }
+  const link = db.prepare('UPDATE visits SET contract_id=? WHERE id=? AND contract_id IS NULL');
+  const linked = [];
+  db.exec('BEGIN');
+  try{
+    for(const r of toLink){
+      const changes = link.run(r.candidateContractId, r.visitId).changes;
+      if(changes === 1) linked.push({ visitId: r.visitId, client: r.client, program: r.program, cycle: r.cycle, contractId: r.candidateContractId });
+      else skipped.push({ visitId: r.visitId, confidence: 'high', reason: 'already linked at write time (no change)' });
+    }
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); return err(res, 500, 'Link failed: ' + e.message); }
+  log(user.email, 'admin.orphaned_visits_link', { linkedCount: linked.length, linked });
+  send(res, 200, { ok: true, linkedCount: linked.length, skippedCount: skipped.length, linked, skipped });
+});
+
 /* Split-contract finder, found 2026-08-23 while checking Keap sync on clients that
  * DO match the archive: a client's real, current visit cycle is sitting on one
  * active contract (usually no keap_subscription_id, no price — this is the sheet-
