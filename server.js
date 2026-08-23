@@ -1426,13 +1426,21 @@ function planContractMerge(clientId, primaryId, secondaryIds){
   }
   kept.sort((a,b) => (a.due||'').localeCompare(b.due||''));
 
-  // relabel kept not-completed visits, continuing the wrap from the last completed cycle
+  // relabel kept not-completed visits, continuing the wrap from the last completed cycle.
+  // Exception: if the last completed visit's own label implies a DIFFERENT cycle-size
+  // than the primary contract's current one, that's a real program/cadence change (e.g.
+  // Quarterly -> Bi-Annual), and per business rule "the day they change their subscription
+  // frequency is the day we calculate their new cycle" — so restart at 1 of new_n rather
+  // than continuing the old modulus.
   let nextK = 1;
+  let cadenceChanged = false;
   if(completed.length){
     const last = completed[completed.length - 1];
     const parsed = /^(\d+)\s*of\s*(\d+)/i.exec(last.cycle || '');
     const k = parsed ? +parsed[1] : n;
-    nextK = n ? (k % n) + 1 : k + 1;
+    const lastN = parsed ? +parsed[2] : n;
+    cadenceChanged = n && lastN && lastN !== n;
+    nextK = cadenceChanged ? 1 : (n ? (k % n) + 1 : k + 1);
   }
   const relabeled = kept.map(v => {
     const newCycle = n ? `${nextK} of ${n}` : v.cycle;
@@ -1446,6 +1454,7 @@ function planContractMerge(clientId, primaryId, secondaryIds){
 
   return {
     clientId, primaryId: primary.id, secondaryIds: secondaries.map(s => s.id),
+    cadenceChanged,
     keapMove: keapMove ? { fromContractId: keapMove.id, keapSubscriptionId: keapMove.keap_subscription_id } : null,
     priceMove: priceMove ? { fromContractId: priceMove.id, price: priceMove.price } : null,
     firstPayMove: firstPayMove ? { fromContractId: firstPayMove.id, firstPayDate: firstPayMove.first_pay_date } : null,
