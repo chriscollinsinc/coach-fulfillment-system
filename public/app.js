@@ -2091,6 +2091,10 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">Finds not-yet-scheduled visits sitting on the same contract as an already-completed visit with the exact same cycle number (e.g. two "2 of 4"s) — that combination is always a stray leftover, most likely from the original spreadsheet import, never a legitimate visit. This is read-only until you click Clean up below, and only ever deletes visits matching this exact pattern — nothing else.</p>
   <div class="controls"><button class="btn" onclick="loadDuplicateVisitsAudit()">Refresh</button></div>
   <div id="dupVisitsOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Cadence changes</h2>
+  <p class="small" style="margin-bottom:12px">Flags active Keap-linked contracts whose subscription now implies a different visit cadence than the stored program (e.g. a client who moved Monthly → Quarterly in Keap). <b>Detect-only</b> — nothing is rewritten. Review each, open the client, and re-anchor with the contract's <b>Regenerate schedule</b> button (which re-spaces the remaining visits from the change date). Reads live from Keap, so it takes a few seconds. This same check runs in the nightly digest.</p>
+  <div class="controls"><button class="btn" onclick="loadCadenceChangeAudit()">Check now</button></div>
+  <div id="cadenceChangesOut" class="small">Click “Check now” to run this against Keap.</div></div>
   <div class="panel"><h2>Keap webhook activity</h2>
   <p class="small" style="margin-bottom:12px">Diagnostic tool for "I added something in Keap and it never showed up." <b>Recent events</b> is every raw hit Keap has sent this app, whether it was acted on or not — if a store you added isn't in here at all, Keap never reached this app for it (check the subscription actually exists in Keap, not just a contact). <b>Hook status</b> checks live with Keap whether the <code>subscription.add/edit/delete</code> hooks are registered and Verified against this app's URL right now. <b>Backfill</b> below is the fix for missed webhooks — it checks every subscription in Keap (not just recent ones — Keap's own date filters aren't reliable enough to trust) against what this app already knows, and queues anything untracked, including ones that start in the future.</p>
   <div class="controls"><button class="btn" onclick="loadKeapEvents()">Refresh events</button>
@@ -2176,6 +2180,26 @@ async function cleanupDuplicateVisits(expectedCount){
     toast(`Deleted ${r.deleted} stray visit(s) across ${r.affectedContracts.length} contract(s)`);
     await refresh(); await loadDuplicateVisitsAudit();
   }catch(e){ uiAlert(e.message||'Cleanup failed'); }
+}
+async function loadCadenceChangeAudit(){
+  $('#cadenceChangesOut').innerHTML = 'Checking Keap… (this takes a few seconds)';
+  try{
+    const r = await api('GET','/api/admin/cadence-change-audit');
+    let h;
+    if(!r.changes || !r.changes.length){
+      h = `<p>No cadence changes detected across ${r.checked||0} linked contract(s). ✔</p>`;
+    } else {
+      h = `<p><b>${r.changes.length}</b> of ${r.checked} linked contract(s) show a possible cadence change:</p>
+      <table><tr><th>Client</th><th>Current</th><th></th><th>Keap suggests</th><th>Basis</th><th></th></tr>` +
+      r.changes.map(c=>`<tr><td><a onclick="openClientProfile(${c.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.client)}</a></td>
+        <td>${esc(c.currentProgram||'—')}</td><td>→</td><td><b>${esc(c.suggestedProgram)}</b></td>
+        <td class="small">${esc(c.basis)}</td>
+        <td><button class="btn tiny" onclick="openClientProfile(${c.clientId})">Open to re-anchor</button></td></tr>`).join('') +
+      `</table><p class="small" style="margin-top:8px">To re-anchor: open the client and use <b>Regenerate schedule</b> on that contract row, setting the anchor to the date the cadence changed.</p>`;
+    }
+    if(r.errors && r.errors.length) h += `<p class="small" style="color:var(--warn);margin-top:8px">${r.errors.length} Keap lookup issue(s): ${esc(r.errors.slice(0,5).join('; '))}${r.errors.length>5?' …':''}</p>`;
+    $('#cadenceChangesOut').innerHTML = h;
+  }catch(e){ $('#cadenceChangesOut').innerHTML = '<p>Could not load: '+esc(e.message||'error')+'</p>'; }
 }
 async function loadClientHistoryPeriods(){
   try{

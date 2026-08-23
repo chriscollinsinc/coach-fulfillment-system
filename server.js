@@ -1893,6 +1893,12 @@ async function runNightlyMaintenance(actorEmail){
   const summary = { startedAt: new Date().toISOString() };
   try{ summary.sync = await keapSyncAllLinkedContracts(actorEmail); }
   catch(e){ summary.sync = { error: String(e && e.message || e) }; }
+  // Detect-only (never rewrites a program or schedule) — flags contracts whose Keap
+  // subscription now implies a different cadence than the stored program, for a human
+  // to review + re-anchor via "Regenerate schedule". Runs right after the sync so it
+  // reuses the warm 60s subscription-list cache.
+  try{ summary.cadence = await detectCadenceChanges(); }
+  catch(e){ summary.cadence = { error: String(e && e.message || e) }; }
   // Dry-run only for now, by design: Mike asked to see the real list before this
   // ever auto-applies against live data, since coaches are actively doing a
   // manual audit and this shouldn't create visits underneath that work
@@ -1929,6 +1935,11 @@ async function runNightlyMaintenance(actorEmail){
       `Coach Fulfillment System — nightly summary for ${new Date().toISOString().slice(0,10)}`,
       '',
       `Keap sync: ${summary.sync.error ? 'FAILED — ' + summary.sync.error : `checked ${summary.sync.checked}, price updated ${summary.sync.priceChanged}, status changed ${summary.sync.statusChanged}, errors ${syncErrors}`}`,
+      `Cadence changes (DETECT ONLY — review at Admin → Data → Cadence changes, re-anchor with Regenerate): ${summary.cadence.error ? 'FAILED — ' + summary.cadence.error : `${summary.cadence.changes.length} of ${summary.cadence.checked} linked contract(s) flagged`}`,
+      ...(summary.cadence && summary.cadence.changes && summary.cadence.changes.length
+        ? summary.cadence.changes.slice(0,15).map(ch => `  - ${ch.client}: ${ch.currentProgram} → ${ch.suggestedProgram} (per ${ch.basis})`)
+          .concat(summary.cadence.changes.length > 15 ? [`  …and ${summary.cadence.changes.length - 15} more`] : [])
+        : []),
       `Rolling schedule (PREVIEW ONLY — not yet applied): ${summary.rollingSchedule.error ? 'FAILED — ' + summary.rollingSchedule.error : `would add ${summary.rollingSchedule.totalCreated} visit(s) across ${summary.rollingSchedule.perClient.length} contract(s) to keep the next ${ROLLING_MONTHS} months populated (${summary.rollingSchedule.contractsChecked} active contract(s) checked) — review at Admin → Data → Rolling schedule before applying`}`,
       `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
       `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
@@ -2587,6 +2598,45 @@ async function suggestProgramForSubscription(sub){
   if(fromName) return { guessed: fromName, basis: `the product name ("${name}")` };
   return { guessed: guessProgramFromCycle(sub.billing_cycle, sub.billing_frequency), basis: 'the billing cycle (no cadence keyword found in the product name)' };
 }
+
+/* ---------- cadence-change detector ----------
+ * For every active Keap-linked contract, compare the program Keap now implies for its
+ * subscription (product name first, then billing cycle — same logic as resync/relink)
+ * against the contract's stored program. A mismatch means the client's subscription
+ * frequency likely changed in Keap (e.g. Monthly -> Quarterly). This DETECTS and FLAGS
+ * only — it never rewrites a program or a schedule (same rule as guessProgramFromCycle:
+ * a wrong auto-apply would silently mutate a client's whole calendar). A human reviews
+ * each flag and re-anchors with the existing per-contract "Regenerate schedule" action
+ * (which re-spaces the remaining visits from the change date — the "day they change
+ * frequency is the day we recalculate the cycle" rule). Reuses the 60s subscription
+ * list cache, so when the nightly Keap sync ran just before it, this adds no real cost. */
+async function detectCadenceChanges(){
+  const out = { checked: 0, changes: [], errors: [] };
+  if(!KEAP_TOKEN){ out.errors.push('KEAP_TOKEN is not configured on this server — cadence check skipped.'); return out; }
+  const rows = db.prepare("SELECT id, client_id, program, keap_subscription_id FROM contracts WHERE status='active' AND keap_subscription_id IS NOT NULL AND keap_subscription_id != ''").all();
+  for(const c of rows){
+    out.checked++;
+    try{
+      const sub = await keapFindSubscriptionById(c.keap_subscription_id);
+      if(!sub.ok){ out.errors.push(`contract ${c.id}: Keap lookup failed (${sub.error || sub.status})`); continue; }
+      const sug = await suggestProgramForSubscription(sub.json);
+      if(sug.guessed && sug.guessed !== c.program){
+        const cl = db.prepare('SELECT name FROM clients WHERE id=?').get(c.client_id);
+        out.changes.push({
+          contractId: c.id, clientId: c.client_id, client: cl ? cl.name : '(unknown)',
+          currentProgram: c.program, suggestedProgram: sug.guessed, basis: sug.basis,
+          subId: c.keap_subscription_id,
+        });
+      }
+      await new Promise(r => setTimeout(r, 120)); // stay well under Keap's rate limit
+    }catch(e){ out.errors.push(`contract ${c.id}: ${String(e && e.message || e)}`); }
+  }
+  return out;
+}
+route('GET', /^\/api\/admin\/cadence-change-audit$/, ['admin'], async (req, res) => {
+  try{ send(res, 200, await detectCadenceChanges()); }
+  catch(e){ err(res, 500, String(e && e.message || e)); }
+});
 
 /* ---------- backfill sweep: catch anything the webhook ever missed ----------
    Keap's list endpoints don't reliably support a "since" filter we could trust, so
