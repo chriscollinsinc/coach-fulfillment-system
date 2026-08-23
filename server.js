@@ -932,6 +932,56 @@ route('GET', /^\/api\/admin\/keap-diag$/, ['admin'], async (req, res) => {
   }
   send(res, 200, out);
 });
+/* Company billing lookup — everything Keap knows about one company's money, keyed by
+ * company id (clients.keap_id). Built for the Tinney case: a cancelled dealership that
+ * was never Keap-linked, where before we can decide what "coverage end / last-bill
+ * date" should be we need to SEE the real subscription and its actual date fields —
+ * and, because a cancelled subscription can drop out of the /v1/subscriptions list
+ * entirely, also its orders/transactions (where the real last charge date lives).
+ * Read-only; never writes. Returns raw Keap objects so exact field names are visible.
+ * Query: ?keapId=<company id> and/or ?contactId=<contact id> (at least one). */
+route('GET', /^\/api\/admin\/keap\/company-billing$/, ['admin'], async (req, res) => {
+  const q = new URL(req.url, 'http://x').searchParams;
+  const keapId = String(q.get('keapId') || '').trim();
+  const contactIdParam = String(q.get('contactId') || '').trim();
+  if(!keapId && !contactIdParam) return err(res, 400, 'keapId (company id) or contactId required');
+  if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
+  const out = { keapId: keapId || null, contactId: contactIdParam || null, subscriptions: {}, contacts: {}, orders: {}, transactions: {} };
+
+  // 1) Subscriptions: the list endpoint is the only one that works for this account
+  //    (see keapFindSubscriptionById note). Filter by company id on the sub, or by contact.
+  const listing = await keapListAllSubscriptions();
+  if(!listing.ok){ out.subscriptions.error = listing.error; }
+  else{
+    out.subscriptions.totalListed = listing.subs.length;
+    out.subscriptions.sampleKeys = listing.subs[0] ? Object.keys(listing.subs[0]) : [];
+    const matches = listing.subs.filter(s =>
+      (keapId && String(s.contact_id_company) === keapId) ||
+      (contactIdParam && String(s.contact_id) === contactIdParam));
+    out.subscriptions.matchCount = matches.length;
+    out.subscriptions.matches = matches; // full raw objects — inspect for end/next-bill/paid-thru dates
+  }
+
+  // 2) Resolve this company's contacts (a cancelled sub may be gone from the list above,
+  //    so we still want a contact id to reach orders/transactions).
+  let contactIds = contactIdParam ? [contactIdParam] : [];
+  if(keapId){
+    const c = await keapGet(`/v1/contacts?company_id=${encodeURIComponent(keapId)}&limit=50`);
+    const list = (c.json && (c.json.contacts || c.json.results)) || [];
+    out.contacts = { ok: c.ok, status: c.status, ids: list.map(x => x.id) };
+    if(!contactIds.length) contactIds = list.map(x => String(x.id));
+  }
+
+  // 3) Orders + transactions per contact — where a real charge/last-bill date lives.
+  out.orders.byContact = {}; out.transactions.byContact = {};
+  for(const cid of contactIds.slice(0, 5)){
+    const o = await keapGet(`/v1/orders?contact_id=${encodeURIComponent(cid)}&limit=50`);
+    out.orders.byContact[cid] = { ok: o.ok, status: o.status, data: (o.json && (o.json.orders || o.json.results)) || o.json };
+    const t = await keapGet(`/v1/transactions?contact_id=${encodeURIComponent(cid)}&limit=50`);
+    out.transactions.byContact[cid] = { ok: t.ok, status: t.status, data: (t.json && (t.json.transactions || t.json.results)) || t.json };
+  }
+  send(res, 200, out);
+});
 route('GET', /^\/api\/admin\/pending-clients\/(\d+)\/keap-raw$/, ['admin'], async (req, res, m) => {
   const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
   if(!pc) return err(res, 404, 'not found');
