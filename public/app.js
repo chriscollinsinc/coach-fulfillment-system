@@ -628,12 +628,12 @@ function board(){
         // Placing (moving a card onto an open week) stays admin/lead-only — st.placing
         // is only ever set from buttons already gated on canEdit() below, so this
         // branch is unreachable for sales/coach in practice, but it's guarded here too.
-        // Past weeks ARE valid placement targets: a visit that happened last week and
-        // never got its card added gets backfilled here, then shows on the "confirm
-        // completed" to-do to mark done. (Setting a plain Home/Off label on a past week
-        // stays disabled — that's only useful looking forward.)
+        // Past weeks ARE editable: a visit that happened last week and never got its
+        // card added gets backfilled here (then shows on the "confirm completed" to-do),
+        // and a past open week can be set to a custom card — Home/Truck/Training/Off/etc.
+        // — to fill in what a coach was actually doing that week.
         if(placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
-        else if(canEditWeeks() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        else if(canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
         inner=`<b>${v.completed?'':healthDot(v.client_id)}${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
@@ -646,7 +646,7 @@ function board(){
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
         inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
-        if(canEditWeeks() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        if(canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       }
       html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
     }
