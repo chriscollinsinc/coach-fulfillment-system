@@ -1859,10 +1859,19 @@ function extendRollingSchedule(contract, opts = {}){
   return { created: visits.length, visits, cappedAt60: guard >= 60 };
 }
 function sweepRollingSchedule(opts = {}){
+  // notice_given_date IS NULL: a client who has given notice is on their way out —
+  // entering notice deliberately deletes their open future visits (see the notice
+  // endpoint), so rolling them forward would resurrect a full year of visits for a
+  // departing client. Found 2026-08-24 auditing the first real preview: 5 notice
+  // clients (Coleman Nissan Streetsboro, Mills, Tinney, both Riversides) accounted
+  // for 48 phantom future visits, incl. a 29-visit backfill for Mills (which also
+  // had zero history, so it fell back to its 2025 start date). Excluding notice
+  // clients is the same intent as the existing cancelled filter, one step earlier.
   const contracts = db.prepare(`
     SELECT c.*, cl.name AS client_name FROM contracts c
     JOIN clients cl ON cl.id = c.client_id
     WHERE c.status='active' AND cl.deleted_at IS NULL AND cl.status != 'cancelled'
+      AND cl.notice_given_date IS NULL
   `).all();
   let totalCreated = 0;
   const perClient = [];
