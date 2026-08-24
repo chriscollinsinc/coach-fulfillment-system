@@ -754,6 +754,21 @@ async function setVisitStore(id, store){
   toast(store ? `Store set → ${store}` : 'Store cleared');
 }
 function storeList(v){ try{ const a=JSON.parse((v&&v.contract_stores)||'[]'); return Array.isArray(a)?a:[]; }catch(_){ return []; } }
+const SPEECH_OK = ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
+function micBtn(targetId){
+  return SPEECH_OK ? `<button type="button" class="micbtn" id="mic_${targetId}" title="Dictate" onclick="dictate('${targetId}')">🎤</button>` : '';
+}
+function dictate(targetId){
+  const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition; if(!Ctor) return;
+  const btn=$('#mic_'+targetId), field=$('#'+targetId);
+  if(window._rec){ try{ window._rec.stop(); }catch(e){} window._rec=null; if(btn) btn.classList.remove('rec'); return; }
+  const rec=new Ctor(); rec.continuous=true; rec.interimResults=false; rec.lang='en-US';
+  window._rec=rec; if(btn) btn.classList.add('rec');
+  rec.onresult=e=>{ let t=''; for(let i=e.resultIndex;i<e.results.length;i++) t+=e.results[i][0].transcript; if(field){ field.value=(field.value?field.value.trim()+' ':'')+t.trim(); } };
+  rec.onerror=()=>{ if(btn) btn.classList.remove('rec'); window._rec=null; };
+  rec.onend=()=>{ if(btn) btn.classList.remove('rec'); window._rec=null; };
+  try{ rec.start(); }catch(e){}
+}
 function completeVisitDlg(id){
   const v = D.visits.find(x=>x.id===id);
   const stores = storeList(v);
@@ -762,16 +777,40 @@ function completeVisitDlg(id){
   openDlg(`<h3>Complete visit${v?' — '+esc(v.client):''}</h3>
     ${v?`<p class="small">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</p>`:''}
     ${storeField}
-    <label>Note for this visit (optional)</label>
-    <textarea id="cvNote" rows="4" placeholder="What happened on this visit — this gets logged on the client's notes, tied to this specific visit."></textarea>
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <div id="cvPrep" class="cvprep small">Loading last visit…</div>
+    <div class="cvfield"><label>Wins ${micBtn('cvWins')}</label>
+      <textarea id="cvWins" rows="2" placeholder="What went well — momentum, breakthroughs, quick numbers."></textarea></div>
+    <div class="cvfield"><label>Issues / roadblocks ${micBtn('cvIssues')}</label>
+      <textarea id="cvIssues" rows="2" placeholder="What's stuck or needs attention."></textarea></div>
+    <div class="cvfield"><label>Focus for next visit ${micBtn('cvFocus')}</label>
+      <textarea id="cvFocus" rows="2" placeholder="Where you'll pick up next time."></textarea></div>
+    <div class="cvfield"><label>New commitments — what they agreed to do (one per line) ${micBtn('cvCommit')}</label>
+      <textarea id="cvCommit" rows="2" placeholder="e.g. Post the walkaround videos daily\nRun the Saturday save-a-deal huddle"></textarea></div>
+    <div class="dlgrow"><button class="btn" onclick="cancelComplete()">Cancel</button>
     <button class="btn primary" onclick="doCompleteV(${id})">Mark complete</button></div>`);
+  // load prior commitments + last-visit focus
+  api('GET',`/api/visits/${id}/prep`).then(p=>{
+    const el=$('#cvPrep'); if(!el) return;
+    let h='';
+    const lastFocus = (p.lastNotes||[]).map(n=>n.focus).find(Boolean);
+    if(lastFocus) h+=`<div class="cvlast"><b>Last time's focus:</b> ${esc(lastFocus)}</div>`;
+    if((p.openCommitments||[]).length){
+      h+=`<div class="cvcommits"><div class="cvch">Did they follow through? Check what's done:</div>`+
+        p.openCommitments.map(c=>`<label class="cvchk"><input type="checkbox" class="cvResolve" value="${c.id}"> ${esc(c.text)}${c.from_due?` <span class="cvfrom">(from ${fmt(c.from_due)})</span>`:''}</label>`).join('')+`</div>`;
+    }
+    el.innerHTML = h || `<span style="color:var(--muted)">No prior commitments on file — this is where the record starts.</span>`;
+  }).catch(()=>{ const el=$('#cvPrep'); if(el) el.innerHTML=''; });
 }
+function cancelComplete(){ if(window._rec){ try{window._rec.stop()}catch(e){} window._rec=null; } closeDlg(); }
 async function doCompleteV(id){
-  const note = ($('#cvNote')||{}).value || '';
+  if(window._rec){ try{window._rec.stop()}catch(e){} window._rec=null; }
+  const val=x=>((($('#'+x)||{}).value)||'').trim();
   const storeEl = $('#cvStore');
-  const payload = {};
-  if(note.trim()) payload.note = note.trim();
+  const payload = { wins:val('cvWins'), issues:val('cvIssues'), focus:val('cvFocus') };
+  const commits = val('cvCommit').split('\n').map(s=>s.trim()).filter(Boolean);
+  if(commits.length) payload.commitments = commits;
+  const resolved=[...document.querySelectorAll('.cvResolve:checked')].map(c=>+c.value);
+  if(resolved.length) payload.resolvedCommitmentIds = resolved;
   if(storeEl) payload.store = storeEl.value;
   try{
     await api('POST',`/api/visits/${id}/complete`, payload);
@@ -1751,6 +1790,17 @@ function clientProfileView(data, notes){
     <div class="bar" style="margin-top:10px;max-width:400px"><div style="width:${pct}%;background:var(--primary)"></div><div style="width:${100-pct}%;background:var(--open)"></div></div>
   </div>`;
 
+  const oc = data.openCommitments || [], dc = data.doneCommitments || [];
+  if(oc.length || dc.length){
+    html += `<div class="panel"><h2>Commitments</h2>
+      <p class="small" style="margin-bottom:10px">What this client agreed to, captured on their visits — the open ones carry into the next visit for follow-up.</p>
+      ${oc.length ? `<ul class="commitlist">${oc.map(c=>`<li><span class="cdot open"></span><span>${esc(c.text)}${c.from_due?` <span class="cfrom">since ${fmt(c.from_due)}</span>`:''}</span></li>`).join('')}</ul>`
+        : `<p class="small" style="color:var(--muted)">No open commitments.</p>`}
+      ${dc.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer">${dc.length} completed commitment${dc.length>1?'s':''}</summary>
+        <ul class="commitlist done" style="margin-top:8px">${dc.map(c=>`<li><span class="cdot done">✓</span><span>${esc(c.text)}${c.done_on?` <span class="cfrom">${fmt(c.done_on)}</span>`:''}</span></li>`).join('')}</ul></details>` : ''}
+    </div>`;
+  }
+
   html += `<div class="panel"><h2>Assignment &amp; Keap details</h2>`;
   if(canEdit()){
     html += `<label>Assigned coach</label>
@@ -1974,9 +2024,17 @@ function clientNoteCard(clientId, n){
   const isAdmin = D.user.role === 'admin';
   const editedTag = n.edited ? ` <span class="small">(edited ${n.edited.slice(0,16).replace('T',' ')})</span>` : '';
   const keapTag = n.source === 'keap' ? ` <span class="pill" style="background:#e2f0f0;color:#2a6a6a">via Keap</span>` : '';
+  const structured = (n.wins||n.issues||n.focus)
+    ? `<div class="notestruct">
+        ${n.wins?`<div class="ns ns-win"><span>Wins</span>${esc(n.wins)}</div>`:''}
+        ${n.issues?`<div class="ns ns-iss"><span>Issues</span>${esc(n.issues)}</div>`:''}
+        ${n.focus?`<div class="ns ns-foc"><span>Focus next</span>${esc(n.focus)}</div>`:''}
+      </div>`
+    : `<div style="margin-top:4px;white-space:pre-wrap" id="note-body-${n.id}">${esc(n.body)}</div>`;
+  const visitTag = n.visit_id ? ` <span class="pill" style="background:var(--visit,#fde5de);color:#b93c22">visit</span>` : '';
   return `<div class="duecard" id="note-${n.id}">
-    <div class="meta"><b>${title}</b>${keapTag} · ${esc(n.author_name||n.author_email)} · logged ${n.created.slice(0,16).replace('T',' ')}${editedTag}</div>
-    <div style="margin-top:4px;white-space:pre-wrap" id="note-body-${n.id}">${esc(n.body)}</div>
+    <div class="meta"><b>${title}</b>${visitTag}${keapTag} · ${esc(n.author_name||n.author_email)} · logged ${n.created.slice(0,16).replace('T',' ')}${editedTag}</div>
+    ${structured}
     ${isAdmin ? `<div class="dlgrow" style="margin-top:6px">
       <button class="btn tiny" onclick="editNoteDlg(${clientId},${n.id})">Edit</button>
       <button class="btn tiny danger" onclick="deleteClientNote(${clientId},${n.id})">Delete</button>

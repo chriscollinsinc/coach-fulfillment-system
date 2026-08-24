@@ -230,6 +230,29 @@ ensureColumn('keap_events', 'company_name', "TEXT DEFAULT ''");
  * they're still a real, paying, active client through their last month. */
 ensureColumn('clients', 'notice_given_date', 'TEXT');
 
+/* ---------- The Visit Record (Theme A): structured notes + commitment loop ----------
+   A visit note stops being a freeform blob: wins / issues / focus are captured as their
+   own fields (body still holds a composed copy for search + backward compat). Action
+   items are a client's open commitments that carry forward across visits — the loop that
+   turns a visit into an accountable coaching relationship. */
+ensureColumn('client_notes', 'wins', 'TEXT');
+ensureColumn('client_notes', 'issues', 'TEXT');
+ensureColumn('client_notes', 'focus', 'TEXT');
+db.exec(`
+CREATE TABLE IF NOT EXISTS action_items(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL,
+  contract_id INTEGER,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','done','dropped')),
+  created_visit_id INTEGER,
+  resolved_visit_id INTEGER,
+  created_by TEXT,
+  created TEXT NOT NULL,
+  resolved_at TEXT);
+CREATE INDEX IF NOT EXISTS iai_client ON action_items(client_id, status);
+`);
+
 /* ---------- prospect holds (soft pencil, done right) ----------
    A hold is a real record of "we reserved these weeks on this coach's calendar for
    a prospect who hasn't signed yet" — with its own identity, owner, program, and

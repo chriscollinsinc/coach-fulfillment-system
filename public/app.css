@@ -220,3 +220,32 @@ table.recon-tbl tr:hover td{background:#faf6f0}
 .rchip.r-extra{background:#f7edd6;color:#a8790a}
 .rchip.r-carryover{background:#e5ebf5;color:#3a5a9c}
 .rchip.r-unscheduled{background:#eef0f2;color:var(--muted)}
+
+/* ---- The Visit Record (Theme A): complete dialog, notes, commitments ---- */
+.cvfield{margin-top:10px}
+.cvfield label{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--ink)}
+.micbtn{border:1px solid var(--line);background:#fff;border-radius:20px;font-size:12px;line-height:1;padding:3px 8px;cursor:pointer}
+.micbtn:hover{border-color:var(--primary)}
+.micbtn.rec{background:var(--bad,#c0442e);border-color:var(--bad,#c0442e);animation:micpulse 1s ease-in-out infinite}
+@keyframes micpulse{0%,100%{opacity:1}50%{opacity:.5}}
+.cvprep{background:var(--open,#eef8f2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:10px 0}
+.cvlast{margin-bottom:6px}
+.cvlast b{color:var(--ink)}
+.cvcommits .cvch{font-size:12px;font-weight:600;margin-bottom:4px}
+.cvchk{display:flex;gap:7px;align-items:flex-start;font-size:13px;margin:4px 0;cursor:pointer}
+.cvfrom{color:var(--muted);font-size:11px}
+/* structured note display */
+.notestruct{margin-top:6px;display:flex;flex-direction:column;gap:5px}
+.notestruct .ns{font-size:13px;line-height:1.45;padding-left:10px;border-left:3px solid var(--line)}
+.notestruct .ns span{display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:1px}
+.notestruct .ns-win{border-left-color:var(--doneb,#9fd4b8)}
+.notestruct .ns-iss{border-left-color:var(--bad,#c0442e)}
+.notestruct .ns-foc{border-left-color:var(--gold,#d4a017)}
+/* commitments list on profile */
+.commitlist{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px}
+.commitlist li{display:flex;gap:9px;align-items:flex-start;font-size:13.5px;line-height:1.4}
+.commitlist .cdot{flex:none;width:16px;height:16px;border-radius:50%;margin-top:2px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:#fff}
+.commitlist .cdot.open{background:transparent;border:2px solid var(--gold,#d4a017);width:13px;height:13px}
+.commitlist .cdot.done{background:var(--ok,#3b9c6b)}
+.commitlist.done li{color:var(--muted)}
+.commitlist .cfrom{color:var(--muted);font-size:11px}

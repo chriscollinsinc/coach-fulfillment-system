@@ -460,16 +460,46 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
     }
   }
   log(user.email, 'visit.complete', { id: v.id, client: v.client, cycle: v.cycle, store: (body && body.store) || null });
-  // Optional note logged in the same step, tied to this specific visit rather than
-  // just general client commentary — this is how a completion becomes documented.
-  if(body && body.note && String(body.note).trim()){
-    if(v.client_id){
-      db.prepare(`INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,visit_id,created)
-        VALUES(?,?,?,?,?,?,?,?)`)
-        .run(v.client_id, new Date().toISOString().slice(0,10), 'LID', user.email, user.name, String(body.note).trim(), v.id, new Date().toISOString());
+  // The Visit Record (Theme A): capture WHAT happened, not just that it happened.
+  // Structured fields (wins / issues / focus) + optional freeform, all composed into
+  // body for search + backward compat; plus the commitment loop — new action items this
+  // visit created, and prior open ones the coach checked off as done.
+  if(v.client_id && body){
+    const noteDate = new Date().toISOString().slice(0,10), nowTs = new Date().toISOString();
+    const wins=String(body.wins||'').trim(), issues=String(body.issues||'').trim(), focus=String(body.focus||'').trim(), free=String(body.note||'').trim();
+    const parts=[]; if(wins)parts.push('Wins: '+wins); if(issues)parts.push('Issues: '+issues); if(focus)parts.push('Focus next: '+focus); if(free)parts.push(free);
+    if(parts.length){
+      db.prepare(`INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,wins,issues,focus,visit_id,created)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(v.client_id, noteDate, 'LID', user.email, user.name, parts.join('\n'), wins||null, issues||null, focus||null, v.id, nowTs);
+    }
+    const resolved = Array.isArray(body.resolvedCommitmentIds) ? body.resolvedCommitmentIds.map(Number).filter(Boolean) : [];
+    if(resolved.length){
+      const rs = db.prepare("UPDATE action_items SET status='done', resolved_visit_id=?, resolved_at=? WHERE id=? AND client_id=? AND status='open'");
+      for(const aid of resolved) rs.run(v.id, nowTs, aid, v.client_id);
+    }
+    const commits = Array.isArray(body.commitments) ? body.commitments.map(s=>String(s||'').trim()).filter(Boolean) : [];
+    if(commits.length){
+      const ins = db.prepare("INSERT INTO action_items(client_id,contract_id,text,status,created_visit_id,created_by,created) VALUES(?,?,?,'open',?,?,?)");
+      for(const t of commits) ins.run(v.client_id, v.contract_id||null, t, v.id, user.email, nowTs);
     }
   }
   send(res, 200, { ok: true });
+});
+/* Visit prep: the client's open commitments + last couple of visit notes. Powers the
+ * complete dialog's "check off what you promised last time," and is the seed for the
+ * Theme B prep dossier. Read-only. */
+route('GET', /^\/api\/visits\/(\d+)\/prep$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
+  const openCommitments = v.client_id ? db.prepare(
+    `SELECT a.id, a.text, a.created, a.created_visit_id, cv.due AS from_due, cv.cal_week AS from_week
+     FROM action_items a LEFT JOIN visits cv ON cv.id=a.created_visit_id
+     WHERE a.client_id=? AND a.status='open' ORDER BY a.created`).all(v.client_id) : [];
+  const lastNotes = v.client_id ? db.prepare(
+    `SELECT n.note_date, n.wins, n.issues, n.focus, n.body, n.author_name
+     FROM client_notes n WHERE n.client_id=? AND n.visit_id IS NOT NULL AND n.visit_id!=?
+     ORDER BY n.note_date DESC, n.id DESC LIMIT 2`).all(v.client_id, v.id) : [];
+  send(res, 200, { visitId: v.id, client: v.client, openCommitments, lastNotes });
 });
 /* Bulk "confirm completed" for the admin/lead Today to-do: mark a batch of placed,
  * past-week, still-open visits as done in one action. Per Mike 2026-08-24, completed_on
@@ -2303,10 +2333,18 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
   const visitsThisYear = visits.filter(v => v.due && +v.due.slice(0,4) === year);
   const completedThisYear = visitsThisYear.filter(v => v.completed).length;
   const assignedCoach = cl.assigned_coach_id ? getCoach(cl.assigned_coach_id) : null;
+  const notes = db.prepare(`SELECT id, note_date, note_type, author_name, body, wins, issues, focus, visit_id, source
+    FROM client_notes WHERE client_id=? ORDER BY note_date DESC, id DESC`).all(cl.id);
+  const openCommitments = db.prepare(`SELECT a.id, a.text, a.created, a.created_visit_id, cv.due AS from_due, cv.cal_week AS from_week
+    FROM action_items a LEFT JOIN visits cv ON cv.id=a.created_visit_id
+    WHERE a.client_id=? AND a.status='open' ORDER BY a.created`).all(cl.id);
+  const doneCommitments = db.prepare(`SELECT a.id, a.text, a.resolved_at, rv.completed_on AS done_on
+    FROM action_items a LEFT JOIN visits rv ON rv.id=a.resolved_visit_id
+    WHERE a.client_id=? AND a.status='done' ORDER BY a.resolved_at DESC LIMIT 20`).all(cl.id);
   send(res, 200, {
     client: cl,
     assignedCoach,
-    contracts, visits,
+    contracts, visits, notes, openCommitments, doneCommitments,
     visitProgress: { year, total: visitsThisYear.length, completed: completedThisYear },
     health: clientHealth(cl, contracts, visits, assignedCoach),
   });
