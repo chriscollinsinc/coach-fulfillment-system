@@ -594,7 +594,7 @@ function board(){
   let html='';
   if(placing){
     html+=`<div class="placebanner">Placing <b>${esc(placing.client)}</b> — ${esc(placing.cycle)} ${esc(placing.program)}, due ${fmt(placing.due)}.
-      Click any open week below. <button class="btn tiny" onclick="st.placing=null;render()">Cancel</button></div>`;
+      Click any open week — <b>including past weeks</b>, to backfill a visit that already happened. <button class="btn tiny" onclick="st.placing=null;render()">Cancel</button></div>`;
   }
   html+=`<div class="controls">
     ${global?`<span class="btn primary" style="cursor:default" title="All teams shown together">All teams</span>`:''}
@@ -628,7 +628,11 @@ function board(){
         // Placing (moving a card onto an open week) stays admin/lead-only — st.placing
         // is only ever set from buttons already gated on canEdit() below, so this
         // branch is unreachable for sales/coach in practice, but it's guarded here too.
-        if(placing && !past && canEdit()){ cls+=' target'; inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
+        // Past weeks ARE valid placement targets: a visit that happened last week and
+        // never got its card added gets backfilled here, then shows on the "confirm
+        // completed" to-do to mark done. (Setting a plain Home/Off label on a past week
+        // stays disabled — that's only useful looking forward.)
+        if(placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
         else if(canEditWeeks() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');

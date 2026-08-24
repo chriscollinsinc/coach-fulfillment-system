@@ -249,3 +249,6 @@ table.recon-tbl tr:hover td{background:#faf6f0}
 .commitlist .cdot.done{background:var(--ok,#3b9c6b)}
 .commitlist.done li{color:var(--muted)}
 .commitlist .cfrom{color:var(--muted);font-size:11px}
+
+/* past-week placement target: still clearly clickable, tinted to show it is in the past */
+.slot.target.target-past{opacity:1;background:#fff3f0;outline-style:dashed}
