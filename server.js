@@ -1629,6 +1629,10 @@ function resyncPreview2026(){
   const coaches=db.prepare("SELECT id,name FROM coaches").all();
   const coachByNorm={}; for(const c of coaches) coachByNorm[reconNorm(c.name)]=c;
   const assigned={}; for(const c of db.prepare("SELECT id,assigned_coach_id FROM clients").all()) assigned[c.id]=c.assigned_coach_id;
+  // Surfaced so the preview shows, before Apply is ever clicked, which extra/carryover
+  // items a departed/notice-given client would have get silently skipped (Apply never
+  // creates new visits for them — see the apply route's comment for why).
+  const clientActiveNow={}; for(const c of db.prepare("SELECT id,status,notice_given_date FROM clients").all()) clientActiveNow[c.id]=c.status==='active' && !c.notice_given_date;
   // group by (client|week), collapsing same-client same-week multi-coach to one
   const groups={}; const unmatched={};
   for(const v of parsed.visits){
@@ -1666,14 +1670,17 @@ function resyncPreview2026(){
       else items.push({type:'extra',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount}); }
     for(const v of carry) items.push({type:'carryover',week:v.week,coach:v.coach,coachId:v.coachId});
     for(let i=0;i<cad.length;i++) if(!claimed[i]) items.push({type:'unscheduled',cycle:cad[i].cycle,due:cad[i].due,visitId:cad[i].id});
-    plan.push({ clientId:+cid, client:pc.client, counts:{ place:items.filter(x=>x.type==='place').length, extra:items.filter(x=>x.type==='extra').length, carryover:items.filter(x=>x.type==='carryover').length, unscheduled:items.filter(x=>x.type==='unscheduled').length }, items });
+    const clientIsActive = clientActiveNow[cid] !== false; // default true if somehow missing
+    if(!clientIsActive) for(const it of items) if(it.type==='extra'||it.type==='carryover') it.willSkipInactive=true;
+    plan.push({ clientId:+cid, client:pc.client, clientActive:clientIsActive, counts:{ place:items.filter(x=>x.type==='place').length, extra:items.filter(x=>x.type==='extra').length, carryover:items.filter(x=>x.type==='carryover').length, unscheduled:items.filter(x=>x.type==='unscheduled').length }, items });
   }
   plan.sort((a,b)=>a.client.localeCompare(b.client));
   const totals={place:0,extra:0,carryover:0,unscheduled:0};
   for(const p of plan){ for(const k in totals) totals[k]+=p.counts[k]; }
+  const skippedInactiveNew = plan.reduce((n,p)=>n+p.items.filter(i=>i.willSkipInactive).length,0);
   const unmatchedCoaches=parsed.coachNames.filter(n=>!coachByNorm[reconNorm(n)]);
   return { imported:true, uploadedAt:row.uploaded_at, filename:row.filename,
-    summary:{ ...totals, visitsAfterDedupe:totals.place+totals.extra+totals.carryover, matchedClients:plan.length,
+    summary:{ ...totals, skippedInactiveNew, visitsAfterDedupe:totals.place+totals.extra+totals.carryover, matchedClients:plan.length,
       sameWeekDoubles:doubles.length, coVisitsCollapsed:coCollapsed, unmatchedLabelCount:Object.keys(unmatched).length, unmatchedCoaches },
     doubles: doubles.sort((a,b)=>a.client.localeCompare(b.client)), unmatchedLabels:Object.keys(unmatched).sort(), plan };
 }
@@ -1719,6 +1726,14 @@ route('POST', /^\/api\/admin\/sheet-2026\/apply$/, ['admin'], (req, res, m, body
   if(recon.error) return err(res, 400, recon.error);
   const coachTeam = {}; for(const c of db.prepare('SELECT id,team FROM coaches').all()) coachTeam[c.id]=c.team;
   const clientTeam = {}; for(const r of db.prepare("SELECT client_id, team FROM visits WHERE team IS NOT NULL AND team!='' GROUP BY client_id").all()) clientTeam[r.client_id]=r.team;
+  // Never create a NEW visit (extra/carryover) for a client who has departed or given
+  // notice — confirmed 2026-08-24 in a pre-apply audit: the live sheet still carries
+  // extra/carryover cells for several since-cancelled/inactive M.A.G. stores, two with
+  // FUTURE 2026 weeks, which would have resurrected them with upcoming scheduled work —
+  // the same class of bug as the rolling-schedule notice-given fix earlier this session.
+  // PLACE items are unaffected: they only correct cal_week/cal_coach on a visit row that
+  // already exists, which is safe (accurate history) even for a departed client.
+  const clientActive = {}; for(const c of db.prepare("SELECT id,status,notice_given_date FROM clients").all()) clientActive[c.id] = c.status==='active' && !c.notice_given_date;
   const contractsByClient = {};
   for(const c of db.prepare("SELECT id,client_id,program,status FROM contracts").all()){ (contractsByClient[c.client_id]=contractsByClient[c.client_id]||[]).push(c); }
   const clearStaleExtra = db.prepare("DELETE FROM visits WHERE client_id=? AND source='sheet-2026' AND completed=0");
@@ -1750,7 +1765,7 @@ route('POST', /^\/api\/admin\/sheet-2026\/apply$/, ['admin'], (req, res, m, body
         if(it.type==='place'){
           upd.run(it.week, it.coachId, it.visitId); placed++;
         } else if(it.type==='extra' || it.type==='carryover'){
-          if(!primary){ skipped++; continue; }
+          if(!primary || !clientActive[p.clientId]){ skipped++; continue; }
           const cyc = it.type==='carryover' ? 'Carryover' : 'Extra visit';
           const team = clientTeam[p.clientId] || coachTeam[it.coachId] || null;
           insVisit.run(p.client, primCon.program||'', cyc, it.week, team, 'sheet-2026', todayS, p.clientId, primary, it.week, it.coachId);
