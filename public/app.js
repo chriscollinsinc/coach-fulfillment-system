@@ -1839,9 +1839,15 @@ function clientProfileView(data, notes){
     <p class="small" style="margin-bottom:10px">Any coach, lead, or admin can add a note here — this is meant to replace jotting notes in Keap going forward. Only admins can edit or delete a note.</p>
     <div class="controls" style="margin-bottom:6px">
       <label style="margin:0">Date</label><input type="date" id="cliNoteDate" value="${TODAY}" style="width:150px">
-      <label style="margin:0">Type</label><select id="cliNoteType"><option>Coaching Call</option><option>LID</option></select>
+      <label style="margin:0">Type</label><select id="cliNoteType" onchange="toggleNoteFields()"><option>Coaching Call</option><option>LID</option></select>
     </div>
-    <textarea id="cliNoteBody" rows="3" style="width:100%;box-sizing:border-box" placeholder="Add a note about this client…"></textarea>
+    <div id="cnFreeform"><textarea id="cliNoteBody" rows="3" style="width:100%;box-sizing:border-box" placeholder="Quick note — a call, an email, a heads-up about this client…"></textarea></div>
+    <div id="cnStructured" style="display:none">
+      <div class="cvfield"><label>Wins ${micBtn('cnWins')}</label><textarea id="cnWins" rows="2" placeholder="What went well."></textarea></div>
+      <div class="cvfield"><label>Issues / roadblocks ${micBtn('cnIssues')}</label><textarea id="cnIssues" rows="2" placeholder="What's stuck."></textarea></div>
+      <div class="cvfield"><label>Focus for next visit ${micBtn('cnFocus')}</label><textarea id="cnFocus" rows="2" placeholder="Where to pick up next time."></textarea></div>
+      <p class="small" style="color:var(--muted);margin-top:6px">Same shape as completing a visit. To also log <b>commitments</b>, complete the visit from the calendar — that ties them to the visit and carries them forward.</p>
+    </div>
     <div class="dlgrow" style="margin-top:6px">
       <button class="btn primary" onclick="saveClientNote(${client.id})">Add note</button>
       ${canEdit() && client.keap_id ? `<button class="btn" onclick="keapNotesPreviewDlg(${client.id})">Import from Keap…</button>` : ''}
@@ -2077,12 +2083,29 @@ async function doImportKeapNotes(clientId){
   closeDlg(); toast(`Imported ${r.imported} note(s) from Keap`);
   await loadClientProfile(clientId);
 }
+function toggleNoteFields(){
+  const lid = (($('#cliNoteType')||{}).value)==='LID';
+  const s=$('#cnStructured'), f=$('#cnFreeform');
+  if(s) s.style.display = lid?'block':'none';
+  if(f) f.style.display = lid?'none':'block';
+}
 async function saveClientNote(clientId){
-  const body = $('#cliNoteBody').value.trim();
-  if(!body){ uiAlert('Note cannot be empty'); return; }
+  const note_type = ($('#cliNoteType')||{}).value || 'Coaching Call';
   const note_date = $('#cliNoteDate').value || TODAY;
-  const note_type = $('#cliNoteType').value;
-  await api('POST','/api/clients/'+clientId+'/notes', { body, note_date, note_type });
+  const val = x => ((($('#'+x)||{}).value)||'').trim();
+  let payload;
+  if(note_type==='LID'){
+    const wins=val('cnWins'), issues=val('cnIssues'), focus=val('cnFocus');
+    if(!wins && !issues && !focus){ uiAlert('Add at least one of Wins / Issues / Focus'); return; }
+    const parts=[]; if(wins)parts.push('Wins: '+wins); if(issues)parts.push('Issues: '+issues); if(focus)parts.push('Focus next: '+focus);
+    payload={ note_date, note_type:'LID', wins, issues, focus, body:parts.join('\n') };
+  } else {
+    const body=($('#cliNoteBody').value||'').trim();
+    if(!body){ uiAlert('Note cannot be empty'); return; }
+    payload={ note_date, note_type, body };
+  }
+  if(window._rec){ try{window._rec.stop()}catch(e){} window._rec=null; }
+  await api('POST','/api/clients/'+clientId+'/notes', payload);
   toast('Note added');
   await loadClientProfile(clientId);
 }

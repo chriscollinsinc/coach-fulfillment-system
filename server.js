@@ -2506,8 +2506,12 @@ route('POST', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach']
   if(!text) return err(res, 400, 'note text required');
   const noteDate = /^\d{4}-\d{2}-\d{2}$/.test(body.note_date || '') ? body.note_date : new Date().toISOString().slice(0,10);
   const noteType = NOTE_TYPES.includes(body.note_type) ? body.note_type : 'Coaching Call';
-  const r = db.prepare('INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,created) VALUES(?,?,?,?,?,?,?)')
-    .run(cl.id, noteDate, noteType, user.email, user.name, text, new Date().toISOString());
+  // A manually-logged LID note carries the same structured shape as a completed visit.
+  const wins = body.wins ? String(body.wins).trim() : null;
+  const issues = body.issues ? String(body.issues).trim() : null;
+  const focus = body.focus ? String(body.focus).trim() : null;
+  const r = db.prepare('INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,wins,issues,focus,created) VALUES(?,?,?,?,?,?,?,?,?,?)')
+    .run(cl.id, noteDate, noteType, user.email, user.name, text, wins, issues, focus, new Date().toISOString());
   log(user.email, 'client.note_add', { clientId: cl.id, name: cl.name, noteDate, noteType });
   send(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
 });
