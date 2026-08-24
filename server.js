@@ -600,6 +600,12 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
   const overdueNoPlan = db.prepare(`SELECT v.id, v.client, v.client_id, v.team, v.program, v.cycle, v.due
     FROM visits v WHERE v.completed=0 AND v.cal_week IS NULL AND v.due<?${tf} ORDER BY v.due LIMIT 100`).all(today, ...tArgs);
   const lateOnCalendar = db.prepare(`SELECT COUNT(*) c FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND v.due<?${tf}`).get(today, ...tArgs).c;
+  // Confirm-completed to-do: a visit scheduled on a week that's already fully passed but
+  // still not marked done. The 2026-sheet apply places past visits without completing them
+  // (the sheet shows scheduled, not confirmed-done), so the admin verifies each happened.
+  const monThis = (()=>{ const d=new Date(); const off=(d.getUTCDay()+6)%7; d.setUTCDate(d.getUTCDate()-off); return d.toISOString().slice(0,10); })();
+  const toConfirm = db.prepare(`SELECT v.id, v.client, v.client_id, v.team, v.program, v.cycle, v.due, v.cal_week, v.cal_coach
+    FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND v.cal_week<?${tf} ORDER BY v.cal_week DESC LIMIT 200`).all(monThis, ...tArgs);
   const dueSoonUnscheduled = db.prepare(`SELECT v.id, v.client, v.client_id, v.team, v.program, v.cycle, v.due
     FROM visits v WHERE v.completed=0 AND v.cal_week IS NULL AND v.due>=? AND v.due<=?${tf} ORDER BY v.due LIMIT 100`).all(today, plus30, ...tArgs);
   // At-risk: active paying visit-clients with nothing recent and nothing planned.
@@ -622,7 +628,7 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
   const pendingCount = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending'").get().c;
   const completedThisMonth = db.prepare(`SELECT COUNT(*) c FROM visits v WHERE v.completed=1 AND COALESCE(v.completed_on,v.due) LIKE ?${tf}`)
     .get(today.slice(0,7)+'%', ...tArgs).c;
-  send(res, 200, { role: user.role, team: teamFilter, overdueNoPlan, lateOnCalendar, dueSoonUnscheduled, atRisk, missingNotes, holdsExpiring, pendingCount, completedThisMonth });
+  send(res, 200, { role: user.role, team: teamFilter, overdueNoPlan, lateOnCalendar, dueSoonUnscheduled, toConfirm, atRisk, missingNotes, holdsExpiring, pendingCount, completedThisMonth });
 });
 
 /* ----- coaches & teams ----- */
@@ -1362,17 +1368,39 @@ route('POST', /^\/api\/admin\/duplicate-visits-cleanup$/, ['admin'], (req, res, 
  *  - Name matching: exact, then most-specific containment (the longest client name that
  *    fits) — apostrophe-insensitive so "Lum's" == "Lums". Unmatched are surfaced, never
  *    force-matched. */
-function reconNorm(x){ return String(x||'').toLowerCase().replace(/&/g,' and ').replace(/['’`]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
+// Name normalization: apostrophe-insensitive + common sheet spelling/abbreviation
+// variants folded to the client spelling, so "Lum's"=="Lums", "Volkswagon"=="Volkswagen",
+// "…Chrysler Jeep Dodge Ram"=="…CDJR". Applied to BOTH labels and client names so they
+// meet in the middle. Confirmed with Mike 2026-08-24 (normalize before apply).
+function reconNorm(x){
+  let s=' '+String(x||'').toLowerCase().replace(/&/g,' and ').replace(/['’`]/g,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim()+' ';
+  s=s.replace(/ volkswagon /g,' volkswagen ')
+     .replace(/ chrysler (jeep dodge|dodge jeep) ram /g,' cdjr ').replace(/ chrysler jeep dodge /g,' cdjr ')
+     .replace(/ northbend /g,' north bend ');
+  return s.trim();
+}
+const RECON_STOP=new Set(['of','the','and','inc','llc','co','a','group','automotive']);
+function reconToks(x){ return reconNorm(x).split(' ').filter(w=>w&&!RECON_STOP.has(w)); }
 function reconcileSheet2026(){
   const y='2026', lo=y+'-01-01', hi=y+'-12-31', today=new Date().toISOString().slice(0,10);
   const clients = db.prepare("SELECT id,name FROM clients WHERE deleted_at IS NULL").all()
-    .map(c=>({id:c.id,name:c.name,n:reconNorm(c.name)})).filter(c=>c.n);
+    .map(c=>({id:c.id,name:c.name,n:reconNorm(c.name),t:reconToks(c.name)})).filter(c=>c.n);
   const matchClient = (label)=>{
-    const ln = reconNorm(String(label).replace(/carryover/ig,'').replace(/\bshadow\b/ig,''));
+    const clean = String(label).replace(/carryover/ig,'').replace(/\bshadow\b/ig,'');
+    const ln = reconNorm(clean);
     if(!ln) return null;
-    let ex = clients.find(c=>c.n===ln); if(ex) return ex;
-    let cand = clients.filter(c=>ln.includes(c.n)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0];
-    cand = clients.filter(c=>c.n.includes(ln)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0];
+    let ex = clients.find(c=>c.n===ln); if(ex) return ex;                                   // exact
+    let cand = clients.filter(c=>ln.includes(c.n)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0]; // client name inside label
+    cand = clients.filter(c=>c.n.includes(ln)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0];     // label inside client name
+    // order-independent token-subset, only when the best is unambiguous
+    const lt = reconToks(clean); if(!lt.length) return null;
+    const subs = clients.filter(c=>c.t.length && (c.t.every(t=>lt.includes(t)) || lt.every(t=>c.t.includes(t))));
+    if(subs.length){
+      const score=c=>c.t.filter(t=>lt.includes(t)).length;
+      subs.sort((a,b)=>score(b)-score(a)||b.n.length-a.n.length);
+      const top=score(subs[0]);
+      if(subs.filter(c=>score(c)===top).length===1) return subs[0];
+    }
     return null;
   };
   const coaches = db.prepare("SELECT id,name FROM coaches").all();
@@ -1411,6 +1439,55 @@ function reconcileSheet2026(){
   return { year:y, generatedAt:new Date().toISOString(), totals, plan, unmatched };
 }
 route('GET', /^\/api\/admin\/sheet-recon-2026$/, ['admin'], (req, res) => { send(res, 200, reconcileSheet2026()); });
+/* Apply the reconciliation. Re-derives the plan server-side (never trusts the client),
+ * then, per Mike's 2026-08-24 rules:
+ *  - PLACE  : set cal_week + cal_coach on the matched cadence cycle (place only — never
+ *             auto-complete; past-week placements surface on the admin "confirm completed"
+ *             to-do), and delete the now-superseded "from sheet" block.
+ *  - EXTRA / CARRYOVER : create an additional tracked visit on the client's EXISTING
+ *             contract (a carryover is a prior cycle, not a new contract), placed on the
+ *             sheet week/coach; delete the block.
+ *  - UNSCHEDULED cadence cycles : left untouched (stay to-schedule).
+ *  - UNMATCHED labels : left as blocks for manual mapping.
+ * All in one transaction. */
+route('POST', /^\/api\/admin\/sheet-recon-2026\/apply$/, ['admin'], (req, res, m, body, user) => {
+  const todayS = new Date().toISOString().slice(0,10);
+  const recon = reconcileSheet2026();
+  const coachTeam = {}; for(const c of db.prepare('SELECT id,team FROM coaches').all()) coachTeam[c.id]=c.team;
+  const clientTeam = {}; for(const r of db.prepare("SELECT client_id, team FROM visits WHERE team IS NOT NULL AND team!='' GROUP BY client_id").all()) clientTeam[r.client_id]=r.team;
+  const contractsByClient = {};
+  for(const c of db.prepare("SELECT id,client_id,program,status FROM contracts").all()){ (contractsByClient[c.client_id]=contractsByClient[c.client_id]||[]).push(c); }
+  const upd = db.prepare('UPDATE visits SET cal_week=?, cal_coach=? WHERE id=?');
+  const delBlock = db.prepare('DELETE FROM blocks WHERE coach_id=? AND week=?');
+  const insVisit = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id,cal_week,cal_coach)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
+  let placed=0, created=0, blocksDeleted=0, skipped=0;
+  db.exec('BEGIN');
+  try{
+    for(const p of recon.plan){
+      const placeContract = (p.items.find(i=>i.type==='place'&&i.contractId)||{}).contractId;
+      const cons = contractsByClient[p.clientId]||[];
+      const primary = placeContract || ((cons.filter(c=>c.status==='active').sort((a,b)=>a.id-b.id)[0]||cons[0]||{}).id);
+      const primCon = cons.find(c=>c.id===primary) || {};
+      for(const it of p.items){
+        if(it.type==='place'){
+          upd.run(it.week, it.coachId, it.visitId); placed++;
+          if(delBlock.run(it.coachId, it.week).changes) blocksDeleted++;
+        } else if(it.type==='extra' || it.type==='carryover'){
+          if(!primary){ skipped++; continue; }
+          const cyc = it.type==='carryover' ? 'Carryover' : 'Extra visit';
+          const team = clientTeam[p.clientId] || coachTeam[it.coachId] || null;
+          insVisit.run(p.client, primCon.program||'', cyc, it.week, team, 'sheet-2026', todayS, p.clientId, primary, it.week, it.coachId);
+          created++;
+          if(delBlock.run(it.coachId, it.week).changes) blocksDeleted++;
+        }
+      }
+    }
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); return err(res, 500, 'Apply failed: ' + e.message); }
+  log(user.email, 'admin.sheet_recon_2026_apply', { placed, created, blocksDeleted, skipped });
+  send(res, 200, { ok:true, placed, created, blocksDeleted, skipped });
+});
 
 /* Archive-to-system handoff gap, found 2026-08-23 alongside Cowboy Chevrolet GMC
  * and Bowman Chevrolet of Clinton: some completed visits imported from the sheet

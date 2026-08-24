@@ -427,6 +427,7 @@ function todayTeamView(t){
     <div class="card ${t.overdueNoPlan.length?'bad':'ok'}" style="cursor:pointer" onclick="${invJump('overdue')};st.invFilter='attention'"><div class="k">${t.overdueNoPlan.length}</div><div class="l">Overdue — no plan</div></div>
     <div class="card" style="cursor:pointer" onclick="${invJump('oncal')}"><div class="k">${t.lateOnCalendar}</div><div class="l">Late but on calendar</div></div>
     <div class="card ${t.dueSoonUnscheduled.length?'warn':'ok'}" style="cursor:pointer" onclick="${invJump('needs')}"><div class="k">${t.dueSoonUnscheduled.length}</div><div class="l">Due in 30 days, unscheduled</div></div>
+    ${(t.toConfirm&&t.toConfirm.length)?`<div class="card warn" style="cursor:pointer" onclick="document.getElementById('confirmDonePanel')?.scrollIntoView({behavior:'smooth'})"><div class="k">${t.toConfirm.length}</div><div class="l">To confirm completed</div></div>`:''}
     <div class="card ok"><div class="k">${t.completedThisMonth}</div><div class="l">Completed this month${t.team?' — Team '+esc(t.team):''}</div></div>
   </div>`;
   if(t.pendingCount) html+=`<div class="panel" style="border-left:4px solid var(--primary);padding:10px 14px">
@@ -443,6 +444,19 @@ function todayTeamView(t){
       <button class="btn tiny" onclick="visitDrawer(${v.id})">Details</button></td></tr>`)+`</table>`
     : `<p class="small">Nothing — every overdue visit has a calendar slot. ✔</p>`;
   html+=`</div>`;
+
+  if(t.toConfirm && t.toConfirm.length){
+    html+=`<div class="panel" id="confirmDonePanel"><h2>Confirm completed — scheduled, week passed, not marked done (${t.toConfirm.length})</h2>
+    <p class="small" style="margin-bottom:8px">These visits were placed on a week that's already over but aren't marked complete yet — including everything just brought over from the 2026 sheet. Confirm the ones that happened; if a visit didn't happen, open it to reschedule.</p>
+    <table><tr><th>Client</th><th>Visit</th><th>Was scheduled</th><th>Coach</th><th></th></tr>`+
+    todayRows(t.toConfirm, 15, v=>`<tr>
+      <td><b>${v.client_id?`<a style="cursor:pointer;color:var(--primary);text-decoration:underline" onclick="openClientProfile(${v.client_id})">${esc(v.client)}</a>`:esc(v.client)}</b></td>
+      <td>${esc(v.cycle)} ${esc(v.program)} · ${esc(v.team||'?')}</td>
+      <td class="mono">wk of ${fmtW(v.cal_week)}</td>
+      <td>${esc(coach(v.cal_coach)?.name||'—')}</td>
+      <td><button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Mark complete</button>
+      <button class="btn tiny" onclick="visitDrawer(${v.id})">Details</button></td></tr>`)+`</table></div>`;
+  }
 
   html+=`<div class="panel"><h2>Schedule next — due within 30 days (${t.dueSoonUnscheduled.length})</h2>`;
   html+= t.dueSoonUnscheduled.length ? `<table><tr><th>Client</th><th>Visit</th><th>Due</th><th></th></tr>`+
@@ -2284,7 +2298,11 @@ async function loadSheetRecon2026(){
       <span class="rk-info"><b>${t.carryover}</b> carryover</span>
       <span class="rk-mut"><b>${t.unscheduled}</b> unscheduled cycles</span>
       <span class="rk-bad"><b>${t.unmatched}</b> unmatched</span></div>
-      <div class="controls" style="margin:12px 0 6px"><label class="small">Show
+      <div class="controls" style="margin:12px 0 2px">
+        <button class="btn danger" onclick="applySheetRecon2026()">Apply to calendar</button>
+        <span class="small" style="color:var(--muted)">Places ${t.place}, creates ${t.extra+t.carryover} extra/carryover, deletes ${t.place+t.extra+t.carryover} superseded blocks. Placed only — past visits become “confirm completed” to-dos.</span>
+      </div>
+      <div class="controls" style="margin:6px 0"><label class="small">Show
         <select id="reconFilter" onchange="renderReconTable()">
           <option value="all">everything</option>
           <option value="place">place onto a cycle</option>
@@ -2300,6 +2318,21 @@ async function loadSheetRecon2026(){
     }
     el.innerHTML=h; renderReconTable();
   }catch(e){ el.innerHTML='<p>Could not load.</p>'; }
+}
+async function applySheetRecon2026(){
+  const r=window._recon; if(!r){ await loadSheetRecon2026(); return; }
+  const t=r.totals;
+  const msg=`Apply the 2026 schedule to the calendar?\n\n`+
+    `• Place ${t.place} visits onto their cadence cycle (coach + week from the sheet)\n`+
+    `• Create ${t.extra} extra + ${t.carryover} carryover visit(s) on the client's existing contract\n`+
+    `• Delete ${t.place+t.extra+t.carryover} superseded "from sheet" blocks\n\n`+
+    `Visits are PLACED, not marked complete — past ones appear on your "Confirm completed" to-do on Today. Unscheduled cycles (${t.unscheduled}) and unmatched labels (${t.unmatched}) are left alone.`;
+  if(!(await uiConfirm(msg,'Apply to calendar'))) return;
+  try{
+    const res=await api('POST','/api/admin/sheet-recon-2026/apply',{});
+    toast(`Applied — ${res.placed} placed, ${res.created} created, ${res.blocksDeleted} blocks removed`);
+    await refresh(); await loadSheetRecon2026();
+  }catch(e){ uiAlert(e.message||'Apply failed'); }
 }
 function reconNote(x){
   if(x.type==='place') return (x.alreadyPlaced?'already on calendar · ':'')+(x.completed?'cycle already completed · ':'')+(x.past?'past week (likely already done)':'would place on this week');
