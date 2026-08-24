@@ -43,6 +43,7 @@ let st = {
   boardY:+TODAY.slice(0,4), boardM:+TODAY.slice(5,7)-1,
   placing:null, detail:null,
   invFilter:'attention', invSearch:'',
+  calSearch:'',
   due2027:false,
 };
 let occ = null; // occupancy map coach|week -> {type:'visit'|'block', ...}
@@ -542,6 +543,10 @@ function board(){
     ? D.coaches.filter(c=>myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
     : D.coaches.filter(c=>c.team===t);
   const placing = st.placing ? D.visits.find(v=>v.id===st.placing) : null;
+  // Calendar client search: matches a visit's client name (case-insensitive substring).
+  // Drives both the cell glow on the grid below and the results rail on the right.
+  const calQ = norm(st.calSearch||'');
+  const calHit = v => calQ && norm(v.client).includes(calQ);
 
   /* to-schedule list: overdue first, then due this month, then next month */
   const nextM = m===11?[y+1,0]:[y,m+1];
@@ -561,6 +566,12 @@ function board(){
     ${myTeams().map(x=>`<button class="btn ${(!global&&x===t)?'primary':''}" onclick="st.view='board';st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
     ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
     <span style="flex:1"></span>
+    <div class="calsearch">
+      <input id="calSearchBox" placeholder="🔍 Search a client's visits…" autocomplete="off" value="${esc(st.calSearch||'')}"
+        oninput="st.calSearch=this.value;render()"
+        onkeydown="if(event.key==='Escape'){st.calSearch='';render()}">
+      ${st.calSearch?`<button class="btn tiny" onclick="st.calSearch='';render()">clear ✕</button>`:''}
+    </div>
     <div class="monthnav">
       <button class="btn" onclick="bMonth(-1)">‹</button>
       <span class="mlabel">${MONTHS[m]} ${y}</span>
@@ -585,7 +596,7 @@ function board(){
         if(placing && !past && canEdit()){ cls+=' target'; inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
         else if(canEditWeeks() && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
-        const v=o.v; cls+= v.completed?' s-done':' s-visit';
+        const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
         inner=`<b>${v.completed?'':healthDot(v.client_id)}${esc(v.client)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
         // Viewing a visit's detail box is read-only by itself — Complete/Move/Unschedule
         // inside it are individually gated (see the detail box below), so anyone who can
@@ -612,6 +623,7 @@ function board(){
 
   /* side rail */
   html+=`<div class="sidebox">`;
+  if(calQ) html += calSearchRail(calQ, global);
   if(st.detail){
     const v=D.visits.find(x=>x.id===st.detail);
     const dStores = v ? storeList(v) : [];
@@ -638,12 +650,54 @@ function board(){
     });
     return h;
   };
-  html+=section('Overdue / carryover',overdue);
-  html+=section(`Due ${MO[m]}`,thisMo);
-  html+=section(`Coming up · ${MO[nextM[1]]}`,nextMo);
-  if(!overdue.length&&!thisMo.length&&!nextMo.length) html+=`<h2>To schedule</h2><p class="small">Nothing waiting for Team ${t} in this window. 🎉</p>`;
+  if(!calQ){
+    html+=section('Overdue / carryover',overdue);
+    html+=section(`Due ${MO[m]}`,thisMo);
+    html+=section(`Coming up · ${MO[nextM[1]]}`,nextMo);
+    if(!overdue.length&&!thisMo.length&&!nextMo.length) html+=`<h2>To schedule</h2><p class="small">Nothing waiting for ${global?'these teams':'Team '+t} in this window. 🎉</p>`;
+  }
   html+=`</div></div>`;
   return html;
+}
+/* Results rail for the calendar client search. Lists every matching visit across the
+ * last ~2 years + all future, chronological, color-coded by status; clicking one jumps
+ * the board to that visit's month and (if it's placed on a coach's week) glows its cell. */
+function calSearchRail(q, global){
+  const cutoff = (()=>{ const d=new Date(TODAY+'T12:00:00'); d.setFullYear(d.getFullYear()-2); return d.toISOString().slice(0,10); })();
+  const key = v => v.cal_week || v.due || '';
+  const matches = D.visits.filter(v=>norm(v.client).includes(q) && key(v) && key(v) >= cutoff)
+    .sort((a,b)=> key(a).localeCompare(key(b)) || (a.id-b.id));
+  if(!matches.length) return `<h2>Visit search</h2><p class="small">No visits found for “${esc(st.calSearch)}” in the last 2 years.<br><a onclick="st.calSearch='';render()" style="cursor:pointer;color:var(--primary)">clear search</a></p>`;
+  const names = [...new Set(matches.map(v=>v.client))];
+  const placedOnGrid = matches.filter(v=>v.cal_week && v.cal_coach).length;
+  let h=`<h2>Visit search (${matches.length})</h2>
+    <p class="small" style="margin:-4px 0 8px">${names.length===1?esc(names[0]):names.length+' clients'} · ${placedOnGrid} on the calendar · click one to jump to its month.</p>`;
+  for(const v of matches){
+    const s=status(v);
+    const label = s==='completed'?'Completed' : s==='on_calendar'?'On calendar' : s==='overdue'?'Overdue — no plan' : s==='needs_scheduling'?'To schedule':'—';
+    const dk=key(v);
+    const mo = dk?`${MO[+dk.slice(5,7)-1]} ${dk.slice(0,4)}`:'—';
+    const co = v.cal_coach?(coach(v.cal_coach)?.name||''):'';
+    const wk = v.cal_week?`wk of ${fmtW(v.cal_week)}` : v.due?`due ${fmt(v.due)}`:'';
+    h+=`<div class="rescard rs-${s}" onclick="calSearchJump(${v.id})" title="Jump to ${esc(mo)}">
+      <div class="resmo">${mo}<span class="reslabel">${label}</span></div>
+      ${names.length>1?`<b>${esc(v.client)}</b>`:''}
+      <div class="meta">${esc(v.cycle)} ${esc(v.program)}${v.store?` · 🏬 ${esc(v.store)}`:''}</div>
+      <div class="meta">${wk}${co?' · '+esc(co):''}${global&&v.team?' · '+esc(v.team):''}</div>
+    </div>`;
+  }
+  return h;
+}
+/* Jump the board to a searched visit's month. Keeps the current view mode (stays on
+ * the Global Calendar if that's where you searched, otherwise switches to the visit's
+ * team board), and leaves st.calSearch set so the cell keeps glowing after the jump. */
+function calSearchJump(id){
+  const v=D.visits.find(x=>x.id===id); if(!v) return;
+  const anchor = v.cal_week || v.due;
+  if(anchor){ st.boardY=+anchor.slice(0,4); st.boardM=+anchor.slice(5,7)-1; }
+  if(st.view!=='global'){ st.view='board'; if(v.team) st.boardTeam=v.team; }
+  st.detail = (v.cal_week && v.cal_coach) ? v.id : null;
+  st.placing=null; render();
 }
 function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.placing=null; st.detail=null; render(); }
 async function placeHere(cid,w){
