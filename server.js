@@ -1647,7 +1647,12 @@ function resyncPreview2026(){
     const credit=matched.find(c=>c.id===assigned[g.client.id]) || matched[0] || null;
     (perClient[g.client.id]=perClient[g.client.id]||{client:g.client.name, visits:[]}).visits.push({week:g.week, coachId:credit?credit.id:null, coach:credit?credit.name:(g.coaches[0]||'—'), carryover:g.carryover, coCount:g.coaches.length-1});
   }
-  const cyc=db.prepare("SELECT id,client_id,contract_id,program,cycle,due,completed,cal_week FROM visits WHERE due>=? AND due<=?").all(lo,hi);
+  // Only genuine cadence-generated visits are claimable cycle slots — a visit this same
+  // engine previously created for an 'extra'/'carryover' (source='sheet-2026') is a
+  // synthetic placement, not a cadence cycle, and must never be treated as one: on a
+  // re-run that would let a sheet item "claim" the very extra visit it created last time,
+  // which the apply step then deletes-then-updates and silently loses (found in testing).
+  const cyc=db.prepare("SELECT id,client_id,contract_id,program,cycle,due,completed,cal_week FROM visits WHERE due>=? AND due<=? AND (source IS NULL OR source!='sheet-2026')").all(lo,hi);
   const cycByClient={}; for(const v of cyc){ (cycByClient[v.client_id]=cycByClient[v.client_id]||[]).push(v); }
   const dd=(a,b)=>Math.abs((Date.parse(a)-Date.parse(b))/864e5);
   const plan=[];
@@ -1657,10 +1662,10 @@ function resyncPreview2026(){
     const cad=(cycByClient[cid]||[]).slice().sort((a,b)=>a.due.localeCompare(b.due));
     const claimed=new Array(cad.length).fill(false); const items=[];
     for(const v of normal){ let bi=-1,bd=1e15; for(let i=0;i<cad.length;i++){if(claimed[i])continue;const d=dd(v.week,cad[i].due);if(d<bd){bd=d;bi=i;}}
-      if(bi>=0){claimed[bi]=true;const cy=cad[bi];items.push({type:'place',week:v.week,coach:v.coach,coCount:v.coCount,cycle:cy.cycle,due:cy.due});}
-      else items.push({type:'extra',week:v.week,coach:v.coach,coCount:v.coCount}); }
-    for(const v of carry) items.push({type:'carryover',week:v.week,coach:v.coach});
-    for(let i=0;i<cad.length;i++) if(!claimed[i]) items.push({type:'unscheduled',cycle:cad[i].cycle,due:cad[i].due});
+      if(bi>=0){claimed[bi]=true;const cy=cad[bi];items.push({type:'place',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount,cycle:cy.cycle,due:cy.due,visitId:cy.id,contractId:cy.contract_id,completed:!!cy.completed});}
+      else items.push({type:'extra',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount}); }
+    for(const v of carry) items.push({type:'carryover',week:v.week,coach:v.coach,coachId:v.coachId});
+    for(let i=0;i<cad.length;i++) if(!claimed[i]) items.push({type:'unscheduled',cycle:cad[i].cycle,due:cad[i].due,visitId:cad[i].id});
     plan.push({ clientId:+cid, client:pc.client, counts:{ place:items.filter(x=>x.type==='place').length, extra:items.filter(x=>x.type==='extra').length, carryover:items.filter(x=>x.type==='carryover').length, unscheduled:items.filter(x=>x.type==='unscheduled').length }, items });
   }
   plan.sort((a,b)=>a.client.localeCompare(b.client));
@@ -1683,6 +1688,81 @@ route('POST', /^\/api\/admin\/sheet-2026\/import$/, ['admin'], (req, res, m, bod
   send(res, 200, { ok:true, visitCells: parsed.visits.length, coaches: parsed.coachNames.length });
 });
 route('GET', /^\/api\/admin\/sheet-2026\/resync-preview$/, ['admin'], (req, res) => { send(res, 200, resyncPreview2026()); });
+/* Apply the resync. Re-derives the plan server-side from the stored CSV (never trusts
+ * the client), then, per Mike's 2026-08-24 constraint — "we can't just replace what's
+ * on the calendar with written cards, they still need to be attached to visits that
+ * are in the LID inventory alongside contracts that are attached to clients" — every
+ * result is a properly linked `visits` row (client_id + contract_id), never a bare
+ * calendar block. This supersedes the older per-block sheet-recon-2026 apply, which
+ * (before the same-week multi-coach dedupe rule existed) could plant a placement or an
+ * extra/carryover visit that's now known to be wrong (e.g. Johnson City Acura's
+ * double-booked 7/6 cycle). To fully re-reconcile rather than layer on top of that
+ * earlier, sometimes-wrong state, for every client the CSV covers this:
+ *  1. Deletes that client's not-completed visits with source='sheet-2026' (extras/
+ *     carryovers this same engine created previously) — they'll be recreated only if
+ *     the corrected plan still calls for them.
+ *  2. Clears cal_week/cal_coach on that client's not-completed, non-'sheet-2026'
+ *     cadence-cycle visits due in 2026 — undoing stale/duplicate placements — before
+ *     re-placing them fresh per the corrected plan.
+ *  3. PLACE: sets cal_week/cal_coach on the matched cadence-cycle visit (place only —
+ *     never auto-completes; a past-week placement surfaces on the "Confirm completed"
+ *     to-do same as always).
+ *  4. EXTRA / CARRYOVER: inserts a new visit row on the client's EXISTING contract
+ *     (never a new contract), placed on the sheet week/coach, source='sheet-2026'.
+ *  5. UNSCHEDULED cadence cycles and UNMATCHED labels are left untouched.
+ * Completed visits are never modified or deleted. Re-running this with the same CSV
+ * converges to the same state (idempotent) — safe to re-apply any time the sheet is
+ * re-uploaded. All in one transaction. */
+route('POST', /^\/api\/admin\/sheet-2026\/apply$/, ['admin'], (req, res, m, body, user) => {
+  const recon = resyncPreview2026();
+  if(!recon.imported) return err(res, 400, 'No 2026 schedule CSV has been imported yet.');
+  if(recon.error) return err(res, 400, recon.error);
+  const coachTeam = {}; for(const c of db.prepare('SELECT id,team FROM coaches').all()) coachTeam[c.id]=c.team;
+  const clientTeam = {}; for(const r of db.prepare("SELECT client_id, team FROM visits WHERE team IS NOT NULL AND team!='' GROUP BY client_id").all()) clientTeam[r.client_id]=r.team;
+  const contractsByClient = {};
+  for(const c of db.prepare("SELECT id,client_id,program,status FROM contracts").all()){ (contractsByClient[c.client_id]=contractsByClient[c.client_id]||[]).push(c); }
+  const clearStaleExtra = db.prepare("DELETE FROM visits WHERE client_id=? AND source='sheet-2026' AND completed=0");
+  const clearStalePlacement = db.prepare("SELECT id FROM visits WHERE client_id=? AND (source IS NULL OR source!='sheet-2026') AND completed=0 AND due>='2026-01-01' AND due<='2026-12-31' AND cal_week IS NOT NULL");
+  const unplace = db.prepare('UPDATE visits SET cal_week=NULL, cal_coach=NULL WHERE id=?');
+  const upd = db.prepare('UPDATE visits SET cal_week=?, cal_coach=? WHERE id=?');
+  const insVisit = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id,cal_week,cal_coach)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
+  const todayS = new Date().toISOString().slice(0,10);
+  let removedStale=0, cleared=0, placed=0, created=0, skipped=0;
+  db.exec('BEGIN');
+  try{
+    for(const p of recon.plan){
+      removedStale += clearStaleExtra.run(p.clientId).changes;
+      for(const row of clearStalePlacement.all(p.clientId)){ unplace.run(row.id); cleared++; }
+      // An extra/carryover visit is happening NOW — it belongs on the client's currently
+      // ACTIVE contract, never a completed/closed one, even if an older completed
+      // contract happens to be what a 'place' item's cadence cycle is on (found in
+      // testing: Johnson City Acura has both a completed 2025 contract and an active
+      // 2026 one — a naive "first place item's contract" pick landed a real 2026 extra
+      // visit on the completed contract). Fall back to a place item's contract, then
+      // any contract, only when the client has no active one.
+      const placeContract = (p.items.find(i=>i.type==='place'&&i.contractId)||{}).contractId;
+      const cons = contractsByClient[p.clientId]||[];
+      const activeCon = cons.filter(c=>c.status==='active').sort((a,b)=>a.id-b.id)[0];
+      const primary = (activeCon||{}).id || placeContract || (cons[0]||{}).id;
+      const primCon = cons.find(c=>c.id===primary) || {};
+      for(const it of p.items){
+        if(it.type==='place'){
+          upd.run(it.week, it.coachId, it.visitId); placed++;
+        } else if(it.type==='extra' || it.type==='carryover'){
+          if(!primary){ skipped++; continue; }
+          const cyc = it.type==='carryover' ? 'Carryover' : 'Extra visit';
+          const team = clientTeam[p.clientId] || coachTeam[it.coachId] || null;
+          insVisit.run(p.client, primCon.program||'', cyc, it.week, team, 'sheet-2026', todayS, p.clientId, primary, it.week, it.coachId);
+          created++;
+        }
+      }
+    }
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); return err(res, 500, 'Apply failed: ' + e.message); }
+  log(user.email, 'admin.sheet_2026_apply', { placed, created, cleared, removedStale, skipped });
+  send(res, 200, { ok:true, placed, created, cleared, removedStale, skipped });
+});
 
 /* Archive-to-system handoff gap, found 2026-08-23 alongside Cowboy Chevrolet GMC
  * and Bowman Chevrolet of Clinton: some completed visits imported from the sheet
