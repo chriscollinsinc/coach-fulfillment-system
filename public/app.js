@@ -415,6 +415,22 @@ async function loadToday(){
   catch(e){ $('#todayOut').innerHTML = '<div class="panel">Could not load — refresh to try again.</div>'; return; }
   $('#todayOut').innerHTML = D.user.role==='coach' ? todayCoachView(t) : todayTeamView(t);
 }
+function syncConfCount(){
+  const n=document.querySelectorAll('.confChk:checked').length;
+  const el=$('#confCount'); if(el) el.textContent = n?`${n} selected`:'';
+  const all=$('#confAll'); const total=document.querySelectorAll('.confChk').length;
+  if(all) all.checked = n>0 && n===total;
+}
+async function bulkConfirmCompleted(){
+  const ids=[...document.querySelectorAll('.confChk:checked')].map(c=>+c.value);
+  if(!ids.length){ toast('Tick at least one visit first'); return; }
+  if(!(await uiConfirm(`Mark ${ids.length} visit(s) complete, each dated to the week it was scheduled? Use this to confirm they actually happened.`,'Mark complete'))) return;
+  try{
+    const r=await api('POST','/api/admin/confirm-completed',{ids});
+    toast(`Confirmed ${r.completed} complete${r.skipped?` · ${r.skipped} skipped`:''}`);
+    await refresh(); await loadToday();
+  }catch(e){ uiAlert(e.message||'Bulk confirm failed'); }
+}
 const invJump = f => `st.invFilter='${f}';st.invSel=new Set();go('inventory')`;
 const placeJump = v => `st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()`;
 function todayRows(list, maxN, rowFn){
@@ -447,15 +463,20 @@ function todayTeamView(t){
 
   if(t.toConfirm && t.toConfirm.length){
     html+=`<div class="panel" id="confirmDonePanel"><h2>Confirm completed — scheduled, week passed, not marked done (${t.toConfirm.length})</h2>
-    <p class="small" style="margin-bottom:8px">These visits were placed on a week that's already over but aren't marked complete yet — including everything just brought over from the 2026 sheet. Confirm the ones that happened; if a visit didn't happen, open it to reschedule.</p>
-    <table><tr><th>Client</th><th>Visit</th><th>Was scheduled</th><th>Coach</th><th></th></tr>`+
-    todayRows(t.toConfirm, 15, v=>`<tr>
+    <p class="small" style="margin-bottom:8px">These visits were placed on a week that's already over but aren't marked complete yet — including everything brought over from the 2026 sheet. Tick the ones that happened and confirm in a batch; each is marked complete <b>as of the week it was scheduled</b>, not today. If a visit didn't happen, leave it unticked and open it to reschedule.</p>
+    <div class="controls" style="margin-bottom:8px;align-items:center">
+      <label class="small"><input type="checkbox" id="confAll" onclick="document.querySelectorAll('.confChk').forEach(c=>c.checked=this.checked);syncConfCount()"> Select all ${t.toConfirm.length}</label>
+      <button class="btn primary tiny" onclick="bulkConfirmCompleted()">Mark selected complete</button>
+      <span class="small" id="confCount" style="color:var(--muted)"></span>
+    </div>
+    <table><tr><th style="width:26px"></th><th>Client</th><th>Visit</th><th>Was scheduled</th><th>Coach</th><th></th></tr>`+
+    t.toConfirm.map(v=>`<tr>
+      <td><input type="checkbox" class="confChk" value="${v.id}" onclick="syncConfCount()"></td>
       <td><b>${v.client_id?`<a style="cursor:pointer;color:var(--primary);text-decoration:underline" onclick="openClientProfile(${v.client_id})">${esc(v.client)}</a>`:esc(v.client)}</b></td>
       <td>${esc(v.cycle)} ${esc(v.program)} · ${esc(v.team||'?')}</td>
       <td class="mono">wk of ${fmtW(v.cal_week)}</td>
       <td>${esc(coach(v.cal_coach)?.name||'—')}</td>
-      <td><button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Mark complete</button>
-      <button class="btn tiny" onclick="visitDrawer(${v.id})">Details</button></td></tr>`)+`</table></div>`;
+      <td><button class="btn tiny" onclick="visitDrawer(${v.id})">Details</button></td></tr>`).join('')+`</table></div>`;
   }
 
   html+=`<div class="panel"><h2>Schedule next — due within 30 days (${t.dueSoonUnscheduled.length})</h2>`;

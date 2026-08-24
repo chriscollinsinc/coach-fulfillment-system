@@ -471,6 +471,29 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
   }
   send(res, 200, { ok: true });
 });
+/* Bulk "confirm completed" for the admin/lead Today to-do: mark a batch of placed,
+ * past-week, still-open visits as done in one action. Per Mike 2026-08-24, completed_on
+ * is BACKDATED to each visit's scheduled week (cal_week) — not today — so history and
+ * "completed this month" stay accurate. Re-checks each visit server-side (must be open,
+ * placed, and within the caller's permission) and skips any that don't qualify. */
+route('POST', /^\/api\/admin\/confirm-completed$/, ['admin','lead'], (req, res, m, body, user) => {
+  const ids = Array.isArray(body && body.ids) ? [...new Set(body.ids.map(Number).filter(Boolean))] : [];
+  if(!ids.length) return err(res, 400, 'No visits selected');
+  const upd = db.prepare('UPDATE visits SET completed=1, completed_on=?, completed_by_coach_id=?, completed_by_email=? WHERE id=? AND completed=0');
+  let completed=0, skipped=0;
+  db.exec('BEGIN');
+  try{
+    for(const id of ids){
+      const v = getVisit(id);
+      if(!v || v.completed || !v.cal_week || !canCompleteVisit(user, v)){ skipped++; continue; }
+      upd.run(v.cal_week, v.cal_coach || null, user.email, v.id);
+      completed++;
+    }
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); return err(res, 500, 'Bulk confirm failed: ' + e.message); }
+  log(user.email, 'admin.confirm_completed_bulk', { requested: ids.length, completed, skipped });
+  send(res, 200, { ok:true, completed, skipped });
+});
 route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin','lead'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
