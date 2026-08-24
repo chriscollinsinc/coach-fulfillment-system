@@ -1444,6 +1444,13 @@ const RECON_ALIASES = {
   'm a g classic cdjr goldsboro':'m a g classic cdjrf of goldsboro',
   'm a g classic cdjr pineville':'m a g classic cdjr of south charlotte',
 };
+// Client ids the 2026 sheet resync must NEVER touch, confirmed by Mike (2026-08-24) —
+// "Mills -" (client 83) is the zero-price, no-real-history record that the rolling-
+// schedule bug resurrected with 29 phantom visits earlier this session; excluded here
+// (from the resync's own client-matching pool, not just from extra/carryover creation)
+// so no sheet label — now or after a future re-upload — can ever match it and place or
+// create a visit against it.
+const RECON_EXCLUDE_CLIENT_IDS = new Set([83]);
 function reconcileSheet2026(){
   const y='2026', lo=y+'-01-01', hi=y+'-12-31', today=new Date().toISOString().slice(0,10);
   const clients = db.prepare("SELECT id,name FROM clients WHERE deleted_at IS NULL").all()
@@ -1625,7 +1632,7 @@ function resyncPreview2026(){
   const parsed=parseSchedule2026(row.csv);
   if(parsed.error) return { imported:true, error:parsed.error, uploadedAt:row.uploaded_at, filename:row.filename };
   const y='2026', lo=y+'-01-01', hi=y+'-12-31';
-  const clients=db.prepare("SELECT id,name FROM clients WHERE deleted_at IS NULL").all().map(c=>({id:c.id,name:c.name,n:reconNorm(c.name),t:reconToks(c.name)})).filter(c=>c.n);
+  const clients=db.prepare("SELECT id,name FROM clients WHERE deleted_at IS NULL").all().filter(c=>!RECON_EXCLUDE_CLIENT_IDS.has(c.id)).map(c=>({id:c.id,name:c.name,n:reconNorm(c.name),t:reconToks(c.name)})).filter(c=>c.n);
   const coaches=db.prepare("SELECT id,name FROM coaches").all();
   const coachByNorm={}; for(const c of coaches) coachByNorm[reconNorm(c.name)]=c;
   const assigned={}; for(const c of db.prepare("SELECT id,assigned_coach_id FROM clients").all()) assigned[c.id]=c.assigned_coach_id;
