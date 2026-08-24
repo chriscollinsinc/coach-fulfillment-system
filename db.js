@@ -239,6 +239,12 @@ ensureColumn('client_notes', 'wins', 'TEXT');
 ensureColumn('client_notes', 'issues', 'TEXT');
 ensureColumn('client_notes', 'focus', 'TEXT');
 db.exec(`
+CREATE TABLE IF NOT EXISTS sheet2026_import(
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  uploaded_at TEXT NOT NULL,
+  filename TEXT,
+  uploaded_by TEXT,
+  csv TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS action_items(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client_id INTEGER NOT NULL,

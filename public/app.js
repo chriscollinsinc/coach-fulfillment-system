@@ -248,7 +248,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadSheetRecon2026(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -2317,6 +2317,12 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">The 2026 Schedule sheet is the source of truth for this year's visits. This maps every "from sheet" 2026 calendar visit onto the matching contract's cadence cycle — <b>place</b> where a real visit lines up with a cycle, <b>extra</b> where the sheet has more than the cadence, <b>carryover</b> for 2025 make-ups, and it flags cadence cycles with no sheet visit. <b>Read-only</b> — nothing is written here. Review it before we turn on the apply.</p>
   <div class="controls"><button class="btn" onclick="loadSheetRecon2026()">Refresh</button></div>
   <div id="sheetReconOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Re-sync 2026 schedule from CSV</h2>
+  <p class="small" style="margin-bottom:12px">Upload the current <b>2026 Schedule</b> CSV to bring the app in line with the master sheet. It applies the rule that <b>two coaches on the same client the same week count as one visit</b> (the lead holds the real card), so double-booked weeks stop consuming two cadence cycles. <b>Read-only preview</b> — nothing is written yet.</p>
+  <div class="controls"><input type="file" id="sheetCsvFile" accept=".csv,text/csv">
+    <button class="btn primary" onclick="importSheet2026()">Import &amp; preview</button>
+    <button class="btn" onclick="loadResyncPreview()">Refresh</button></div>
+  <div id="resyncOut" class="small" style="margin-top:8px">No CSV imported yet.</div></div>
   <div class="panel"><h2>Keap webhook activity</h2>
   <p class="small" style="margin-bottom:12px">Diagnostic tool for "I added something in Keap and it never showed up." <b>Recent events</b> is every raw hit Keap has sent this app, whether it was acted on or not — if a store you added isn't in here at all, Keap never reached this app for it (check the subscription actually exists in Keap, not just a contact). <b>Hook status</b> checks live with Keap whether the <code>subscription.add/edit/delete</code> hooks are registered and Verified against this app's URL right now. <b>Backfill</b> below is the fix for missed webhooks — it checks every subscription in Keap (not just recent ones — Keap's own date filters aren't reliable enough to trust) against what this app already knows, and queues anything untracked, including ones that start in the future.</p>
   <div class="controls"><button class="btn" onclick="loadKeapEvents()">Refresh events</button>
@@ -2475,6 +2481,67 @@ function renderReconTable(){
     <td>${x.cycle?esc(x.cycle)+(x.due?` <span class="small" style="color:var(--muted)">(due ${fmt(x.due)})</span>`:''):'—'}</td>
     <td class="small">${reconNote(x)}</td></tr>`).join('');
   h+=`</table></div><p class="small" style="margin-top:6px">${rows.length} row(s)${f!=='all'?` · filtered to “${f}”`:''}</p>`;
+  out.innerHTML=h;
+}
+async function importSheet2026(){
+  const inp=$('#sheetCsvFile'); const f=inp&&inp.files&&inp.files[0];
+  if(!f){ toast('Choose a CSV file first'); return; }
+  $('#resyncOut').innerHTML='Importing…';
+  try{
+    const csv=await f.text();
+    const r=await api('POST','/api/admin/sheet-2026/import',{csv, filename:f.name});
+    toast(`Imported ${r.visitCells} visit cell(s) from ${f.name}`);
+    await loadResyncPreview();
+  }catch(e){ $('#resyncOut').innerHTML='<p style="color:var(--bad)">'+esc(e.message||'Import failed')+'</p>'; }
+}
+async function loadResyncPreview(){
+  const el=$('#resyncOut'); if(!el) return;
+  try{
+    const r=await api('GET','/api/admin/sheet-2026/resync-preview');
+    if(!r||!r.imported){ el.innerHTML='<p class="small" style="color:var(--muted)">No CSV imported yet — upload one above to preview the re-sync.</p>'; return; }
+    if(r.error){ el.innerHTML='<p style="color:var(--bad)">'+esc(r.error)+'</p>'; return; }
+    window._resync=r; const s=r.summary;
+    let h=`<p class="small" style="color:var(--muted)">Imported ${esc(r.filename||'')} · ${r.uploadedAt?esc(r.uploadedAt.slice(0,16).replace('T',' ')):''}</p>
+      <div class="recon-kpis">
+        <span><b>${s.visitsAfterDedupe}</b> visits (deduped)</span>
+        <span><b>${s.matchedClients}</b> clients</span>
+        <span class="rk-good"><b>${s.place}</b> place</span>
+        <span class="rk-warn"><b>${s.extra}</b> extra</span>
+        <span class="rk-info"><b>${s.carryover}</b> carryover</span>
+        <span class="rk-mut"><b>${s.unscheduled}</b> unscheduled</span>
+        <span class="rk-bad"><b>${s.unmatchedLabelCount}</b> unmatched</span>
+      </div>
+      <p class="small" style="margin:8px 0"><b>${s.sameWeekDoubles}</b> same-week two-coach visit(s) collapsed to one — ${s.coVisitsCollapsed} rider visit(s) no longer counted.${(s.unmatchedCoaches&&s.unmatchedCoaches.length)?` <span style="color:var(--muted)">Unmatched coaches: ${s.unmatchedCoaches.map(esc).join(', ')}.</span>`:''}</p>`;
+    if(r.doubles&&r.doubles.length){
+      h+=`<details style="margin:6px 0"><summary class="small" style="cursor:pointer">Same-week doubles (${r.doubles.length})</summary>
+        <div class="recon-scroll" style="margin-top:6px"><table class="recon-tbl"><tr><th>Client</th><th>Week</th><th>Both coaches — one counts</th></tr>`+
+        r.doubles.map(d=>`<tr><td>${esc(d.client)}</td><td>${fmtW(d.week)}</td><td>${d.coaches.map(esc).join('  +  ')}</td></tr>`).join('')+`</table></div></details>`;
+    }
+    h+=`<div class="controls" style="margin:10px 0 4px"><label class="small">Show
+      <select id="resyncFilter" onchange="renderResyncTable()">
+        <option value="all">everything</option><option value="place">place onto a cycle</option>
+        <option value="extra">extra (over cadence)</option><option value="carryover">carryover</option>
+        <option value="unscheduled">unscheduled cycles</option></select></label>
+      <span class="small" style="color:var(--muted)">Read-only — no changes written until we wire the apply.</span></div>
+      <div id="resyncTableOut"></div>`;
+    if(r.unmatchedLabels&&r.unmatchedLabels.length){
+      h+=`<details style="margin-top:10px"><summary class="small" style="cursor:pointer">Unmatched labels (${r.unmatchedLabels.length}) — name variants or non-LID</summary>
+        <div class="small" style="margin-top:6px;color:var(--muted)">${r.unmatchedLabels.map(esc).join('  ·  ')}</div></details>`;
+    }
+    el.innerHTML=h; renderResyncTable();
+  }catch(e){ el.innerHTML='<p>Could not load preview.</p>'; }
+}
+function renderResyncTable(){
+  const r=window._resync; if(!r) return; const out=$('#resyncTableOut'); if(!out) return;
+  const f=(($('#resyncFilter')||{}).value)||'all';
+  const rows=[]; for(const p of r.plan) for(const it of p.items) if(f==='all'||it.type===f) rows.push(Object.assign({client:p.client},it));
+  const chip=t=>`<span class="rchip r-${t}">${t}</span>`;
+  let h=`<div class="recon-scroll"><table class="recon-tbl"><tr><th>Client</th><th>Type</th><th>Week</th><th>Coach</th><th>Cadence cycle</th></tr>`;
+  h+=rows.map(x=>`<tr><td>${esc(x.client)}</td><td>${chip(x.type)}</td>
+    <td>${x.week?fmtW(x.week):'—'}</td>
+    <td>${x.coach?esc(x.coach)+(x.coCount?` <span class="small" style="color:var(--muted)" title="riding along, not counted">+${x.coCount}</span>`:''):'—'}</td>
+    <td>${x.cycle?esc(x.cycle)+(x.due?` <span class="small" style="color:var(--muted)">(due ${fmt(x.due)})</span>`:''):'—'}</td></tr>`).join('');
+  h+=`</table></div><p class="small" style="margin-top:6px">${rows.length} row(s)</p>`;
   out.innerHTML=h;
 }
 async function loadClientHistoryPeriods(){

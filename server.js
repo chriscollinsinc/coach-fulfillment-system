@@ -1553,6 +1553,137 @@ route('POST', /^\/api\/admin\/sheet-recon-2026\/apply$/, ['admin'], (req, res, m
   send(res, 200, { ok:true, placed, created, blocksDeleted, skipped });
 });
 
+/* ===== Re-import the 2026 Schedule from an updated CSV + re-reconcile =====
+ * The original reconciliation ran off a one-time block import. To keep the app current
+ * as the master sheet changes, this ingests an uploaded CSV directly and reconciles from
+ * it — applying the rule Mike confirmed 2026-08-24: two coaches on the SAME client the
+ * SAME week is ONE visit (the lead/assigned coach holds the real card; the other rides
+ * along and never consumes a cadence cycle). Read-only preview here; apply is separate. */
+function parseCsvText(text){
+  const rows=[]; let row=[], field='', i=0, q=false;
+  while(i<text.length){ const c=text[i];
+    if(q){ if(c==='"'){ if(text[i+1]==='"'){field+='"';i+=2;continue;} q=false;i++;continue;} field+=c;i++;continue; }
+    if(c==='"'){q=true;i++;continue;}
+    if(c===','){row.push(field);field='';i++;continue;}
+    if(c==='\r'){i++;continue;}
+    if(c==='\n'){row.push(field);rows.push(row);row=[];field='';i++;continue;}
+    field+=c;i++;
+  }
+  if(field.length||row.length){row.push(field);rows.push(row);}
+  return rows;
+}
+const SCHED_SKIP=/^(home|home\/off|off|vacation|training|start|truck|top ?dog|virtual event|not hired yet|launch available|-|)$/i;
+function isScheduleVisit(raw){
+  const c=String(raw||'').trim(); if(!c || SCHED_SKIP.test(c)) return false;
+  const l=c.toLowerCase();
+  if(l==='m.a.g.'||l==='mag'||l==='m.a.g') return false;          // bare M.A.G. — no store, ambiguous
+  if(l.includes('shadow')) return false;                          // tagged shadow never counts
+  if(/\bbootcamp\b/.test(l)) return false;
+  if(/\b(recon wk|hold)\b/.test(l)) return false;
+  if(/(group meeting|group\/visit|group visit|spec\.? group|fixed meeting|meeting\/visit)/.test(l)) return false;
+  return true;
+}
+function parseSchedule2026(csv){
+  const rows=parseCsvText(csv);
+  const dateRe=/^\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/;
+  const toISO=(mo,d,y)=>snapMonday(`${y}-${String(+mo).padStart(2,'0')}-${String(+d).padStart(2,'0')}`);
+  let colWeeks=null;
+  for(const r of rows){ const ws=r.slice(1).map(c=>{const mm=dateRe.exec((c||'').trim());return mm?toISO(mm[1],mm[2],mm[3]):null;}); if(ws.filter(Boolean).length>=40){ colWeeks=ws; break; } }
+  if(!colWeeks) return { error:'Could not find the weekly date header row in this CSV.' };
+  const visits=[]; const coachNames=new Set();
+  for(const r of rows){
+    const coach=(r[0]||'').trim(); if(!coach) continue;
+    const cells=r.slice(1);
+    if(cells.filter(c=>dateRe.test((c||'').trim())).length>=40) continue;   // skip repeated date-header rows
+    coachNames.add(coach);
+    for(let i=0;i<cells.length && i<colWeeks.length;i++){
+      const wk=colWeeks[i]; if(!wk) continue;
+      const cell=(cells[i]||'').trim();
+      if(!isScheduleVisit(cell)) continue;
+      visits.push({ label:cell, week:wk, coachName:coach, carryover:/carryover/i.test(cell) });
+    }
+  }
+  return { visits, coachNames:[...coachNames] };
+}
+// Module-level client matcher (mirrors the one inside reconcileSheet2026): exact →
+// confirmed alias → most-specific containment → unambiguous token-subset.
+function reconMatch(label, clients){
+  const clean=String(label).replace(/carryover/ig,'').replace(/\bshadow\b/ig,'');
+  let ln=reconNorm(clean); if(RECON_ALIASES[ln]) ln=RECON_ALIASES[ln]; if(!ln) return null;
+  let ex=clients.find(c=>c.n===ln); if(ex) return ex;
+  let cand=clients.filter(c=>ln.includes(c.n)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0];
+  cand=clients.filter(c=>c.n.includes(ln)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0];
+  const lt=reconToks(clean); if(!lt.length) return null;
+  const subs=clients.filter(c=>c.t.length && (c.t.every(t=>lt.includes(t))||lt.every(t=>c.t.includes(t))));
+  if(subs.length){ const score=c=>c.t.filter(t=>lt.includes(t)).length; subs.sort((a,b)=>score(b)-score(a)||b.n.length-a.n.length);
+    const top=score(subs[0]); if(subs.filter(c=>score(c)===top).length===1) return subs[0]; }
+  return null;
+}
+function resyncPreview2026(){
+  const row=db.prepare('SELECT csv, uploaded_at, filename FROM sheet2026_import WHERE id=1').get();
+  if(!row) return { imported:false };
+  const parsed=parseSchedule2026(row.csv);
+  if(parsed.error) return { imported:true, error:parsed.error, uploadedAt:row.uploaded_at, filename:row.filename };
+  const y='2026', lo=y+'-01-01', hi=y+'-12-31';
+  const clients=db.prepare("SELECT id,name FROM clients WHERE deleted_at IS NULL").all().map(c=>({id:c.id,name:c.name,n:reconNorm(c.name),t:reconToks(c.name)})).filter(c=>c.n);
+  const coaches=db.prepare("SELECT id,name FROM coaches").all();
+  const coachByNorm={}; for(const c of coaches) coachByNorm[reconNorm(c.name)]=c;
+  const assigned={}; for(const c of db.prepare("SELECT id,assigned_coach_id FROM clients").all()) assigned[c.id]=c.assigned_coach_id;
+  // group by (client|week), collapsing same-client same-week multi-coach to one
+  const groups={}; const unmatched={};
+  for(const v of parsed.visits){
+    if(v.week<lo||v.week>hi) continue;
+    const cl=reconMatch(v.label, clients);
+    if(!cl) unmatched[v.label]=(unmatched[v.label]||0)+1;
+    const key=(cl?('c'+cl.id):('n'+reconNorm(v.label)))+'|'+v.week;
+    const g=groups[key]||(groups[key]={client:cl, label:v.label, week:v.week, coaches:[], carryover:false});
+    g.coaches.push(v.coachName); if(v.carryover) g.carryover=true;
+  }
+  const doubles=[]; let coCollapsed=0; const perClient={};
+  for(const k in groups){ const g=groups[k];
+    if(g.coaches.length>1){ doubles.push({client:g.client?g.client.name:g.label, week:g.week, coaches:[...new Set(g.coaches)]}); coCollapsed+=g.coaches.length-1; }
+    if(!g.client) continue;
+    const matched=g.coaches.map(n=>coachByNorm[reconNorm(n)]).filter(Boolean);
+    const credit=matched.find(c=>c.id===assigned[g.client.id]) || matched[0] || null;
+    (perClient[g.client.id]=perClient[g.client.id]||{client:g.client.name, visits:[]}).visits.push({week:g.week, coachId:credit?credit.id:null, coach:credit?credit.name:(g.coaches[0]||'—'), carryover:g.carryover, coCount:g.coaches.length-1});
+  }
+  const cyc=db.prepare("SELECT id,client_id,contract_id,program,cycle,due,completed,cal_week FROM visits WHERE due>=? AND due<=?").all(lo,hi);
+  const cycByClient={}; for(const v of cyc){ (cycByClient[v.client_id]=cycByClient[v.client_id]||[]).push(v); }
+  const dd=(a,b)=>Math.abs((Date.parse(a)-Date.parse(b))/864e5);
+  const plan=[];
+  for(const cid in perClient){ const pc=perClient[cid];
+    const carry=pc.visits.filter(v=>v.carryover).sort((a,b)=>a.week.localeCompare(b.week));
+    const normal=pc.visits.filter(v=>!v.carryover).sort((a,b)=>a.week.localeCompare(b.week));
+    const cad=(cycByClient[cid]||[]).slice().sort((a,b)=>a.due.localeCompare(b.due));
+    const claimed=new Array(cad.length).fill(false); const items=[];
+    for(const v of normal){ let bi=-1,bd=1e15; for(let i=0;i<cad.length;i++){if(claimed[i])continue;const d=dd(v.week,cad[i].due);if(d<bd){bd=d;bi=i;}}
+      if(bi>=0){claimed[bi]=true;const cy=cad[bi];items.push({type:'place',week:v.week,coach:v.coach,coCount:v.coCount,cycle:cy.cycle,due:cy.due});}
+      else items.push({type:'extra',week:v.week,coach:v.coach,coCount:v.coCount}); }
+    for(const v of carry) items.push({type:'carryover',week:v.week,coach:v.coach});
+    for(let i=0;i<cad.length;i++) if(!claimed[i]) items.push({type:'unscheduled',cycle:cad[i].cycle,due:cad[i].due});
+    plan.push({ clientId:+cid, client:pc.client, counts:{ place:items.filter(x=>x.type==='place').length, extra:items.filter(x=>x.type==='extra').length, carryover:items.filter(x=>x.type==='carryover').length, unscheduled:items.filter(x=>x.type==='unscheduled').length }, items });
+  }
+  plan.sort((a,b)=>a.client.localeCompare(b.client));
+  const totals={place:0,extra:0,carryover:0,unscheduled:0};
+  for(const p of plan){ for(const k in totals) totals[k]+=p.counts[k]; }
+  const unmatchedCoaches=parsed.coachNames.filter(n=>!coachByNorm[reconNorm(n)]);
+  return { imported:true, uploadedAt:row.uploaded_at, filename:row.filename,
+    summary:{ ...totals, visitsAfterDedupe:totals.place+totals.extra+totals.carryover, matchedClients:plan.length,
+      sameWeekDoubles:doubles.length, coVisitsCollapsed:coCollapsed, unmatchedLabelCount:Object.keys(unmatched).length, unmatchedCoaches },
+    doubles: doubles.sort((a,b)=>a.client.localeCompare(b.client)), unmatchedLabels:Object.keys(unmatched).sort(), plan };
+}
+route('POST', /^\/api\/admin\/sheet-2026\/import$/, ['admin'], (req, res, m, body, user) => {
+  const csv=String((body&&body.csv)||''); if(csv.length<50) return err(res, 400, 'That CSV looks empty.');
+  const parsed=parseSchedule2026(csv);
+  if(parsed.error) return err(res, 400, parsed.error);
+  db.prepare(`INSERT INTO sheet2026_import(id,uploaded_at,filename,uploaded_by,csv) VALUES(1,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET uploaded_at=excluded.uploaded_at, filename=excluded.filename, uploaded_by=excluded.uploaded_by, csv=excluded.csv`)
+    .run(new Date().toISOString(), String((body&&body.filename)||'2026 schedule.csv'), user.email, csv);
+  log(user.email, 'sheet2026.import', { filename: body&&body.filename, visitCells: parsed.visits.length, coaches: parsed.coachNames.length });
+  send(res, 200, { ok:true, visitCells: parsed.visits.length, coaches: parsed.coachNames.length });
+});
+route('GET', /^\/api\/admin\/sheet-2026\/resync-preview$/, ['admin'], (req, res) => { send(res, 200, resyncPreview2026()); });
+
 /* Archive-to-system handoff gap, found 2026-08-23 alongside Cowboy Chevrolet GMC
  * and Bowman Chevrolet of Clinton: some completed visits imported from the sheet
  * were never linked to a contract_id. Every contract-scoped feature (rolling
