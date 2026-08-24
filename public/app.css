@@ -203,3 +203,20 @@ dialog select,dialog input{width:100%}
 .rescard.rs-overdue .reslabel{background:#fdecec;color:var(--bad)}
 .rescard.rs-needs_scheduling{border-left-color:var(--warn)}
 .rescard.rs-needs_scheduling .reslabel{background:#fff5e6;color:#a8790a}
+
+/* ---- 2026 Schedule reconciliation panel ---- */
+.recon-kpis{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 2px}
+.recon-kpis span{background:#fff;border:1px solid var(--line);border-radius:6px;padding:6px 11px;font-size:12.5px;color:var(--muted)}
+.recon-kpis b{color:var(--ink);font-size:15px;font-weight:700;margin-right:3px}
+.recon-kpis .rk-good b{color:#2e7d59}.recon-kpis .rk-warn b{color:#a8790a}
+.recon-kpis .rk-info b{color:#3a5a9c}.recon-kpis .rk-bad b{color:var(--bad)}.recon-kpis .rk-mut b{color:var(--muted)}
+.recon-scroll{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+table.recon-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+table.recon-tbl th{position:sticky;top:0;background:#f6f2ec;text-align:left;padding:7px 10px;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--line);white-space:nowrap}
+table.recon-tbl td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+table.recon-tbl tr:hover td{background:#faf6f0}
+.rchip{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.03em;padding:1px 7px;border-radius:20px;text-transform:uppercase}
+.rchip.r-place{background:var(--done);color:#2e7d59}
+.rchip.r-extra{background:#f7edd6;color:#a8790a}
+.rchip.r-carryover{background:#e5ebf5;color:#3a5a9c}
+.rchip.r-unscheduled{background:#eef0f2;color:var(--muted)}

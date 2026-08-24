@@ -236,7 +236,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadSheetRecon2026(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -2181,6 +2181,10 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">Finds not-yet-scheduled visits sitting on the same contract as an already-completed visit with the exact same cycle number (e.g. two "2 of 4"s) — that combination is always a stray leftover, most likely from the original spreadsheet import, never a legitimate visit. This is read-only until you click Clean up below, and only ever deletes visits matching this exact pattern — nothing else.</p>
   <div class="controls"><button class="btn" onclick="loadDuplicateVisitsAudit()">Refresh</button></div>
   <div id="dupVisitsOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>2026 Schedule reconciliation</h2>
+  <p class="small" style="margin-bottom:12px">The 2026 Schedule sheet is the source of truth for this year's visits. This maps every "from sheet" 2026 calendar visit onto the matching contract's cadence cycle — <b>place</b> where a real visit lines up with a cycle, <b>extra</b> where the sheet has more than the cadence, <b>carryover</b> for 2025 make-ups, and it flags cadence cycles with no sheet visit. <b>Read-only</b> — nothing is written here. Review it before we turn on the apply.</p>
+  <div class="controls"><button class="btn" onclick="loadSheetRecon2026()">Refresh</button></div>
+  <div id="sheetReconOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Keap webhook activity</h2>
   <p class="small" style="margin-bottom:12px">Diagnostic tool for "I added something in Keap and it never showed up." <b>Recent events</b> is every raw hit Keap has sent this app, whether it was acted on or not — if a store you added isn't in here at all, Keap never reached this app for it (check the subscription actually exists in Keap, not just a contact). <b>Hook status</b> checks live with Keap whether the <code>subscription.add/edit/delete</code> hooks are registered and Verified against this app's URL right now. <b>Backfill</b> below is the fix for missed webhooks — it checks every subscription in Keap (not just recent ones — Keap's own date filters aren't reliable enough to trust) against what this app already knows, and queues anything untracked, including ones that start in the future.</p>
   <div class="controls"><button class="btn" onclick="loadKeapEvents()">Refresh events</button>
@@ -2266,6 +2270,61 @@ async function cleanupDuplicateVisits(expectedCount){
     toast(`Deleted ${r.deleted} stray visit(s) across ${r.affectedContracts.length} contract(s)`);
     await refresh(); await loadDuplicateVisitsAudit();
   }catch(e){ uiAlert(e.message||'Cleanup failed'); }
+}
+async function loadSheetRecon2026(){
+  const el=$('#sheetReconOut'); if(!el) return;
+  try{
+    const r=await api('GET','/api/admin/sheet-recon-2026'); const t=r.totals;
+    window._recon=r;
+    let h=`<div class="recon-kpis">
+      <span><b>${t.sheetVisits}</b> sheet visits</span>
+      <span><b>${t.matchedClients}</b> clients</span>
+      <span class="rk-good"><b>${t.place}</b> place</span>
+      <span class="rk-warn"><b>${t.extra}</b> extra</span>
+      <span class="rk-info"><b>${t.carryover}</b> carryover</span>
+      <span class="rk-mut"><b>${t.unscheduled}</b> unscheduled cycles</span>
+      <span class="rk-bad"><b>${t.unmatched}</b> unmatched</span></div>
+      <div class="controls" style="margin:12px 0 6px"><label class="small">Show
+        <select id="reconFilter" onchange="renderReconTable()">
+          <option value="all">everything</option>
+          <option value="place">place onto a cycle</option>
+          <option value="extra">extra (over cadence)</option>
+          <option value="carryover">carryover</option>
+          <option value="unscheduled">unscheduled cycles</option>
+        </select></label></div>
+      <div id="reconTableOut"></div>`;
+    if(r.unmatched.length){
+      h+=`<h3 style="margin:18px 0 6px;font-size:14px">Unmatched sheet labels (${r.unmatched.length}) — name variants to map or non-LID</h3>
+        <div class="recon-scroll"><table class="recon-tbl"><tr><th>Week</th><th>Coach</th><th>Sheet label</th></tr>`+
+        r.unmatched.map(u=>`<tr><td>${fmtW(u.week)}</td><td>${esc(u.coach)}</td><td>${esc(u.label)}</td></tr>`).join('')+`</table></div>`;
+    }
+    el.innerHTML=h; renderReconTable();
+  }catch(e){ el.innerHTML='<p>Could not load.</p>'; }
+}
+function reconNote(x){
+  if(x.type==='place') return (x.alreadyPlaced?'already on calendar · ':'')+(x.completed?'cycle already completed · ':'')+(x.past?'past week (likely already done)':'would place on this week');
+  if(x.type==='extra') return 'over cadence — sheet plans more than the contract';
+  if(x.type==='carryover') return '2025 make-up — becomes an extra tracked visit';
+  if(x.type==='unscheduled') return 'cadence cycle with no sheet visit — stays to-schedule';
+  return '';
+}
+function renderReconTable(){
+  const r=window._recon; if(!r) return;
+  const out=$('#reconTableOut'); if(!out) return;
+  const f=($('#reconFilter')||{}).value||'all';
+  const rows=[];
+  for(const p of r.plan) for(const it of p.items) if(f==='all'||it.type===f) rows.push(Object.assign({client:p.client},it));
+  const chip=t=>`<span class="rchip r-${t}">${t}</span>`;
+  let h=`<div class="recon-scroll"><table class="recon-tbl">
+    <tr><th>Client</th><th>Type</th><th>Week</th><th>Coach</th><th>Sheet label</th><th>Cadence cycle</th><th>Note</th></tr>`;
+  h+=rows.map(x=>`<tr>
+    <td>${esc(x.client)}</td><td>${chip(x.type)}</td>
+    <td>${x.week?fmtW(x.week):'—'}</td><td>${x.coach?esc(x.coach):'—'}</td>
+    <td>${x.label?esc(x.label):'—'}</td>
+    <td>${x.cycle?esc(x.cycle)+(x.due?` <span class="small" style="color:var(--muted)">(due ${fmt(x.due)})</span>`:''):'—'}</td>
+    <td class="small">${reconNote(x)}</td></tr>`).join('');
+  h+=`</table></div><p class="small" style="margin-top:6px">${rows.length} row(s)${f!=='all'?` · filtered to “${f}”`:''}</p>`;
+  out.innerHTML=h;
 }
 async function loadClientHistoryPeriods(){
   try{

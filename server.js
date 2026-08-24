@@ -1348,6 +1348,70 @@ route('POST', /^\/api\/admin\/duplicate-visits-cleanup$/, ['admin'], (req, res, 
   send(res, 200, { ok: true, deleted, affectedContracts: [...affected] });
 });
 
+/* ===== 2026 Sheet → Cadence reconciliation (READ-ONLY audit) =====
+ * The 2026 Schedule sheet is the true plan of coaching visits, but it was imported
+ * as calendar BLOCKS (kind 'visit'/'visit_legacy', "from sheet") that are pure
+ * display — not linked to any contract, not counted as a cycle. Meanwhile the
+ * tracked visits are cadence-SYNTHESIZED and don't match the sheet (found 2026-08-24:
+ * 257 sheet visits, 0 backed by a tracked visit; counts diverge for ~71% of clients).
+ * This maps each real sheet visit onto the client's nearest cadence cycle so the two
+ * finally agree. Read-only — proposes, writes nothing. Rules confirmed with Mike:
+ *  - Only kind='visit'/'visit_legacy' blocks count (shadow/training/home/launch-available
+ *    are already separated into other kinds by the import — the lead's real card only).
+ *  - CARRYOVER label = a 2025 make-up = an EXTRA tracked visit, never a cadence slot.
+ *  - Name matching: exact, then most-specific containment (the longest client name that
+ *    fits) — apostrophe-insensitive so "Lum's" == "Lums". Unmatched are surfaced, never
+ *    force-matched. */
+function reconNorm(x){ return String(x||'').toLowerCase().replace(/&/g,' and ').replace(/['’`]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); }
+function reconcileSheet2026(){
+  const y='2026', lo=y+'-01-01', hi=y+'-12-31', today=new Date().toISOString().slice(0,10);
+  const clients = db.prepare("SELECT id,name FROM clients WHERE deleted_at IS NULL").all()
+    .map(c=>({id:c.id,name:c.name,n:reconNorm(c.name)})).filter(c=>c.n);
+  const matchClient = (label)=>{
+    const ln = reconNorm(String(label).replace(/carryover/ig,'').replace(/\bshadow\b/ig,''));
+    if(!ln) return null;
+    let ex = clients.find(c=>c.n===ln); if(ex) return ex;
+    let cand = clients.filter(c=>ln.includes(c.n)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0];
+    cand = clients.filter(c=>c.n.includes(ln)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0];
+    return null;
+  };
+  const coaches = db.prepare("SELECT id,name FROM coaches").all();
+  const coachName = id => (coaches.find(c=>c.id===id)||{}).name || id || '—';
+  const blocks = db.prepare("SELECT coach_id, week, label FROM blocks WHERE (kind='visit' OR kind='visit_legacy') AND week>=? AND week<=? ORDER BY week").all(lo,hi);
+  const cyc = db.prepare("SELECT id,client_id,contract_id,program,cycle,due,completed,cal_week,cal_coach FROM visits WHERE due>=? AND due<=?").all(lo,hi);
+  const cycByClient={}; for(const v of cyc){ (cycByClient[v.client_id]=cycByClient[v.client_id]||[]).push(v); }
+  const byClient={}, unmatched=[];
+  for(const b of blocks){ const m=matchClient(b.label); if(!m){ unmatched.push({week:b.week, coach:coachName(b.coach_id), label:b.label}); continue; }
+    (byClient[m.id]=byClient[m.id]||{clientId:m.id, client:m.name, blocks:[]}).blocks.push(b); }
+  const dd=(a,b)=>Math.abs((Date.parse(a)-Date.parse(b))/864e5);
+  const plan=[];
+  for(const cid of Object.keys(byClient)){
+    const {client,blocks:bl}=byClient[cid];
+    const carry=bl.filter(b=>/carryover/i.test(b.label)).sort((a,b)=>a.week.localeCompare(b.week));
+    const normal=bl.filter(b=>!/carryover/i.test(b.label)).sort((a,b)=>a.week.localeCompare(b.week));
+    const cad=(cycByClient[cid]||[]).slice().sort((a,b)=>a.due.localeCompare(b.due));
+    const claimed=new Array(cad.length).fill(false);
+    const items=[];
+    for(const b of normal){
+      let bi=-1,bd=1e15; for(let i=0;i<cad.length;i++){ if(claimed[i])continue; const d=dd(b.week,cad[i].due); if(d<bd){bd=d;bi=i;} }
+      if(bi>=0){ claimed[bi]=true; const cy=cad[bi];
+        items.push({type:'place', week:b.week, coach:coachName(b.coach_id), coachId:b.coach_id, label:b.label,
+          visitId:cy.id, cycle:cy.cycle, due:cy.due, contractId:cy.contract_id, completed:!!cy.completed, alreadyPlaced:!!cy.cal_week, past:b.week<today}); }
+      else items.push({type:'extra', week:b.week, coach:coachName(b.coach_id), coachId:b.coach_id, label:b.label, past:b.week<today});
+    }
+    for(const b of carry) items.push({type:'carryover', week:b.week, coach:coachName(b.coach_id), coachId:b.coach_id, label:b.label, past:b.week<today});
+    for(let i=0;i<cad.length;i++) if(!claimed[i]) items.push({type:'unscheduled', cycle:cad[i].cycle, due:cad[i].due, visitId:cad[i].id});
+    const counts={ place:items.filter(x=>x.type==='place').length, extra:items.filter(x=>x.type==='extra').length,
+      carryover:items.filter(x=>x.type==='carryover').length, unscheduled:items.filter(x=>x.type==='unscheduled').length };
+    plan.push({ clientId:+cid, client, counts, cadenceCount:cad.length, items });
+  }
+  plan.sort((a,b)=>a.client.localeCompare(b.client));
+  const totals={ sheetVisits:blocks.length, matchedClients:plan.length, unmatched:unmatched.length, place:0, extra:0, carryover:0, unscheduled:0 };
+  for(const p of plan){ totals.place+=p.counts.place; totals.extra+=p.counts.extra; totals.carryover+=p.counts.carryover; totals.unscheduled+=p.counts.unscheduled; }
+  return { year:y, generatedAt:new Date().toISOString(), totals, plan, unmatched };
+}
+route('GET', /^\/api\/admin\/sheet-recon-2026$/, ['admin'], (req, res) => { send(res, 200, reconcileSheet2026()); });
+
 /* Archive-to-system handoff gap, found 2026-08-23 alongside Cowboy Chevrolet GMC
  * and Bowman Chevrolet of Clinton: some completed visits imported from the sheet
  * were never linked to a contract_id. Every contract-scoped feature (rolling
