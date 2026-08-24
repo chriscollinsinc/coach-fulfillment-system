@@ -97,6 +97,18 @@ function calendarPill(v){
   const tip = `Due ${fmt(v.due)} — scheduled for week of ${fmtW(v.cal_week)}${v.cal_coach?' — '+(coach(v.cal_coach)?.name||''):''}`;
   return `<span class="pill ${late?'p-due':'p-cal'}" style="cursor:pointer" title="${esc(tip)}" onclick="event.stopPropagation();jumpToCalendar(${v.id})">${late?'Late — on calendar':'On calendar'}</span>`;
 }
+/* Completed-visit badge. When the visit was placed on the calendar (cal_week set), it
+ * behaves like calendarPill — hover shows when it was done + which week/coach it sat on,
+ * and clicking jumps to that cell on the Schedule Board. Historical imports with no
+ * calendar placement fall back to a plain, non-clickable badge that still shows the date. */
+function completedPill(v){
+  if(v.cal_week){
+    const tip = `Completed${v.completed_on?' '+fmt(v.completed_on):''} — was on the calendar week of ${fmtW(v.cal_week)}${v.cal_coach?' — '+(coach(v.cal_coach)?.name||''):''}. Click to view it on the calendar.`;
+    return `<span class="pill p-done" style="cursor:pointer" title="${esc(tip)}" onclick="event.stopPropagation();jumpToCalendar(${v.id})">completed ↗</span>`;
+  }
+  const tip = v.completed_on ? `Completed ${fmt(v.completed_on)}` : (v.sched_hist ? `Scheduled ${v.sched_hist}` : 'Completed');
+  return `<span class="pill p-done" title="${esc(tip)}">completed</span>`;
+}
 const canEdit = () => ['admin','lead'].includes(D.user.role);
 // Broader than canEdit(): sales/coach can see the Schedule Board and set/clear a
 // coach's open-week label (Home/Off/Training/etc.), but never place, move, or
@@ -1831,7 +1843,7 @@ function clientProfileView(data, notes){
 
   html += `<div class="panel"><h2>Visit history</h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
-      const pill = v.completed?'<span class="pill p-done">completed</span>'
+      const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td>
