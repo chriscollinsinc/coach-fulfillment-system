@@ -1381,13 +1381,24 @@ function reconNorm(x){
 }
 const RECON_STOP=new Set(['of','the','and','inc','llc','co','a','group','automotive']);
 function reconToks(x){ return reconNorm(x).split(' ').filter(w=>w&&!RECON_STOP.has(w)); }
+// Confirmed-by-Mike (2026-08-24) label→client aliases where the sheet name and the
+// client name share no distinctive token (geography/branding differs), so the fuzzy
+// matcher can't safely infer them. Keyed by reconNorm(label) → reconNorm(client name).
+const RECON_ALIASES = {
+  'planet honda colorado':'planet honda of golden co',
+  'm a g classic hyundai of hampton':'m a g hyundai genesis of hampton',
+  'm a g cdjr goldsboro':'m a g classic cdjrf of goldsboro',
+  'm a g classic cdjr goldsboro':'m a g classic cdjrf of goldsboro',
+  'm a g classic cdjr pineville':'m a g classic cdjr of south charlotte',
+};
 function reconcileSheet2026(){
   const y='2026', lo=y+'-01-01', hi=y+'-12-31', today=new Date().toISOString().slice(0,10);
   const clients = db.prepare("SELECT id,name FROM clients WHERE deleted_at IS NULL").all()
     .map(c=>({id:c.id,name:c.name,n:reconNorm(c.name),t:reconToks(c.name)})).filter(c=>c.n);
   const matchClient = (label)=>{
     const clean = String(label).replace(/carryover/ig,'').replace(/\bshadow\b/ig,'');
-    const ln = reconNorm(clean);
+    let ln = reconNorm(clean);
+    if(RECON_ALIASES[ln]) ln = RECON_ALIASES[ln];                                            // confirmed variant → client
     if(!ln) return null;
     let ex = clients.find(c=>c.n===ln); if(ex) return ex;                                   // exact
     let cand = clients.filter(c=>ln.includes(c.n)).sort((a,b)=>b.n.length-a.n.length); if(cand.length) return cand[0]; // client name inside label
