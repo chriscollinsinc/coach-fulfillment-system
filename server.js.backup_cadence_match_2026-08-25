@@ -1801,7 +1801,7 @@ function resyncPreview2026(){
     const normal=pc.visits.filter(v=>!v.carryover).sort((a,b)=>a.week.localeCompare(b.week));
     const cad=(cycByClient[cid]||[]).slice().sort((a,b)=>a.due.localeCompare(b.due));
     const claimed=new Array(cad.length).fill(false); const items=[];
-    const tryMatch=(v)=>{ let bi=-1; for(let i=0;i<cad.length;i++){if(claimed[i]||cad[i].completed)continue;bi=i;break;} if(bi>=0)return bi; let bd=1e15; for(let i=0;i<cad.length;i++){if(claimed[i])continue;const d=dd(v.week,cad[i].due);if(d<bd){bd=d;bi=i;}} return bi; };
+    const tryMatch=(v)=>{ let bi=-1,bd=1e15; for(let i=0;i<cad.length;i++){if(claimed[i])continue;const d=dd(v.week,cad[i].due);if(d<bd){bd=d;bi=i;}} return bi; };
     for(const v of normal){ const bi=tryMatch(v);
       if(bi>=0){claimed[bi]=true;const cy=cad[bi];items.push({type:'place',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount,cycle:cy.cycle,due:cy.due,visitId:cy.id,contractId:cy.contract_id,completed:!!cy.completed});}
       else items.push({type:'extra',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount}); }
