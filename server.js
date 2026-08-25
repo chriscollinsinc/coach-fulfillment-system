@@ -1678,6 +1678,8 @@ route('POST', /^\/api\/admin\/sheet-recon-2026\/apply$/, ['admin'], (req, res, m
           const cyc = it.type==='carryover' ? 'Carryover' : 'Extra visit';
           const team = clientTeam[p.clientId] || coachTeam[it.coachId] || null;
           const result = findOrCreateVisit({ contractId: primary, dueDate: it.week, cycleLabel: cyc, program: primCon.program || '', team: team, client: p.client, source: 'sheet-2026', sold: todayS, client_id: p.clientId, cal_week: it.week, cal_coach: it.coachId }); if(result.created || result.reason === 'existing_visit_found') { created++; } else { console.error(`Failed to create carryover/extra visit for ${p.clientId}: ${result.error}`); }
+        }
+      }
     }
     db.exec('COMMIT');
   }catch(e){ db.exec('ROLLBACK'); return err(res, 500, 'Apply failed: ' + e.message); }
