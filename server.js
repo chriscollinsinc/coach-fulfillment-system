@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH } = require('./db.js');
+const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit } = require('./db.js');
 const { sendMail } = require('./mail.js');
 
 const PORT = process.env.PORT || 3000;
@@ -231,15 +231,40 @@ function createContractAndVisits({ clientName, program, n, first, firstPayDate, 
   const contractId = Number(cr.lastInsertRowid);
   const iv = INTERVAL[program] ?? 3;
   const ids = [];
+  
+  // DISCIPLINE: Use findOrCreateVisit to create initial visits
   for(let k = 0; k < n; k++){
-    const d = new Date(first + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
-    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id)
-      VALUES(?,?,?,?,?,?,?,?,?)`).run(clientName.trim(), program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, source || 'app', new Date().toISOString().slice(0,10), clientId, contractId);
-    ids.push(Number(r.lastInsertRowid));
+    const d = new Date(first + 'T12:00:00'); 
+    d.setMonth(d.getMonth() + k * iv);
+    const dueDate = d.toISOString().slice(0,10);
+    const cycleLabel = `${k+1} of ${n}`;
+    
+    const result = findOrCreateVisit({
+      contractId: contractId,
+      dueDate: dueDate,
+      cycleLabel: cycleLabel,
+      program: program,
+      team: team,
+      client: clientName.trim(),
+      source: source || 'app',
+      sold: new Date().toISOString().slice(0,10),
+      client_id: clientId
+    });
+    
+    if(result.created) {
+      ids.push(result.id);
+    } else if(result.reason === 'existing_visit_found') {
+      ids.push(result.id);
+    } else {
+      // Should not happen for initial creation, but log if it does
+      console.error(`Failed to create initial visit ${cycleLabel} for contract ${contractId}: ${result.error}`);
+    }
   }
+  
   log(actorEmail || 'system', 'contract.create', { client: clientName, program, n, first, team, source });
   return { clientId, contractId, ids };
 }
+
 
 /* ================= API ================= */
 route('GET', /^\/api\/sso-config$/, null, (req, res) => {
@@ -1311,10 +1336,31 @@ route('POST', /^\/api\/contracts\/(\d+)\/regenerate$/, ['admin'], (req, res, m, 
   const iv = INTERVAL[contract.program] ?? 3;
   const ids = [];
   for(let k = 0; k < n; k++){
-    const d = new Date(anchorDate + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
-    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id)
-      VALUES(?,?,?,?,?,?,?,?,?)`).run(client.name, contract.program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, 'app', new Date().toISOString().slice(0,10), contract.client_id, contract.id);
-    ids.push(Number(r.lastInsertRowid));
+    const d = new Date(anchorDate + 'T12:00:00'); 
+    d.setMonth(d.getMonth() + k * iv);
+    const dueDate = d.toISOString().slice(0,10);
+    const cycleLabel = `${k+1} of ${n}`;
+    
+    // DISCIPLINE: Use findOrCreateVisit for consistent visit creation
+    const result = findOrCreateVisit({
+      contractId: contract.id,
+      dueDate: dueDate,
+      cycleLabel: cycleLabel,
+      program: contract.program,
+      team: team,
+      client: client.name,
+      source: 'app',
+      sold: new Date().toISOString().slice(0,10),
+      client_id: contract.client_id
+    });
+    
+    if(result.created) {
+      ids.push(result.id);
+    } else if(result.reason === 'existing_visit_found') {
+      ids.push(result.id);
+    } else {
+      console.error(`Failed to create regenerated visit ${cycleLabel} for contract ${contract.id}: ${result.error}`);
+    }
   }
   if(firstPayDateProvided){
     // Explicit from the dialog (always sends this field, even blank) — save exactly
@@ -1631,11 +1677,7 @@ route('POST', /^\/api\/admin\/sheet-recon-2026\/apply$/, ['admin'], (req, res, m
           if(!primary){ skipped++; continue; }
           const cyc = it.type==='carryover' ? 'Carryover' : 'Extra visit';
           const team = clientTeam[p.clientId] || coachTeam[it.coachId] || null;
-          insVisit.run(p.client, primCon.program||'', cyc, it.week, team, 'sheet-2026', todayS, p.clientId, primary, it.week, it.coachId);
-          created++;
-          if(delBlock.run(it.coachId, it.week).changes) blocksDeleted++;
-        }
-      }
+          const result = findOrCreateVisit({ contractId: primary, dueDate: it.week, cycleLabel: cyc, program: primCon.program || '', team: team, client: p.client, source: 'sheet-2026', sold: todayS, client_id: p.clientId, cal_week: it.week, cal_coach: it.coachId }); if(result.created || result.reason === 'existing_visit_found') { created++; } else { console.error(`Failed to create carryover/extra visit for ${p.clientId}: ${result.error}`); }
     }
     db.exec('COMMIT');
   }catch(e){ db.exec('ROLLBACK'); return err(res, 500, 'Apply failed: ' + e.message); }
@@ -1865,8 +1907,7 @@ route('POST', /^\/api\/admin\/sheet-2026\/apply$/, ['admin'], (req, res, m, body
           if(!primary || !clientActive[p.clientId]){ skipped++; continue; }
           const cyc = it.type==='carryover' ? 'Carryover' : 'Extra visit';
           const team = clientTeam[p.clientId] || coachTeam[it.coachId] || null;
-          insVisit.run(p.client, primCon.program||'', cyc, it.week, team, 'sheet-2026', todayS, p.clientId, primary, it.week, it.coachId);
-          created++;
+          const result = findOrCreateVisit({ contractId: primary, dueDate: it.week, cycleLabel: cyc, program: primCon.program || '', team: team, client: p.client, source: 'sheet-2026', sold: todayS, client_id: p.clientId, cal_week: it.week, cal_coach: it.coachId }); if(result.created || result.reason === 'existing_visit_found') { created++; } else { console.error(`Failed to create carryover/extra visit for ${p.clientId}: ${result.error}`); }
         }
       }
     }
@@ -2344,48 +2385,77 @@ function extendRollingSchedule(contract, opts = {}){
   // Coaching Only (visits=0), LID (Purchase) (iv=0, genuinely one-and-done), or
   // any contract with an unrecognized/blank program — nothing to repeat.
   if(!Number.isFinite(n) || n <= 0 || !iv) return { created: 0, visits: [] };
-  const last = db.prepare('SELECT due, cycle, team FROM visits WHERE contract_id=? ORDER BY due DESC, id DESC LIMIT 1').get(contract.id);
-  let nextDue, nextK, team;
+  
+  // DISCIPLINE: Use getNextCycleNumber to determine correct sequence
+  // instead of reading last visit (which perpetuates disorder)
+  let nextK = getNextCycleNumber(contract.id, n);
+  if (nextK > n) nextK = 1; // wrap to cycle 1 after completing n
+  
+  const last = db.prepare('SELECT due, team FROM visits WHERE contract_id=? ORDER BY due DESC, id DESC LIMIT 1').get(contract.id);
+  let nextDue, team;
+  
   if(last && last.due){
-    const parsed = /^(\d+)\s*of\s*(\d+)/i.exec(last.cycle || '');
-    const k = parsed ? +parsed[1] : n; // unparsable cycle label — safest assumption is it was the last slot in its cycle
-    nextK = (k % n) + 1;
-    const d = new Date(last.due + 'T12:00:00'); d.setMonth(d.getMonth() + iv);
+    const d = new Date(last.due + 'T12:00:00'); 
+    d.setMonth(d.getMonth() + iv);
     nextDue = d.toISOString().slice(0, 10);
     team = last.team || null;
   } else {
     // No visits at all yet under this contract (shouldn't normally happen —
     // create/regenerate always seed at least one — but don't skip silently).
-    nextK = 1;
     nextDue = contract.start_date || new Date().toISOString().slice(0, 10);
     team = null;
   }
+  
   if(!team){
     const teamRow = db.prepare('SELECT team FROM visits WHERE contract_id=? ORDER BY id LIMIT 1').get(contract.id);
     team = (teamRow && teamRow.team) || null;
   }
-  const horizon = new Date(); horizon.setMonth(horizon.getMonth() + ROLLING_MONTHS);
+  
+  const horizon = new Date(); 
+  horizon.setMonth(horizon.getMonth() + ROLLING_MONTHS);
   const horizonStr = horizon.toISOString().slice(0, 10);
+  
   const visits = [];
-  let guard = 0; // safety valve, not a real cap — see note below if it's ever hit
+  let guard = 0; // safety valve, not a real cap
+  
   while(nextDue <= horizonStr && guard < 60){
     const cycle = `${nextK} of ${n}`;
+    
     if(dryRun){
       visits.push({ due: nextDue, cycle });
     } else {
-      const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id)
-        VALUES(?,?,?,?,?,?,?,?,?)`).run(contract.client_name, contract.program, cycle, nextDue, team, 'app', new Date().toISOString().slice(0, 10), contract.client_id, contract.id);
-      visits.push({ id: Number(r.lastInsertRowid), due: nextDue, cycle });
+      // DISCIPLINE: Use findOrCreateVisit for validated creation
+      // This prevents duplicates and orphan cycles
+      const result = findOrCreateVisit({
+        contractId: contract.id,
+        dueDate: nextDue,
+        cycleLabel: cycle,
+        program: contract.program,
+        team: team
+      });
+      
+      if(result.created){
+        visits.push({ id: result.id, due: nextDue, cycle });
+      } else if(result.reason === 'existing_visit_found'){
+        // Visit already exists at this due date/cycle, skip silently
+        visits.push({ id: result.id, due: nextDue, cycle, skipped: 'already_exists' });
+      } else {
+        // Validation failed (cycle sequence violation), stop extending
+        console.error(`extendRollingSchedule: Cannot create ${cycle} for contract ${contract.id}: ${result.error}`);
+        break;
+      }
     }
+    
     nextK = (nextK % n) + 1;
-    const d = new Date(nextDue + 'T12:00:00'); d.setMonth(d.getMonth() + iv);
+    const d = new Date(nextDue + 'T12:00:00'); 
+    d.setMonth(d.getMonth() + iv);
     nextDue = d.toISOString().slice(0, 10);
     guard++;
   }
-  // guard===60 would mean a contract was over a decade stale — surfaced, not
-  // silently truncated, so it gets a human look rather than quietly staying short.
+  
   return { created: visits.length, visits, cappedAt60: guard >= 60 };
 }
+
 function sweepRollingSchedule(opts = {}){
   // notice_given_date IS NULL: a client who has given notice is on their way out —
   // entering notice deliberately deletes their open future visits (see the notice
