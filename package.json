@@ -3,6 +3,13 @@
   "version": "1.0.0",
   "description": "Chris Collins Inc — LID inventory, scheduling, capacity & sales availability",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=22" }
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
+  }
 }
