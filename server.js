@@ -1658,12 +1658,16 @@ function resyncPreview2026(){
     const credit=matched.find(c=>c.id===assigned[g.client.id]) || matched[0] || null;
     (perClient[g.client.id]=perClient[g.client.id]||{client:g.client.name, visits:[]}).visits.push({week:g.week, coachId:credit?credit.id:null, coach:credit?credit.name:(g.coaches[0]||'—'), carryover:g.carryover, coCount:g.coaches.length-1});
   }
-  // Only genuine cadence-generated visits are claimable cycle slots — a visit this same
-  // engine previously created for an 'extra'/'carryover' (source='sheet-2026') is a
-  // synthetic placement, not a cadence cycle, and must never be treated as one: on a
-  // re-run that would let a sheet item "claim" the very extra visit it created last time,
-  // which the apply step then deletes-then-updates and silently loses (found in testing).
-  const cyc=db.prepare("SELECT id,client_id,contract_id,program,cycle,due,completed,cal_week FROM visits WHERE due>=? AND due<=? AND (source IS NULL OR source!='sheet-2026')").all(lo,hi);
+  // Claimable slots = genuine cadence-generated visits, PLUS any extra/carryover visit
+  // this same engine already created and got marked COMPLETE — a permanent historical
+  // record that a re-uploaded sheet's matching entry should recognize as already
+  // satisfied, not duplicate. A NOT-completed 'sheet-2026' visit stays excluded: it's a
+  // synthetic placement, not a real slot, and letting it self-claim would mean the apply
+  // step deletes-then-updates it and silently loses it (found in testing). Found live
+  // 2026-08-25 on Suski Chevrolet Buick: a completed Carryover from an earlier apply run
+  // sat right next to a second, incomplete Carryover for the identical date — because
+  // carryover items never checked for an existing match before inserting a new one.
+  const cyc=db.prepare("SELECT id,client_id,contract_id,program,cycle,due,completed,cal_week FROM visits WHERE due>=? AND due<=? AND (source IS NULL OR source!='sheet-2026' OR completed=1)").all(lo,hi);
   const cycByClient={}; for(const v of cyc){ (cycByClient[v.client_id]=cycByClient[v.client_id]||[]).push(v); }
   const dd=(a,b)=>Math.abs((Date.parse(a)-Date.parse(b))/864e5);
   const plan=[];
@@ -1672,10 +1676,13 @@ function resyncPreview2026(){
     const normal=pc.visits.filter(v=>!v.carryover).sort((a,b)=>a.week.localeCompare(b.week));
     const cad=(cycByClient[cid]||[]).slice().sort((a,b)=>a.due.localeCompare(b.due));
     const claimed=new Array(cad.length).fill(false); const items=[];
-    for(const v of normal){ let bi=-1,bd=1e15; for(let i=0;i<cad.length;i++){if(claimed[i])continue;const d=dd(v.week,cad[i].due);if(d<bd){bd=d;bi=i;}}
+    const tryMatch=(v)=>{ let bi=-1,bd=1e15; for(let i=0;i<cad.length;i++){if(claimed[i])continue;const d=dd(v.week,cad[i].due);if(d<bd){bd=d;bi=i;}} return bi; };
+    for(const v of normal){ const bi=tryMatch(v);
       if(bi>=0){claimed[bi]=true;const cy=cad[bi];items.push({type:'place',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount,cycle:cy.cycle,due:cy.due,visitId:cy.id,contractId:cy.contract_id,completed:!!cy.completed});}
       else items.push({type:'extra',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount}); }
-    for(const v of carry) items.push({type:'carryover',week:v.week,coach:v.coach,coachId:v.coachId});
+    for(const v of carry){ const bi=tryMatch(v);
+      if(bi>=0){claimed[bi]=true;const cy=cad[bi];items.push({type:'place',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount,cycle:cy.cycle,due:cy.due,visitId:cy.id,contractId:cy.contract_id,completed:!!cy.completed,wasCarryover:true});}
+      else items.push({type:'carryover',week:v.week,coach:v.coach,coachId:v.coachId}); }
     for(let i=0;i<cad.length;i++) if(!claimed[i]) items.push({type:'unscheduled',cycle:cad[i].cycle,due:cad[i].due,visitId:cad[i].id});
     const clientIsActive = clientActiveNow[cid] !== false; // default true if somehow missing
     if(!clientIsActive) for(const it of items) if(it.type==='extra'||it.type==='carryover') it.willSkipInactive=true;
