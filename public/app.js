@@ -2517,12 +2517,15 @@ async function loadResyncPreview(){
         <div class="recon-scroll" style="margin-top:6px"><table class="recon-tbl"><tr><th>Client</th><th>Week</th><th>Both coaches — one counts</th></tr>`+
         r.doubles.map(d=>`<tr><td>${esc(d.client)}</td><td>${fmtW(d.week)}</td><td>${d.coaches.map(esc).join('  +  ')}</td></tr>`).join('')+`</table></div></details>`;
     }
-    h+=`<div class="controls" style="margin:10px 0 4px"><label class="small">Show
+    h+=`<div class="controls" style="margin:12px 0 2px">
+        <button class="btn danger" onclick="applyResync2026()">Apply</button>
+        <span class="small" style="color:var(--muted)">Corrects ${s.place} existing visit(s), creates ${s.extra+s.carryover} new linked visit(s)${s.skippedInactiveNew?`, skips ${s.skippedInactiveNew} for departed/notice-given clients`:''}. Nothing completed is ever touched.</span>
+      </div>
+      <div class="controls" style="margin:10px 0 4px"><label class="small">Show
       <select id="resyncFilter" onchange="renderResyncTable()">
         <option value="all">everything</option><option value="place">place onto a cycle</option>
         <option value="extra">extra (over cadence)</option><option value="carryover">carryover</option>
-        <option value="unscheduled">unscheduled cycles</option></select></label>
-      <span class="small" style="color:var(--muted)">Read-only — no changes written until we wire the apply.</span></div>
+        <option value="unscheduled">unscheduled cycles</option></select></label></div>
       <div id="resyncTableOut"></div>`;
     if(r.unmatchedLabels&&r.unmatchedLabels.length){
       h+=`<details style="margin-top:10px"><summary class="small" style="cursor:pointer">Unmatched labels (${r.unmatchedLabels.length}) — name variants or non-LID</summary>
@@ -2530,6 +2533,21 @@ async function loadResyncPreview(){
     }
     el.innerHTML=h; renderResyncTable();
   }catch(e){ el.innerHTML='<p>Could not load preview.</p>'; }
+}
+async function applyResync2026(){
+  const r=window._resync; if(!r){ await loadResyncPreview(); return; }
+  const s=r.summary;
+  const msg=`Apply the 2026 schedule re-sync?\n\n`+
+    `• Correct the scheduled week/coach on ${s.place} existing visit(s) — no new rows\n`+
+    `• Create ${s.extra} extra + ${s.carryover} carryover visit(s), each linked to the client's existing contract\n`+
+    (s.skippedInactiveNew?`• Skip ${s.skippedInactiveNew} of those for clients who've cancelled or given notice — nothing new gets created for them\n`:'')+
+    `\nUnscheduled cycles (${s.unscheduled}) and unmatched labels (${s.unmatchedLabelCount}) are left alone. Nothing completed is ever touched. Safe to re-apply any time you re-upload an updated sheet.`;
+  if(!(await uiConfirm(msg,'Apply'))) return;
+  try{
+    const res=await api('POST','/api/admin/sheet-2026/apply',{});
+    toast(`Applied — ${res.placed} placed, ${res.created} created, ${res.cleared} re-placed, ${res.skipped} skipped`);
+    await refresh(); await loadResyncPreview();
+  }catch(e){ uiAlert(e.message||'Apply failed'); }
 }
 function renderResyncTable(){
   const r=window._resync; if(!r) return; const out=$('#resyncTableOut'); if(!out) return;
