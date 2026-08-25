@@ -1432,7 +1432,15 @@ function findPhantomContractPairs(){
   for(const group of Object.values(byKey)){
     if(group.length < 2) continue;
     const priced = group.filter(c => c.price != null && c.keap_subscription_id);
-    const shells = group.filter(c => c.price == null && !c.keap_subscription_id && c.source === 'sheet');
+    // Found live 2026-08-25 (Suski Chevrolet Buick, re-checked after the first cleanup
+    // pass): a shell isn't always unpriced. Suski still had a THIRD contract — same
+    // program, same start date as the real one, no Keap link, zero visits attached —
+    // but it happened to carry a price, so the original price==null requirement let it
+    // slide right through the first cleanup untouched. The real defining trait of a
+    // shell was never "no price," it's "no Keap link" (source='sheet' is what a past
+    // import leaves behind either way). Price is just usually absent on these, not
+    // always. Loosened to catch that case without changing anything else.
+    const shells = group.filter(c => !c.keap_subscription_id && c.source === 'sheet');
     if(priced.length === 1 && shells.length >= 1 && priced.length + shells.length === group.length){
       for(const shell of shells){
         pairs.push({
