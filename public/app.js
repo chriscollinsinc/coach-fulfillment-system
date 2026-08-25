@@ -248,7 +248,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -2336,6 +2336,18 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">Finds contracts sitting in pairs — same client, same program, same start date — where one is the real, priced, Keap-linked contract and the other is an unpriced, unlinked shell created by a past sheet import that never checked for the existing contract before inserting a new one (the Suski Chevrolet Buick pattern, found 2026-08-25). Clean up first moves any visits sitting on the shell onto the real contract, then archives the shell — it is never deleted, and can be restored from a client's profile at any time. Pairs where BOTH contracts are unpriced/unlinked (no single "real" one to prefer) are listed separately below and are never touched automatically.</p>
   <div class="controls"><button class="btn" onclick="loadPhantomContractsAudit()">Refresh</button></div>
   <div id="phantomContractsOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Contract splits</h2>
+  <p class="small" style="margin-bottom:12px">Finds clients with 2+ active contracts at once — a broader, more careful check than Phantom contracts above: it doesn't require the same program/start-date, and rather than just archiving one side, it actually folds a secondary contract into the primary — moving its visits (renumbering any not-yet-completed cycle so the merged history reads as one coherent sequence, and dropping any that would collide within 45 days of another), and carrying over its Keap link/price/first-pay-date wherever the primary is missing one. Not every split found here should be merged — a client can legitimately have two separate, active subscriptions. Review each one before merging; nothing merges automatically.</p>
+  <div class="controls"><button class="btn" onclick="loadContractSplitsAudit()">Refresh</button></div>
+  <div id="contractSplitsOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Orphaned visits</h2>
+  <p class="small" style="margin-bottom:12px">Visits with no contract_id at all — usually old sheet-import rows that were never linked to a contract. "High confidence" means the client has exactly one contract with a matching program, so linking it is unambiguous; those are the only ones Link auto-links. "Ambiguous" (2+ matching contracts) and "None" (no matching program) are listed for you to look at directly and are never touched automatically.</p>
+  <div class="controls"><button class="btn" onclick="loadOrphanedVisitsAudit()">Refresh</button></div>
+  <div id="orphanedVisitsOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Cadence changes (vs. Keap)</h2>
+  <p class="small" style="margin-bottom:12px">For every active Keap-linked contract, checks whether Keap's subscription now implies a different visit cadence than what's stored (e.g. a client that moved from Monthly to Quarterly billing). Detection only — nothing here ever rewrites a schedule automatically, since a wrong auto-apply would silently reshuffle a client's whole calendar. Fix a flagged one from that client's profile using the existing "Regenerate schedule" button, which re-spaces the remaining visits from today.</p>
+  <div class="controls"><button class="btn" onclick="loadCadenceChangeAudit()">Check against Keap</button></div>
+  <div id="cadenceChangeOut" class="small">Click Check to run (calls Keap for every linked contract — takes a few seconds).</div></div>
   <div class="panel"><h2>2026 Schedule reconciliation</h2>
   <p class="small" style="margin-bottom:12px">The 2026 Schedule sheet is the source of truth for this year's visits. This maps every "from sheet" 2026 calendar visit onto the matching contract's cadence cycle — <b>place</b> where a real visit lines up with a cycle, <b>extra</b> where the sheet has more than the cadence, <b>carryover</b> for 2025 make-ups, and it flags cadence cycles with no sheet visit. <b>Read-only</b> — nothing is written here. Review it before we turn on the apply.</p>
   <div class="controls"><button class="btn" onclick="loadSheetRecon2026()">Refresh</button></div>
@@ -2463,6 +2475,82 @@ async function cleanupPhantomContracts(expectedCount){
     toast(`Archived ${r.archived} phantom contract(s), moved ${r.visitsMoved} visit(s)`);
     await refresh(); await loadPhantomContractsAudit();
   }catch(e){ uiAlert(e.message||'Cleanup failed'); }
+}
+async function loadContractSplitsAudit(){
+  try{
+    const r = await api('GET','/api/admin/contract-splits-audit');
+    if(!r.count){ $('#contractSplitsOut').innerHTML = '<p>None found. ✔</p>'; return; }
+    $('#contractSplitsOut').innerHTML = `<p><b>${r.count} client(s)</b> with 2+ active contracts:</p>
+      <table><tr><th>Client</th><th>Primary (kept)</th><th>Secondary (would fold in)</th><th></th></tr>` +
+      r.rows.map(g=>`<tr><td><a onclick="openClientProfile(${g.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(g.client)}</a></td>
+        <td class="small">#${g.primary.contractId} ${esc(g.primary.program||'—')} ${g.primary.price?'$'+g.primary.price:''} ${g.primary.keapSubscriptionId?`<span class="mono">${esc(g.primary.keapSubscriptionId)}</span>`:''} (${g.primary.visits} visits)</td>
+        <td class="small">${g.moveFrom.map(o=>`#${o.contractId} ${esc(o.program||'—')}${o.wouldMove.length?' — would move: '+o.wouldMove.join(', '):' — nothing to move'}`).join('<br>')}</td>
+        <td><button class="btn tiny" onclick='contractSplitPreviewDlg(${g.clientId},${g.primary.contractId},${JSON.stringify(g.moveFrom.map(o=>o.contractId))},"${esc(g.client).replace(/"/g,'&quot;')}")'>Review merge</button></td>
+        </tr>`).join('') +
+      `</table>`;
+  }catch(e){ $('#contractSplitsOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function contractSplitPreviewDlg(clientId, primaryId, secondaryIds, clientName){
+  let plan;
+  try{ plan = await api('POST','/api/admin/contract-splits/preview',{clientId,primaryId,secondaryIds}); }
+  catch(e){ uiAlert(e.message||'Preview failed'); return; }
+  const moves = [
+    plan.keapMove ? `Keap subscription <span class="mono">${esc(plan.keapMove.keapSubscriptionId)}</span> moves onto the primary` : null,
+    plan.priceMove ? `Price $${plan.priceMove.price} moves onto the primary` : null,
+    plan.firstPayMove ? `First-pay date ${fmt(plan.firstPayMove.firstPayDate)} moves onto the primary` : null,
+  ].filter(Boolean);
+  openDlg(`<h3>Merge contracts — ${esc(clientName)}</h3>
+    <p class="small">Primary: contract #${plan.primaryId}. Folding in: ${plan.secondaryIds.map(id=>'#'+id).join(', ')}.</p>
+    ${moves.length?`<ul class="small">${moves.map(m=>`<li>${m}</li>`).join('')}</ul>`:'<p class="small">Nothing to carry over onto the primary — it already has price/Keap link/first-pay date.</p>'}
+    <p class="small">${plan.completed.length} completed visit(s) move over unchanged. ${plan.relabeled.length} not-yet-completed visit(s) get renumbered to read as one continuous cycle.${plan.dropped.length?` ${plan.dropped.length} visit(s) that would collide within 45 days of another are dropped (the calendar-placed one wins).`:''}</p>
+    <p class="small" style="color:var(--muted)">The secondary contract(s) are marked completed with a permanent link to the primary — never deleted.</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+      <button class="btn danger" onclick='applyContractSplitMerge(${clientId},${primaryId},${JSON.stringify(secondaryIds)})'>Merge</button></div>`);
+}
+async function applyContractSplitMerge(clientId, primaryId, secondaryIds){
+  try{
+    const r = await api('POST','/api/admin/contract-splits/apply',{clientId,primaryId,secondaryIds});
+    closeDlg();
+    toast(`Merged ${r.plan.secondaryIds.length} contract(s) into #${r.plan.primaryId}`);
+    await refresh(); await loadContractSplitsAudit();
+  }catch(e){ uiAlert(e.message||'Merge failed'); }
+}
+async function loadOrphanedVisitsAudit(){
+  try{
+    const r = await api('GET','/api/admin/orphaned-visits-audit');
+    if(!r.count){ $('#orphanedVisitsOut').innerHTML = '<p>None found. ✔</p>'; return; }
+    $('#orphanedVisitsOut').innerHTML = `<p><b>${r.count} orphaned visit(s)</b> — ${r.byConfidence.high} high confidence, ${r.byConfidence.ambiguous} ambiguous, ${r.byConfidence.none} no match:</p>
+      <table><tr><th>Client</th><th>Program</th><th>Due</th><th>Confidence</th><th>Reason</th></tr>` +
+      r.rows.map(v=>`<tr><td><a onclick="openClientProfile(${v.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a></td>
+        <td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td>
+        <td>${v.confidence==='high'?'<span class="pill p-done">high</span>':v.confidence==='ambiguous'?'<span class="pill p-due">ambiguous</span>':'<span class="pill p-over">none</span>'}</td>
+        <td class="small">${esc(v.reason)}</td></tr>`).join('') +
+      `</table>
+      ${r.byConfidence.high?`<div class="controls" style="margin-top:10px"><button class="btn" onclick="applyOrphanedVisitsLink(${r.byConfidence.high})">Link all ${r.byConfidence.high} high-confidence visit(s)</button></div>`:''}`;
+  }catch(e){ $('#orphanedVisitsOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function applyOrphanedVisitsLink(expectedCount){
+  if(!(await uiConfirm(`Link ${expectedCount} high-confidence orphaned visit(s) to their one matching contract? Ambiguous and no-match visits are never touched.`,'Link'))) return;
+  try{
+    const r = await api('POST','/api/admin/orphaned-visits/apply',{});
+    toast(`Linked ${r.linkedCount} visit(s)`);
+    await refresh(); await loadOrphanedVisitsAudit();
+  }catch(e){ uiAlert(e.message||'Link failed'); }
+}
+async function loadCadenceChangeAudit(){
+  $('#cadenceChangeOut').innerHTML = 'Checking against Keap…';
+  try{
+    const r = await api('GET','/api/admin/cadence-change-audit');
+    let h = '';
+    if(r.errors && r.errors.length) h += `<p class="small" style="color:var(--bad,#c23b3b)">${r.errors.length} error(s): ${r.errors.slice(0,5).map(esc).join('; ')}${r.errors.length>5?'…':''}</p>`;
+    if(!r.changes.length) h += `<p>Checked ${r.checked} contract(s) — no cadence mismatches. ✔</p>`;
+    else h += `<p>Checked ${r.checked} contract(s) — <b>${r.changes.length} mismatch(es):</b></p>
+      <table><tr><th>Client</th><th>Current</th><th>Keap implies</th><th>Basis</th></tr>` +
+      r.changes.map(c=>`<tr><td><a onclick="openClientProfile(${c.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.client)}</a></td>
+        <td>${esc(c.currentProgram||'—')}</td><td><b>${esc(c.suggestedProgram)}</b></td><td class="small">${esc(c.basis)}</td></tr>`).join('') +
+      `</table><p class="small" style="color:var(--muted)">Fix from the client's profile with "Regenerate schedule" on that contract.</p>`;
+    $('#cadenceChangeOut').innerHTML = h;
+  }catch(e){ $('#cadenceChangeOut').innerHTML = '<p>Could not load.</p>'; }
 }
 async function loadSheetRecon2026(){
   const el=$('#sheetReconOut'); if(!el) return;
@@ -2817,7 +2905,7 @@ async function runNightlyNow(){
       `Digest emailed to ${r.digestSentTo||0} of ${r.digestAttempted||0} admin(s).`,
     ];
     $('#maintenanceOut').innerHTML = `<ul style="margin:0;padding-left:18px">${lines.map(l=>`<li>${l}</li>`).join('')}</ul>`;
-    await loadRevenueHistory(); await loadDeletedClients(); await loadBackupStatus(); await loadDuplicateVisitsAudit(); await loadPhantomContractsAudit();
+    await loadRevenueHistory(); await loadDeletedClients(); await loadBackupStatus(); await loadDuplicateVisitsAudit(); await loadPhantomContractsAudit(); await loadContractSplitsAudit(); await loadOrphanedVisitsAudit();
   }catch(e){ $('#maintenanceOut').innerHTML = `<p>Run failed: ${esc(e.message||e)}</p>`; }
   finally{ if(btn){btn.disabled=false;btn.textContent='Run full nightly check now';} }
 }
