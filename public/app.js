@@ -1001,7 +1001,7 @@ function visitDrawer(id){
       ${canDo?`<button class="btn tiny danger" onclick="closeDlg();delVisit(${v.id})">Delete visit</button>`:'<span></span>'}
       <button class="btn" onclick="closeDlg()">Close</button></div>`);
 }
-async function reopenVisit(id){ await api('POST',`/api/visits/${id}/reopen`); await refresh(); toast('Visit reopened'); }
+async function reopenVisit(id){ await api('POST',`/api/visits/${id}/reopen`); await refresh(); toast('Marked incomplete — the visit is active again and can be rescheduled'); }
 async function bulkCompleteVisits(){
   const ids=[...st.invSel];
   if(!(await uiConfirm(`Mark ${ids.length} visit(s) completed? Use this for cleanup of old already-done work — no notes get attached.`,'Mark completed'))) return;
@@ -1103,7 +1103,12 @@ async function saveVisit(id){
 }
 async function delVisit(id){
   const v=D.visits.find(x=>x.id===id);
-  if(!(await uiConfirm(`Delete ${v.client} — ${v.cycle} ${v.program}?`,'Delete'))) return;
+  const msg = v.completed
+    ? `This visit is marked COMPLETED — deleting erases it from the clients history and completed count. To keep it but undo the completion, use 'Mark incomplete' instead.
+
+Delete ${v.client} — ${v.cycle} ${v.program}?`
+    : `Delete ${v.client} — ${v.cycle} ${v.program}?`;
+  if(!(await uiConfirm(msg,'Delete'))) return;
   await api('DELETE','/api/visits/'+id); await refresh(); toast('Deleted');
 }
 
@@ -1866,7 +1871,7 @@ function clientProfileView(data, notes){
         : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td>
-        <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
+        <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button> ${v.completed?` <button class="btn tiny" onclick="reopenVisit(${v.id})">Mark incomplete</button>`:''} <button class="btn tiny danger" title="Delete this visit" onclick="delVisit(${v.id})">✕</button>` : ''}</td></tr>`;
     }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
@@ -2189,7 +2194,7 @@ const FAQ = [
   { cat: 'Visits & completion', roles: ['admin','lead','sales','coach'], items: [
     { q: 'Who can mark a visit complete?', a: `Only the coach who scheduled it (they're listed as the calendar coach for that slot) or the coach permanently assigned to that client. An admin or lead can complete any visit on their team. This is checked on the server every time — a coach can't complete a visit for a store that isn't theirs, even by editing the request.` },
     { q: 'What happens to the note I add when completing a visit?', a: `It's saved to that client's Notes tab and tagged to the specific visit it documents — you'll see the visit's due date and program show up next to it automatically. That link is set only by the complete step itself, so it can't be edited onto a different visit later.` },
-    { q: 'I completed a visit by mistake — can I undo it?', a: `Admins and leads can reopen a completed visit from the Inventory page, which clears its completed status. The note you logged (if any) stays on the client's record either way.` },
+    { q: 'I completed a visit by mistake — can I undo it?', a: `Admins and leads can reopen a completed visit from either the client's profile (Visit History table) or the Inventory page. Click 'Mark incomplete' to clear its completed status. The note you logged (if any) stays on the client's record either way.` },
   ]},
   { cat: 'Availability & soft pencil holds', roles: ['admin','lead','sales'], items: [
     { q: 'What is a soft pencil hold?', a: `A tentative reservation of specific weeks on a coach's schedule for a prospect who hasn't signed yet, placed from the Availability page's "Preview calendar." It records the prospect's name, program, who placed it and when — and it blocks those weeks from being double-booked. It never creates a client, contract, or anything Keap sees. Every hold has an expiry date (30 days after its last held week by default): if the deal goes quiet, the nightly job warns admins a week ahead, then auto-releases the weeks so they don't rot on the calendar.` },
