@@ -248,7 +248,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -1615,6 +1615,14 @@ async function contractKeapResync(contractId){
     if(r.programSuggestion) offerProgramFix(contractId, r.programSuggestion);
   }catch(e){ uiAlert(e.message||'Resync failed'); }
 }
+async function unarchiveContract(contractId){
+  if(!(await uiConfirm('Unarchive this contract? It goes back into the main contract list exactly as it was, with nothing else recalculated.','Unarchive'))) return;
+  try{
+    await api('POST', `/api/contracts/${contractId}/unarchive`, {});
+    await refresh();
+    toast('Contract unarchived');
+  }catch(e){ uiAlert(e.message||'Unarchive failed'); }
+}
 function contractKeapRelinkDlg(contractId, currentSubId){
   openDlg(`<h3>Link to Keap subscription</h3>
     <p class="small">${currentSubId?`Currently linked to subscription <span class="mono">${esc(currentSubId)}</span>. `:''}Enter the correct Keap subscription ID for this contract. It's validated against Keap before anything changes, and price/status is resynced from it immediately after linking.</p>
@@ -1800,7 +1808,7 @@ function clientProfileView(data, notes){
     ${client.notice_given_date ? `<p class="small" style="color:var(--muted)">30-day notice given ${fmt(client.notice_given_date)}${client.status!=='cancelled'?' — no open visits are scheduled for them':''}</p>` : ''}
     <div class="cards" style="margin-top:12px">
       <div class="card"><div class="k">${visitProgress.completed}/${visitProgress.total}</div><div class="l">Visits completed — ${visitProgress.year}</div></div>
-      <div class="card"><div class="k">${contracts.filter(c=>c.status==='active').length}</div><div class="l">Active contracts</div></div>
+      <div class="card"><div class="k">${contracts.filter(c=>c.status==='active'&&!c.archived_at).length}</div><div class="l">Active contracts</div></div>
       <div class="card"><div class="k">${fmt(client.billing_start)}</div><div class="l">First paid</div></div>
     </div>
     <div class="bar" style="margin-top:10px;max-width:400px"><div style="width:${pct}%;background:var(--primary)"></div><div style="width:${100-pct}%;background:var(--open)"></div></div>
@@ -1817,6 +1825,8 @@ function clientProfileView(data, notes){
     </div>`;
   }
 
+  const archivedContracts = contracts.filter(c=>c.archived_at);
+  const liveContracts = contracts.filter(c=>!c.archived_at);
   html += `<div class="panel"><h2>Assignment &amp; Keap details</h2>`;
   if(canEdit()){
     html += `<label>Assigned coach</label>
@@ -1828,7 +1838,7 @@ function clientProfileView(data, notes){
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
   html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
-    contracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
+    liveContracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
       <td class="num">${c.price?'$'+c.price:'—'}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">completed</span>'}</td>
       <td class="small">${esc(c.source||'—')}</td>
@@ -1839,6 +1849,15 @@ function clientProfileView(data, notes){
       </tr>`).join('') +
     `</table>
     <p class="small" style="margin-top:8px">Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span></p>
+    ${archivedContracts.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer">${archivedContracts.length} archived contract${archivedContracts.length>1?'s':''}</summary>
+      <table style="margin-top:8px"><tr><th>Program</th><th>Started</th><th class="num">Price</th><th>Source</th><th>Keap link</th><th>Archived reason</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
+      archivedContracts.map(c=>`<tr style="opacity:.7"><td>${esc(c.program||'—')}</td><td class="mono">${fmt(c.start_date)}</td>
+        <td class="num">${c.price?'$'+c.price:'—'}</td><td class="small">${esc(c.source||'—')}</td>
+        <td class="small">${c.keap_subscription_id?`<span class="mono">${esc(c.keap_subscription_id)}</span>`:'<span style="color:var(--muted)">not linked</span>'}</td>
+        <td class="small">${esc(c.archived_reason||'—')}</td>
+        ${D.user.role==='admin' ? `<td><button class="btn tiny" onclick="unarchiveContract(${c.id})">Unarchive</button></td>` : ''}
+        </tr>`).join('') +
+      `</table></details>` : ''}
   </div>`;
 
   html += `<div class="panel"><h2>Visit history</h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
@@ -2313,6 +2332,10 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">Finds not-yet-scheduled visits sitting on the same contract as an already-completed visit with the exact same cycle number (e.g. two "2 of 4"s) — that combination is always a stray leftover, most likely from the original spreadsheet import, never a legitimate visit. This is read-only until you click Clean up below, and only ever deletes visits matching this exact pattern — nothing else.</p>
   <div class="controls"><button class="btn" onclick="loadDuplicateVisitsAudit()">Refresh</button></div>
   <div id="dupVisitsOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Phantom contracts</h2>
+  <p class="small" style="margin-bottom:12px">Finds contracts sitting in pairs — same client, same program, same start date — where one is the real, priced, Keap-linked contract and the other is an unpriced, unlinked shell created by a past sheet import that never checked for the existing contract before inserting a new one (the Suski Chevrolet Buick pattern, found 2026-08-25). Clean up first moves any visits sitting on the shell onto the real contract, then archives the shell — it is never deleted, and can be restored from a client's profile at any time. Pairs where BOTH contracts are unpriced/unlinked (no single "real" one to prefer) are listed separately below and are never touched automatically.</p>
+  <div class="controls"><button class="btn" onclick="loadPhantomContractsAudit()">Refresh</button></div>
+  <div id="phantomContractsOut" class="small">Loading…</div></div>
   <div class="panel"><h2>2026 Schedule reconciliation</h2>
   <p class="small" style="margin-bottom:12px">The 2026 Schedule sheet is the source of truth for this year's visits. This maps every "from sheet" 2026 calendar visit onto the matching contract's cadence cycle — <b>place</b> where a real visit lines up with a cycle, <b>extra</b> where the sheet has more than the cadence, <b>carryover</b> for 2025 make-ups, and it flags cadence cycles with no sheet visit. <b>Read-only</b> — nothing is written here. Review it before we turn on the apply.</p>
   <div class="controls"><button class="btn" onclick="loadSheetRecon2026()">Refresh</button></div>
@@ -2407,6 +2430,38 @@ async function cleanupDuplicateVisits(expectedCount){
     const r = await api('POST','/api/admin/duplicate-visits-cleanup',{});
     toast(`Deleted ${r.deleted} stray visit(s) across ${r.affectedContracts.length} contract(s)`);
     await refresh(); await loadDuplicateVisitsAudit();
+  }catch(e){ uiAlert(e.message||'Cleanup failed'); }
+}
+async function loadPhantomContractsAudit(){
+  try{
+    const r = await api('GET','/api/admin/phantom-contracts-audit');
+    let h = '';
+    if(!r.count) h += '<p>None found. ✔</p>';
+    else h += `<p><b>${r.count} phantom contract(s)</b> ready to merge:</p>
+      <table><tr><th>Client</th><th>Program</th><th>Started</th><th>Real contract</th><th>Shell</th></tr>` +
+      r.pairs.map(p=>`<tr><td><a onclick="openClientProfile(${p.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(p.client)}</a></td>
+        <td>${esc(p.program||'—')}</td><td class="mono">${fmt(p.startDate)}</td>
+        <td class="small">#${p.realContractId} — $${p.realPrice} <span class="mono">${esc(p.realKeap)}</span></td>
+        <td class="small">#${p.shellContractId}</td></tr>`).join('') +
+      `</table>
+      <div class="controls" style="margin-top:10px"><button class="btn danger" onclick="cleanupPhantomContracts(${r.count})">Merge &amp; archive all ${r.count} phantom(s)</button></div>`;
+    if(r.manualReviewCount){
+      h += `<p style="margin-top:14px"><b>${r.manualReviewCount} pair(s) need manual review</b> — both contracts are unpriced/unlinked, so there's no clear "real" one to keep:</p>
+        <table><tr><th>Client</th><th>Program</th><th>Started</th><th>Contract IDs</th></tr>` +
+        r.manualReview.map(g=>`<tr><td><a onclick="openClientProfile(${g.clientId})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(g.client)}</a></td>
+          <td>${esc(g.program||'—')}</td><td class="mono">${fmt(g.startDate)}</td>
+          <td class="small">${g.contractIds.map(id=>'#'+id).join(', ')}</td></tr>`).join('') +
+        `</table>`;
+    }
+    $('#phantomContractsOut').innerHTML = h;
+  }catch(e){ $('#phantomContractsOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function cleanupPhantomContracts(expectedCount){
+  if(!(await uiConfirm(`Merge & archive ${expectedCount} phantom contract(s)? Any visits sitting on a shell move onto its matching real contract first, then the shell is archived — not deleted, and restorable from that client's profile at any time.`,'Merge & archive'))) return;
+  try{
+    const r = await api('POST','/api/admin/phantom-contracts-cleanup',{});
+    toast(`Archived ${r.archived} phantom contract(s), moved ${r.visitsMoved} visit(s)`);
+    await refresh(); await loadPhantomContractsAudit();
   }catch(e){ uiAlert(e.message||'Cleanup failed'); }
 }
 async function loadSheetRecon2026(){
@@ -2762,7 +2817,7 @@ async function runNightlyNow(){
       `Digest emailed to ${r.digestSentTo||0} of ${r.digestAttempted||0} admin(s).`,
     ];
     $('#maintenanceOut').innerHTML = `<ul style="margin:0;padding-left:18px">${lines.map(l=>`<li>${l}</li>`).join('')}</ul>`;
-    await loadRevenueHistory(); await loadDeletedClients(); await loadBackupStatus(); await loadDuplicateVisitsAudit();
+    await loadRevenueHistory(); await loadDeletedClients(); await loadBackupStatus(); await loadDuplicateVisitsAudit(); await loadPhantomContractsAudit();
   }catch(e){ $('#maintenanceOut').innerHTML = `<p>Run failed: ${esc(e.message||e)}</p>`; }
   finally{ if(btn){btn.disabled=false;btn.textContent='Run full nightly check now';} }
 }

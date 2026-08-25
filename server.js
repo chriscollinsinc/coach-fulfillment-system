@@ -1407,6 +1407,81 @@ route('POST', /^\/api\/admin\/duplicate-visits-cleanup$/, ['admin'], (req, res, 
   send(res, 200, { ok: true, deleted, affectedContracts: [...affected] });
 });
 
+/* ===== Phantom contract cleanup (found via Suski Chevrolet Buick, generalized 2026-08-25) =====
+ * Historical sheet imports created a brand-new, unpriced, Keap-unlinked contract shell
+ * alongside a client's real contract instead of updating it, whenever a re-import didn't
+ * recognize the existing one as the same client/program/start-date — the two rows have sat
+ * side by side ever since. This finds every such pair still live and, on confirm, re-points
+ * any visits sitting on the phantom onto the real contract first (so no history is lost),
+ * then archives the phantom — never deletes it, fully reversible via unarchive below — so it
+ * can never again be picked as a client's primary contract. Cases where BOTH rows in a group
+ * are unpriced/unlinked (no single "real" row to prefer) are surfaced separately as
+ * manualReview and are never auto-touched; those need a person to look at each one. Re-derives
+ * the pair list server-side on both audit and cleanup — never trusts a client-submitted id
+ * list — same safety pattern as the duplicate-visits audit/cleanup above. */
+function findPhantomContractPairs(){
+  const rows = db.prepare(`SELECT c.*, cl.name AS client_name FROM contracts c
+    JOIN clients cl ON cl.id=c.client_id WHERE cl.deleted_at IS NULL AND c.archived_at IS NULL`).all();
+  const byKey = {};
+  for(const c of rows){
+    if(!c.start_date) continue;
+    const k = c.client_id+'|'+(c.program||'')+'|'+c.start_date;
+    (byKey[k] ||= []).push(c);
+  }
+  const pairs = [], manualReview = [];
+  for(const group of Object.values(byKey)){
+    if(group.length < 2) continue;
+    const priced = group.filter(c => c.price != null && c.keap_subscription_id);
+    const shells = group.filter(c => c.price == null && !c.keap_subscription_id && c.source === 'sheet');
+    if(priced.length === 1 && shells.length >= 1 && priced.length + shells.length === group.length){
+      for(const shell of shells){
+        pairs.push({
+          clientId: priced[0].client_id, client: priced[0].client_name,
+          program: priced[0].program, startDate: priced[0].start_date,
+          realContractId: priced[0].id, realPrice: priced[0].price, realKeap: priced[0].keap_subscription_id,
+          shellContractId: shell.id,
+        });
+      }
+    } else {
+      manualReview.push({ clientId: group[0].client_id, client: group[0].client_name, program: group[0].program,
+        startDate: group[0].start_date, contractIds: group.map(c=>c.id) });
+    }
+  }
+  return { pairs, manualReview };
+}
+route('GET', /^\/api\/admin\/phantom-contracts-audit$/, ['admin'], (req, res) => {
+  const { pairs, manualReview } = findPhantomContractPairs();
+  send(res, 200, { count: pairs.length, pairs, manualReviewCount: manualReview.length, manualReview });
+});
+route('POST', /^\/api\/admin\/phantom-contracts-cleanup$/, ['admin'], (req, res, m, body, user) => {
+  const { pairs } = findPhantomContractPairs();
+  const moveVisits = db.prepare('UPDATE visits SET contract_id=? WHERE contract_id=?');
+  const archive = db.prepare('UPDATE contracts SET archived_at=?, archived_reason=? WHERE id=?');
+  const now = new Date().toISOString();
+  let archived = 0, visitsMoved = 0;
+  const affected = [];
+  db.exec('BEGIN');
+  try{
+    for(const p of pairs){
+      visitsMoved += moveVisits.run(p.realContractId, p.shellContractId).changes;
+      archive.run(now, `phantom duplicate of contract #${p.realContractId} (${p.client})`, p.shellContractId);
+      archived++;
+      affected.push(`${p.client} (contract #${p.shellContractId} → merged into #${p.realContractId})`);
+    }
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); return err(res, 500, String(e && e.message || e)); }
+  log(user.email, 'admin.phantom_contracts_cleanup', { archived, visitsMoved, affected });
+  send(res, 200, { ok: true, archived, visitsMoved, affected });
+});
+route('POST', /^\/api\/contracts\/(\d+)\/unarchive$/, ['admin'], (req, res, m, body, user) => {
+  const contract = db.prepare('SELECT * FROM contracts WHERE id=?').get(+m[1]);
+  if(!contract) return err(res, 404, 'not found');
+  if(!contract.archived_at) return err(res, 400, 'This contract is not archived.');
+  db.prepare('UPDATE contracts SET archived_at=NULL, archived_reason=NULL WHERE id=?').run(contract.id);
+  log(user.email, 'admin.contract_unarchive', { contractId: contract.id, client: db.prepare('SELECT name FROM clients WHERE id=?').get(contract.client_id)?.name });
+  send(res, 200, { ok: true });
+});
+
 /* ===== 2026 Sheet → Cadence reconciliation (READ-ONLY audit) =====
  * The 2026 Schedule sheet is the true plan of coaching visits, but it was imported
  * as calendar BLOCKS (kind 'visit'/'visit_legacy', "from sheet") that are pure
@@ -1527,7 +1602,7 @@ route('POST', /^\/api\/admin\/sheet-recon-2026\/apply$/, ['admin'], (req, res, m
   const coachTeam = {}; for(const c of db.prepare('SELECT id,team FROM coaches').all()) coachTeam[c.id]=c.team;
   const clientTeam = {}; for(const r of db.prepare("SELECT client_id, team FROM visits WHERE team IS NOT NULL AND team!='' GROUP BY client_id").all()) clientTeam[r.client_id]=r.team;
   const contractsByClient = {};
-  for(const c of db.prepare("SELECT id,client_id,program,status FROM contracts").all()){ (contractsByClient[c.client_id]=contractsByClient[c.client_id]||[]).push(c); }
+  for(const c of db.prepare("SELECT id,client_id,program,status FROM contracts WHERE archived_at IS NULL").all()){ (contractsByClient[c.client_id]=contractsByClient[c.client_id]||[]).push(c); }
   const upd = db.prepare('UPDATE visits SET cal_week=?, cal_coach=? WHERE id=?');
   const delBlock = db.prepare('DELETE FROM blocks WHERE coach_id=? AND week=?');
   const insVisit = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id,cal_week,cal_coach)
@@ -1749,7 +1824,7 @@ route('POST', /^\/api\/admin\/sheet-2026\/apply$/, ['admin'], (req, res, m, body
   // already exists, which is safe (accurate history) even for a departed client.
   const clientActive = {}; for(const c of db.prepare("SELECT id,status,notice_given_date FROM clients").all()) clientActive[c.id] = c.status==='active' && !c.notice_given_date;
   const contractsByClient = {};
-  for(const c of db.prepare("SELECT id,client_id,program,status FROM contracts").all()){ (contractsByClient[c.client_id]=contractsByClient[c.client_id]||[]).push(c); }
+  for(const c of db.prepare("SELECT id,client_id,program,status FROM contracts WHERE archived_at IS NULL").all()){ (contractsByClient[c.client_id]=contractsByClient[c.client_id]||[]).push(c); }
   const clearStaleExtra = db.prepare("DELETE FROM visits WHERE client_id=? AND source='sheet-2026' AND completed=0");
   const clearStalePlacement = db.prepare("SELECT id FROM visits WHERE client_id=? AND (source IS NULL OR source!='sheet-2026') AND completed=0 AND due>='2026-01-01' AND due<='2026-12-31' AND cal_week IS NOT NULL");
   const unplace = db.prepare('UPDATE visits SET cal_week=NULL, cal_coach=NULL WHERE id=?');

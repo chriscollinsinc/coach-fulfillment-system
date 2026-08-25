@@ -118,6 +118,13 @@ function ensureColumn(table, col, decl){
 ensureColumn('visits', 'client_id', 'INTEGER');
 ensureColumn('visits', 'contract_id', 'INTEGER');
 ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
+// Phantom-contract cleanup (2026-08-25): archived_at marks a contract as retired
+// without deleting it — used for old duplicate shell contracts created by past sheet
+// imports that never checked for an existing match before inserting. Archived
+// contracts are excluded from primary-contract selection everywhere but stay fully
+// visible/reversible (see /api/contracts/:id/unarchive).
+ensureColumn('contracts', 'archived_at', 'TEXT');
+ensureColumn('contracts', 'archived_reason', 'TEXT');
 db.exec('CREATE INDEX IF NOT EXISTS ict_keapsub ON contracts(keap_subscription_id)');
 /* The date the client's first charge actually happened, as manually entered when
  * the contract is created — start_date (the first VISIT due date) is always this
