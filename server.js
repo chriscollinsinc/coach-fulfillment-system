@@ -128,7 +128,20 @@ async function keapGetCompanyName(companyId){
   try{
     console.log('[keapGetCompanyName] Looking up company:', companyId);
     console.log('[keapGetCompanyName] KEAP_TOKEN set?', !!KEAP_TOKEN);
-    // Query for a contact in this company to get company data
+    
+    // Try approach 1: Direct company endpoint (if Keap has it)
+    console.log('[keapGetCompanyName] Trying direct /v1/companies endpoint');
+    const dirRes = await keapGet(`/v1/companies/${encodeURIComponent(companyId)}`);
+    if(dirRes.ok && dirRes.json) {
+      const name = dirRes.json.company_name || dirRes.json.name || '';
+      if(name) {
+        console.log('[keapGetCompanyName] Found via direct endpoint:', name);
+        return name;
+      }
+    }
+    console.log('[keapGetCompanyName] Direct endpoint did not return company name, trying contacts approach');
+    
+    // Try approach 2: Get via contacts
     const res = await keapGet(`/v1/contacts?company_id=${encodeURIComponent(companyId)}&limit=1`);
     console.log('[keapGetCompanyName] Contact list response:', { ok: res.ok, status: res.status, hasContacts: res.json?.contacts?.length || res.json?.result_set?.length });
     if(!res.ok || !res.json) {
@@ -140,17 +153,26 @@ async function keapGetCompanyName(companyId){
       console.log('[keapGetCompanyName] No contacts found for company_id:', companyId);
       return '';
     }
+    
+    // Check if contact already has company_name at top level
+    if(contacts[0].company_name) {
+      console.log('[keapGetCompanyName] Found company_name on contact:', contacts[0].company_name);
+      return contacts[0].company_name;
+    }
+    
     // Fetch the first contact with company properties included
     const contactId = contacts[0].id;
     console.log('[keapGetCompanyName] Fetching contact details for:', contactId);
     const contactRes = await keapGet(`/v1/contacts/${contactId}?optional_properties=company`);
-    console.log('[keapGetCompanyName] Contact detail response:', { ok: contactRes.ok, status: contactRes.status, hasCompany: !!contactRes.json?.company });
+    console.log('[keapGetCompanyName] Contact detail response:', { ok: contactRes.ok, status: contactRes.status, hasCompany: !!contactRes.json?.company, contactKeys: Object.keys(contactRes.json || {}).slice(0,10) });
     if(!contactRes.ok || !contactRes.json) {
       console.log('[keapGetCompanyName] Failed to get contact details');
       return '';
     }
-    const companyName = contactRes.json.company?.company_name || '';
-    console.log('[keapGetCompanyName] Extracted company name:', companyName);
+    
+    // Try various paths to company name
+    const companyName = contactRes.json.company?.company_name || contactRes.json.company_name || contactRes.json.company?.name || '';
+    console.log('[keapGetCompanyName] Extracted company name:', companyName || '(still empty)');
     return companyName;
   }catch(e){
     console.error('[keapGetCompanyName] Error:', e);
