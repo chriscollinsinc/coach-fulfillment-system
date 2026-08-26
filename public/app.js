@@ -1717,6 +1717,13 @@ function regenerateContractDlg(contractId, program, visitsN, startDate, firstPay
   const completed = visits.length - notCompleted;
   openDlg(`<h3>Regenerate schedule</h3>
     <p class="small">This will remove ${notCompleted} not-yet-completed visit${notCompleted===1?'':'s'} under this ${esc(program||'')} contract and create ${visitsN} new one${visitsN===1?'':'s'}, spaced on the ${esc(program||'')} cadence starting from the date below.${completed?` ${completed} completed visit${completed===1?'':'s'} will be left exactly as-is.`:''}</p>
+    <label>First pay date (leave blank if unknown/not applicable)</label>
+    <input type="date" id="rgFirstPay" value="${esc(firstPayDate||'')}" onchange="onRgFirstPayChange()" oninput="onRgFirstPayChange()">
+    <label>Anchor date (first visit due)</label><input type="date" id="rgAnchor" value="${esc(startDate||'')}">
+    <p class="small" style="color:var(--muted)">Entering a first pay date fills the anchor date 90 days later automatically. You can also edit the anchor date directly instead (e.g. for Keap-linked contracts with no clean pay date on record). Either way, changing it re-spaces the whole remaining schedule from that new date forward — this is how you correct an existing client's first-pay date one-off.</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="doRegenerateContract(${contractId})">Regenerate</button></div>`);
+}
 async function generateNextCycleDlg(clientId, contracts){
   if(!contracts || contracts.length === 0) { uiAlert('No active contracts'); return; }
   if(contracts.length > 1) { uiAlert('Multiple active contracts — please select which one'); return; } // TODO: select dialog
@@ -1732,7 +1739,6 @@ async function generateNextCycleDlg(clientId, contracts){
     </div>
   `, {wide:true});
 }
-
 async function generateNextCycle(contractId){
   try{
     const result = await api('POST', '/api/contracts/' + contractId + '/generate-cycle', {});
@@ -1745,14 +1751,6 @@ async function generateNextCycle(contractId){
   }catch(e){
     uiAlert(e.message || 'Error generating cycle');
   }
-}
-
-    <label>First pay date (leave blank if unknown/not applicable)</label>
-    <input type="date" id="rgFirstPay" value="${esc(firstPayDate||'')}" onchange="onRgFirstPayChange()" oninput="onRgFirstPayChange()">
-    <label>Anchor date (first visit due)</label><input type="date" id="rgAnchor" value="${esc(startDate||'')}">
-    <p class="small" style="color:var(--muted)">Entering a first pay date fills the anchor date 90 days later automatically. You can also edit the anchor date directly instead (e.g. for Keap-linked contracts with no clean pay date on record). Either way, changing it re-spaces the whole remaining schedule from that new date forward — this is how you correct an existing client's first-pay date one-off.</p>
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary" onclick="doRegenerateContract(${contractId})">Regenerate</button></div>`);
 }
 function onRgFirstPayChange(){
   const v = $('#rgFirstPay').value;
