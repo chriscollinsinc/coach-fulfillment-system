@@ -126,18 +126,33 @@ async function keapPost(p, body){
 async function keapGetCompanyName(companyId){
   if(!companyId) return '';
   try{
+    console.log('[keapGetCompanyName] Looking up company:', companyId);
     // Query for a contact in this company to get company data
     const res = await keapGet(`/v1/contacts?company_id=${encodeURIComponent(companyId)}&limit=1`);
-    if(!res.ok || !res.json) return '';
+    console.log('[keapGetCompanyName] Contact list response:', { ok: res.ok, status: res.status, hasContacts: res.json?.contacts?.length || res.json?.result_set?.length });
+    if(!res.ok || !res.json) {
+      console.log('[keapGetCompanyName] Failed to get contacts list');
+      return '';
+    }
     const contacts = res.json.contacts || res.json.result_set || [];
-    if(contacts.length === 0) return '';
+    if(contacts.length === 0) {
+      console.log('[keapGetCompanyName] No contacts found for company_id:', companyId);
+      return '';
+    }
     // Fetch the first contact with company properties included
     const contactId = contacts[0].id;
+    console.log('[keapGetCompanyName] Fetching contact details for:', contactId);
     const contactRes = await keapGet(`/v1/contacts/${contactId}?optional_properties=company`);
-    if(!contactRes.ok || !contactRes.json) return '';
-    return contactRes.json.company?.company_name || '';
+    console.log('[keapGetCompanyName] Contact detail response:', { ok: contactRes.ok, status: contactRes.status, hasCompany: !!contactRes.json?.company });
+    if(!contactRes.ok || !contactRes.json) {
+      console.log('[keapGetCompanyName] Failed to get contact details');
+      return '';
+    }
+    const companyName = contactRes.json.company?.company_name || '';
+    console.log('[keapGetCompanyName] Extracted company name:', companyName);
+    return companyName;
   }catch(e){
-    console.error('keapGetCompanyName error:', e);
+    console.error('[keapGetCompanyName] Error:', e);
     return '';
   }
 }
@@ -3441,7 +3456,25 @@ async function keapSyncAllLinkedContracts(actorEmail){
 }
 
 /* ================= server ================= */
-const server = http.createServer((req, res) => {
+const server = 
+/* Quick test: fetch company name from Keap for debugging company ID lookup.
+   Usage: GET /api/admin/test-company-lookup?companyId=351212 */
+route('GET', /^\/api\/admin\/test-company-lookup$/, ['admin'], async (req, res) => {
+  const companyId = new URL(req.url, 'http://x').searchParams.get('companyId');
+  if(!companyId) return err(res, 400, 'companyId parameter required');
+  const result = { companyId, status: 'testing...' };
+  try {
+    const name = await keapGetCompanyName(companyId);
+    result.status = 'ok';
+    result.companyName = name || '(empty string returned)';
+  } catch(e) {
+    result.status = 'error';
+    result.error = String(e);
+  }
+  send(res, 200, result);
+});
+
+http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
 
   if(url.pathname === '/auth/google' && req.method === 'GET'){
