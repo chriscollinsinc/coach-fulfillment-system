@@ -3372,8 +3372,8 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
   const contract = db.prepare('SELECT c.*, cl.name as client_name, cl.id as client_id FROM contracts c JOIN clients cl ON c.client_id=cl.id WHERE c.id=?').get(contractId);
   if(!contract) return err(res, 404, 'contract not found');
   
-  // Get all visits for this contract
-  const visits = db.prepare('SELECT * FROM visits WHERE contract_id=? ORDER BY id DESC').all(contractId);
+  // Get all visits for this contract (visits are keyed by client name, not contract_id)
+  const visits = db.prepare('SELECT * FROM visits WHERE client=? ORDER BY id DESC').all(contract.client_name);
   
   // Parse the program to get interval and determine visit cadence
   // Examples: "Monthly", "Quarterly", "Weekly", etc.
@@ -3438,7 +3438,7 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
         coach_hist, salesperson, sold, source, cal_coach, sched_hist
       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
-      String(contract.client_id),
+      contract.client_name,
       contract.program,
       cycleLabel,
       dueDateStr,
