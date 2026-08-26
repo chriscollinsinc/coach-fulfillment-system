@@ -134,6 +134,46 @@ function toast(msg, undo){
 async function undoAction(){ if(window._undo){ const f=window._undo; window._undo=null; $('#toast').classList.remove('show'); await f(); await refresh(); toast('Undone'); } }
 function openDlg(html){ const d=$('#dlg'); d.innerHTML=html; d.showModal(); }
 function closeDlg(){ $('#dlg').close(); }
+/* Coach offboarding workflow — handles the modal for future visit disposition */
+async function showCoachOffboardingModal(coach, futureVisits){
+  const visitList = futureVisits.map(v=>`<tr><td>${esc(v.client)}</td><td>${esc(v.cycle)} ${esc(v.program)}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('');
+  openDlg(`<h3>Offboard ${esc(coach.name)}?</h3>
+    <p class="small" style="margin-bottom:10px">This coach has ${futureVisits.length} future unscheduled visit(s). Choose what to do with them:</p>
+    <table style="margin-bottom:12px"><tr><th>Client</th><th>Visit</th><th>Due</th></tr>${visitList}</table>
+    <div style="margin-bottom:12px">
+      <label><input type="radio" name="offboardDisposition" value="delete" checked> Delete these visits — they won't be scheduled.</label>
+      <label style="margin-top:8px"><input type="radio" name="offboardDisposition" value="transfer"> Leave them unscheduled — mark as orphaned so someone else can pick them up later.</label>
+      <label style="margin-top:8px"><input type="radio" name="offboardDisposition" value="orphan"> Leave them exactly as-is — just remove the coach assignment.</label>
+    </div>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary danger" onclick="confirmCoachOffboard('${coach.id}')">Confirm offboarding</button></div>`);
+}
+async function confirmCoachOffboard(coachId){
+  const disposition = document.querySelector('input[name="offboardDisposition"]:checked')?.value || 'transfer';
+  try{
+    await api('POST',`/api/coaches/${coachId}/offboard`, { disposition });
+    closeDlg();
+    await refresh();
+    const c = D.coaches.find(x=>x.id===coachId);
+    toast(`${c?.name||'Coach'} offboarded`);
+  }catch(e){
+    uiAlert(e.message || 'Could not offboard coach');
+  }
+}
+async function coachDeleteWithModal(coachId){
+  try{
+    const r = await api('DELETE',`/api/coaches/${coachId}`);
+    if(r.hasFutureVisits && r.futureVisits && r.futureVisits.length > 0){
+      await showCoachOffboardingModal(r.coach, r.futureVisits);
+    } else {
+      const c = r.coach || D.coaches.find(x=>x.id===coachId);
+      toast(`${c?.name||'Coach'} deactivated`);
+      await refresh();
+    }
+  }catch(e){
+    uiAlert(e.message || 'Could not process coach deletion');
+  }
+}
 /* Styled stand-ins for window.alert/confirm — same look as the rest of the app,
    stack safely on top of an already-open dialog (#dlg2 over #dlg). */
 function uiAlert(msg){
@@ -425,7 +465,13 @@ async function loadToday(){
   let t;
   try{ t = await api('GET','/api/today'); }
   catch(e){ $('#todayOut').innerHTML = '<div class="panel">Could not load — refresh to try again.</div>'; return; }
-  $('#todayOut').innerHTML = D.user.role==='coach' ? todayCoachView(t) : todayTeamView(t);
+  // Fetch orphaned visits for dashboard display
+  let orphanedData = null;
+  if(D.user.role !== 'coach'){
+    try{ orphanedData = await api('GET','/api/orphaned-visits'); }
+    catch(e){}
+  }
+  $('#todayOut').innerHTML = D.user.role==='coach' ? todayCoachView(t) : todayTeamView(t, orphanedData);
 }
 function syncConfCount(){
   const n=document.querySelectorAll('.confChk:checked').length;
@@ -449,7 +495,7 @@ function todayRows(list, maxN, rowFn){
   return list.slice(0,maxN).map(rowFn).join('') +
     (list.length>maxN?`<tr><td colspan="9" class="small">…and ${list.length-maxN} more</td></tr>`:'');
 }
-function todayTeamView(t){
+function todayTeamView(t, orphanedData){
   const odDays = d => Math.floor(dayDiff(TODAY,d));
   let html=`<div class="cards">
     <div class="card ${t.overdueNoPlan.length?'bad':'ok'}" style="cursor:pointer" onclick="${invJump('overdue')};st.invFilter='attention'"><div class="k">${t.overdueNoPlan.length}</div><div class="l">Overdue — no plan</div></div>
@@ -457,6 +503,11 @@ function todayTeamView(t){
     <div class="card ${t.dueSoonUnscheduled.length?'warn':'ok'}" style="cursor:pointer" onclick="${invJump('needs')}"><div class="k">${t.dueSoonUnscheduled.length}</div><div class="l">Due in 30 days, unscheduled</div></div>
     ${(t.toConfirm&&t.toConfirm.length)?`<div class="card warn" style="cursor:pointer" onclick="document.getElementById('confirmDonePanel')?.scrollIntoView({behavior:'smooth'})"><div class="k">${t.toConfirm.length}</div><div class="l">To confirm completed</div></div>`:''}
     <div class="card ok"><div class="k">${t.completedThisMonth}</div><div class="l">Completed this month${t.team?' — Team '+esc(t.team):''}</div></div>
+    ${orphanedData ? (() => {
+      const sum = orphanedData.summary || {total: 0, overdue: 0, thisMonth: 0, nextMonth: 0};
+      const cardClass = sum.overdue > 0 ? 'bad' : (sum.thisMonth > 0 ? 'warn' : 'ok');
+      return `<div class="card ${cardClass}" style="cursor:pointer" onclick="st.invFilter='orphaned';go('inventory')"><div class="k">${sum.total}</div><div class="l">Orphaned visits${sum.overdue?' · '+sum.overdue+' overdue':''}</div></div>`;
+    })() : ''}
   </div>`;
   if(t.pendingCount) html+=`<div class="panel" style="border-left:4px solid var(--primary);padding:10px 14px">
     <b>${t.pendingCount} new Keap subscription${t.pendingCount>1?'s':''}</b> waiting for assignment.
@@ -875,6 +926,8 @@ function inventory(){
   const f=st.invFilter,q=norm(st.invSearch);
   const isCoach = D.user.role==='coach';
   let rows=D.visits.slice();
+  const MONTH_AGO = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0,10);
+  const isOrphaned = v => !v.completed && v.cal_coach === null && v.due >= MONTH_AGO;
   const stf={
     attention:v=>!v.completed&&!isStale(v),
     active:v=>!v.completed,
@@ -882,7 +935,9 @@ function inventory(){
     stale:v=>isStale(v),
     needs:v=>status(v)==='needs_scheduling',
     oncal:v=>status(v)==='on_calendar',
-    completed:v=>!!v.completed,all:()=>true};
+    completed:v=>!!v.completed,
+    orphaned:v=>isOrphaned(v),
+    all:()=>true};
   rows=rows.filter(stf[f]||stf.attention);
   if(D.user.role==='lead') rows=rows.filter(v=>!v.team||v.team===D.user.team);
   // Coaches only ever see their own visits here — this page is where they complete
@@ -910,6 +965,7 @@ function inventory(){
       <option value="attention" ${f==='attention'||!stf[f]?'selected':''}>Needs attention — ${count(stf.attention)}</option>
       <option value="overdue" ${f==='overdue'?'selected':''}>Overdue (last 90 days) — ${count(stf.overdue)}</option>
       <option value="stale" ${f==='stale'?'selected':''}>Stale (overdue 90+ days) — ${staleCount}</option>
+      <option value="orphaned" ${f==='orphaned'?'selected':''}>Orphaned (no coach) — ${count(stf.orphaned)}</option>
       <option value="needs" ${f==='needs'?'selected':''}>Needs scheduling — ${count(stf.needs)}</option>
       <option value="oncal" ${f==='oncal'?'selected':''}>On calendar — ${count(stf.oncal)}</option>
       <option value="active" ${f==='active'?'selected':''}>All active — ${count(stf.active)}</option>
@@ -939,7 +995,13 @@ function inventory(){
       :s==='overdue'?`<span class="pill p-over">Overdue — no plan${od>=30?` · ${od}d`:''}</span>`
       :s==='on_calendar'?calendarPill(v)
       :s==='needs_scheduling'?'<span class="pill p-due">Needs scheduling</span>':'<span class="pill p-fut">—</span>';
-    html+=`<tr style="cursor:pointer" onclick="visitDrawer(${v.id})">
+    // Row styling for orphaned visits
+    let rowBg = '';
+    if(isOrphaned(v)){
+      if(v.due < TODAY) rowBg = 'background:#ffebee'; // red for overdue orphaned
+      else if(v.due < new Date(new Date().setMonth(new Date().getMonth()+1)).toISOString().slice(0,7)+'-01') rowBg = 'background:#fff3e0'; // amber for this month
+    }
+    html+=`<tr style="cursor:pointer${rowBg?';'+rowBg:''}" onclick="visitDrawer(${v.id})">
       ${showChecks?`<td onclick="event.stopPropagation()"><input type="checkbox" ${sel.has(v.id)?'checked':''} onclick="toggleInvSel(${v.id},this.checked)"></td>`:''}
       <td><b>${esc(v.client)}</b></td><td>${esc(v.team||'?')}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
       <td class="mono">${fmt(v.due)}</td><td class="small">${sched}</td><td>${pill}</td>
@@ -2790,7 +2852,7 @@ function coachDlg(){
 async function saveCoach(){ const n=$('#kName').value.trim(); if(!n){uiAlert('Name required');return;}
   await api('POST','/api/coaches',{name:n,team:$('#kTeam').value}); closeDlg(); await refresh(); toast(n+' added — their weeks are open capacity'); }
 async function moveCoach(id,team){ if(!team) return; await api('PATCH','/api/coaches/'+id,{team}); await refresh(); toast('Moved'); }
-function removeCoach(id,name){ coachDeactivateDlg(id,name); }
+function removeCoach(id,name){ coachDeleteWithModal(id); }
 function renameTeamDlg(from){
   openDlg(`<h3>Rename Team ${esc(from)}</h3>
     <p class="small">The new name replaces "${esc(from)}" everywhere at once — every coach, user, visit, and board reference moves with it. Nothing else changes.</p>
