@@ -3434,12 +3434,11 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
     // Insert the visit
     const result = db.prepare(`
       INSERT INTO visits(
-        client_id, contract_id, program, cycle, due, completed, team,
+        client, program, cycle, due, completed, team,
         coach_hist, salesperson, sold, source, cal_coach, sched_hist
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
-      contract.client_id,
-      contractId,
+      String(contract.client_id),
       contract.program,
       cycleLabel,
       dueDateStr,
@@ -3450,7 +3449,7 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
       null, // sold
       'system',
       assignedCoach,
-      null,
+      null
     );
     
     visitsToCreate.push({ id: result.lastInsertRowid, cycle: cycleLabel, due: dueDateStr });
