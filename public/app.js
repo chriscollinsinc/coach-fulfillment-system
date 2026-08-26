@@ -1777,6 +1777,14 @@ async function attachCompanyId(clientId){
     toast('Company ID attached — name synced');
   }catch(e){ uiAlert(e.message||'Could not attach company ID'); }
 }
+async function detachCompanyId(clientId){
+  if(!confirm('Remove this company ID?')) return;
+  try{
+    await api('PATCH','/api/clients/'+clientId,{company_id:''});
+    await refresh();
+    toast('Company ID removed');
+  }catch(e){ uiAlert(e.message||'Could not remove company ID'); }
+}
 async function loadClientProfile(id){
   try{
     const data = await api('GET','/api/clients/'+id);
@@ -1848,12 +1856,7 @@ function clientProfileView(data, notes){
   } else {
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
-  if(client.company_id){
-    html += `<p style="margin-top:10px"><b>Company ID:</b> <span class="mono">${esc(client.company_id)}</span><br>${client.company_name ? `<b>Company:</b> ${esc(client.company_name)}` : '<span class="small" style="color:var(--muted)">Name syncing...</span>'}</p>`;
-  } else if(canEdit()){
-    html += `<div style="margin-top:10px"><label>Company ID (optional)</label><input id="cliCompanyId" value="" placeholder="Enter company ID to auto-sync name">
-      <button class="btn tiny" style="margin-top:4px" onclick="attachCompanyId(${client.id})">Attach ID</button></div>`;
-  }
+
   html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
     liveContracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
       <td class="num">${c.price?'$'+c.price:'—'}</td>
@@ -1865,7 +1868,12 @@ function clientProfileView(data, notes){
       ${D.user.role==='admin' ? `<td style="white-space:nowrap">${c.visits>0?`<button class="btn tiny" onclick="regenerateContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits},'${esc(c.start_date||'').replace(/'/g,"\\'")}','${esc(c.first_pay_date||'').replace(/'/g,"\\'")}')">Regenerate schedule</button> `:''}<button class="btn tiny danger" onclick="deleteContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}')">Delete</button></td>` : ''}
       </tr>`).join('') +
     `</table>
-    <p class="small" style="margin-top:8px">Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span></p>
+    <p class="small" style="margin-top:8px">
+      ${client.company_id ? `Company ID: <span class="mono">${esc(client.company_id)}</span> — ${client.company_name ? `<b>${esc(client.company_name)}</b>` : '<span style="color:var(--muted)">syncing...</span>'}` : `Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span>`}
+      ${client.company_id && canEdit() ? ` <button class="btn tiny" style="margin-left:8px" onclick="detachCompanyId(${client.id})">Clear</button>` : ''}
+      ${!client.company_id && canEdit() ? `<div style="margin-top:6px"><input id="cliCompanyId" value="" placeholder="Enter company ID to auto-sync name" style="font-size:12px; padding:4px">
+        <button class="btn tiny" style="margin-top:4px" onclick="attachCompanyId(${client.id})">Attach ID</button></div>` : ''}
+    </p>
     ${archivedContracts.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer">${archivedContracts.length} archived contract${archivedContracts.length>1?'s':''}</summary>
       <table style="margin-top:8px"><tr><th>Program</th><th>Started</th><th class="num">Price</th><th>Source</th><th>Keap link</th><th>Archived reason</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
       archivedContracts.map(c=>`<tr style="opacity:.7"><td>${esc(c.program||'—')}</td><td class="mono">${fmt(c.start_date)}</td>
