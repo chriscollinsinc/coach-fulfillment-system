@@ -1869,8 +1869,8 @@ function clientProfileView(data, notes){
       </tr>`).join('') +
     `</table>
     <p class="small" style="margin-top:8px">
-      ${client.company_id ? `Company ID: <span class="mono">${esc(client.company_id)}</span> — ${client.company_name ? `<b>${esc(client.company_name)}</b>` : '<span style="color:var(--muted)">syncing...</span>'}` : `Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span>`}
-      ${client.company_id && canEdit() ? ` <button class="btn tiny" style="margin-left:8px" onclick="detachCompanyId(${client.id})">Clear</button>` : ''}
+      <span>Keap company ID: <span class="mono">${esc(client.keap_id||'—')}</span></span>
+      ${client.company_id ? `<span style="margin-left:16px">Company ID: <span class="mono">${esc(client.company_id)}</span>${canEdit() ? ` <button class="btn tiny" onclick="detachCompanyId(${client.id})">Clear</button>` : ''}</span>` : ''}
       ${!client.company_id && canEdit() ? `<div style="margin-top:6px"><input id="cliCompanyId" value="" placeholder="Enter company ID to auto-sync name" style="font-size:12px; padding:4px">
         <button class="btn tiny" style="margin-top:4px" onclick="attachCompanyId(${client.id})">Attach ID</button></div>` : ''}
     </p>

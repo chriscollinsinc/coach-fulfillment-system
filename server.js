@@ -2902,10 +2902,12 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], async (req, res, m, 
     if(companyId){
       // Lookup company name from Keap
       const companyName = await keapGetCompanyName(companyId);
-      db.prepare('UPDATE clients SET company_id=?, company_name=? WHERE id=?').run(companyId, companyName, cl.id);
+      // Sync client name to the company name from Keap
+      db.prepare('UPDATE clients SET name=?, company_id=?, company_name=? WHERE id=?').run(companyName || cl.name, companyId, companyName, cl.id);
       result.company_id = companyId;
       result.company_name = companyName;
-      log(user.email, 'client.attach_company', { clientId: cl.id, name: cl.name, company_id: companyId, company_name: companyName });
+      result.synced_name = companyName || cl.name;
+      log(user.email, 'client.attach_company', { clientId: cl.id, oldName: cl.name, newName: companyName || cl.name, company_id: companyId, company_name: companyName });
     } else {
       // Empty company_id clears both fields
       db.prepare('UPDATE clients SET company_id=NULL, company_name=NULL WHERE id=?').run(cl.id);
