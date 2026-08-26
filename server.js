@@ -3436,13 +3436,14 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
       INSERT INTO visits(
         client_id, contract_id, program, cycle, due, completed, team,
         coach_hist, salesperson, sold, source, cal_coach, sched_hist, created
-      ) VALUES(?,?,?,?,?,0,?,?,?,?,?,?,?,?)
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       contract.client_id,
       contractId,
       contract.program,
       cycleLabel,
       dueDateStr,
+      0, // completed
       '', // team - will be set if we have a coach
       '', // coach_hist
       '', // salesperson
