@@ -3369,7 +3369,7 @@ async function keapSyncAllLinkedContracts(actorEmail){
    Visits are assigned to the same coach as the previous cycle. */
 route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], async (req, res, m, body, user) => {
   const contractId = +m[1];
-  const contract = db.prepare('SELECT c.*, cl.name as client_name, cl.id as client_id FROM contracts c JOIN clients cl ON c.client_id=cl.id WHERE c.id=?').get(contractId);
+  const contract = db.prepare('SELECT c.*, cl.name as client_name, cl.id as client_id, cl.assigned_coach_id FROM contracts c JOIN clients cl ON c.client_id=cl.id WHERE c.id=?').get(contractId);
   if(!contract) return err(res, 404, 'contract not found');
   
   // Get all visits for this contract (visits are keyed by client name, not contract_id)
@@ -3420,6 +3420,11 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
     const firstVisit = visits[visits.length - 1];
     if(firstVisit.cal_coach) assignedCoach = firstVisit.cal_coach;
   }
+
+  // If still no coach assigned, use the client's assigned coach
+  if(!assignedCoach && contract.assigned_coach_id) {
+    assignedCoach = contract.assigned_coach_id;
+  }
   
   // Create new visits
   const visitsToCreate = [];
@@ -3434,11 +3439,12 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
     // Insert the visit
     const result = db.prepare(`
       INSERT INTO visits(
-        client, program, cycle, due, completed, team,
+        client, client_id, program, cycle, due, completed, team,
         coach_hist, salesperson, sold, source, cal_coach, sched_hist
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       contract.client_name,
+      contract.client_id,
       contract.program,
       cycleLabel,
       dueDateStr,
