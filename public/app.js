@@ -750,7 +750,7 @@ function calSearchJump(id){
   st.detail = (v.cal_week && v.cal_coach) ? v.id : null;
   st.placing=null; render();
 }
-function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.placing=null; st.detail=null; render(); }
+function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.detail=null; render(); }
 async function placeHere(cid,w){
   const id=st.placing; if(!id) return;
   await api('POST',`/api/visits/${id}/place`,{coach:cid,week:w});
