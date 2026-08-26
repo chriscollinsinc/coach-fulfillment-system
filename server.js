@@ -3320,6 +3320,22 @@ route('GET', /^\/api\/admin\/cadence-change-audit$/, ['admin'], async (req, res)
   try{ send(res, 200, await detectCadenceChanges()); }
   catch(e){ err(res, 500, String(e && e.message || e)); }
 });
+/* Quick test: fetch company name from Keap for debugging company ID lookup.
+   Usage: GET /api/admin/test-company-lookup?companyId=351212 */
+route('GET', /^\/api\/admin\/test-company-lookup$/, ['admin','lead','sales','coach','user'], async (req, res) => {
+  const companyId = new URL(req.url, 'http://x').searchParams.get('companyId');
+  if(!companyId) return err(res, 400, 'companyId parameter required');
+  const result = { companyId, status: 'testing...' };
+  try {
+    const name = await keapGetCompanyName(companyId);
+    result.status = 'ok';
+    result.companyName = name || '(empty string returned)';
+  } catch(e) {
+    result.status = 'error';
+    result.error = String(e);
+  }
+  send(res, 200, result);
+});
 
 /* ---------- backfill sweep: catch anything the webhook ever missed ----------
    Keap's list endpoints don't reliably support a "since" filter we could trust, so
@@ -3456,25 +3472,7 @@ async function keapSyncAllLinkedContracts(actorEmail){
 }
 
 /* ================= server ================= */
-const server = 
-/* Quick test: fetch company name from Keap for debugging company ID lookup.
-   Usage: GET /api/admin/test-company-lookup?companyId=351212 */
-route('GET', /^\/api\/admin\/test-company-lookup$/, ['admin'], async (req, res) => {
-  const companyId = new URL(req.url, 'http://x').searchParams.get('companyId');
-  if(!companyId) return err(res, 400, 'companyId parameter required');
-  const result = { companyId, status: 'testing...' };
-  try {
-    const name = await keapGetCompanyName(companyId);
-    result.status = 'ok';
-    result.companyName = name || '(empty string returned)';
-  } catch(e) {
-    result.status = 'error';
-    result.error = String(e);
-  }
-  send(res, 200, result);
-});
-
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
 
   if(url.pathname === '/auth/google' && req.method === 'GET'){
