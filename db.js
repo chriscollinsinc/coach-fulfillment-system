@@ -236,6 +236,10 @@ ensureColumn('keap_events', 'company_name', "TEXT DEFAULT ''");
  * that Keap still hasn't confirmed as cancelled). Client status itself is untouched —
  * they're still a real, paying, active client through their last month. */
 ensureColumn('clients', 'notice_given_date', 'TEXT');
+/* Company ID and synced name for direct Keap company lookups (when available,
+   used to auto-populate company info in client profiles). */
+ensureColumn('clients', 'company_id', 'TEXT');
+ensureColumn('clients', 'company_name', 'TEXT');
 
 /* ---------- The Visit Record (Theme A): structured notes + commitment loop ----------
    A visit note stops being a freeform blob: wins / issues / focus are captured as their

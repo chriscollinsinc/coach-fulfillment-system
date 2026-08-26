@@ -120,6 +120,28 @@ async function keapPost(p, body){
   finally{ clearTimeout(timer); }
 }
 
+/* Look up company name from Keap by company_id. Returns company name string or empty string
+   if not found or Keap is unreachable. Fetches a contact with the company_id and extracts
+   the company.company_name from the response. */
+async function keapGetCompanyName(companyId){
+  if(!companyId) return '';
+  try{
+    // Query for a contact in this company to get company data
+    const res = await keapGet(`/v1/contacts?company_id=${encodeURIComponent(companyId)}&limit=1`);
+    if(!res.ok || !res.json) return '';
+    const contacts = res.json.contacts || res.json.result_set || [];
+    if(contacts.length === 0) return '';
+    // Fetch the first contact with company properties included
+    const contactId = contacts[0].id;
+    const contactRes = await keapGet(`/v1/contacts/${contactId}?optional_properties=company`);
+    if(!contactRes.ok || !contactRes.json) return '';
+    return contactRes.json.company?.company_name || '';
+  }catch(e){
+    console.error('keapGetCompanyName error:', e);
+    return '';
+  }
+}
+
 /* ---------- auth ---------- */
 const sign = v => v + '.' + crypto.createHmac('sha256', SECRET).update(v).digest('hex').slice(0, 32);
 const unsign = t => { if(!t) return null; const i = t.lastIndexOf('.'); if(i < 0) return null;
@@ -2790,7 +2812,7 @@ function clientHealth(cl, contracts, visits, assignedCoach){
   const label = level === 'at_risk' ? 'At risk' : level === 'behind' ? 'Behind — recoverable' : 'On track';
   return { level, label, reasons, warnings };
 }
-route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
+route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], async (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
   const result = { ok: true };
@@ -2836,6 +2858,21 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
   if(body.name !== undefined && String(body.name).trim()){
     db.prepare('UPDATE clients SET name=? WHERE id=?').run(String(body.name).trim(), cl.id);
     log(user.email, 'client.rename', { clientId: cl.id, name: body.name });
+  }
+  if(body.company_id !== undefined){
+    const companyId = String(body.company_id || '').trim();
+    if(companyId){
+      // Lookup company name from Keap
+      const companyName = await keapGetCompanyName(companyId);
+      db.prepare('UPDATE clients SET company_id=?, company_name=? WHERE id=?').run(companyId, companyName, cl.id);
+      result.company_id = companyId;
+      result.company_name = companyName;
+      log(user.email, 'client.attach_company', { clientId: cl.id, name: cl.name, company_id: companyId, company_name: companyName });
+    } else {
+      // Empty company_id clears both fields
+      db.prepare('UPDATE clients SET company_id=NULL, company_name=NULL WHERE id=?').run(cl.id);
+      log(user.email, 'client.detach_company', { clientId: cl.id, name: cl.name });
+    }
   }
   send(res, 200, result);
 });

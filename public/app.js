@@ -1849,7 +1849,7 @@ function clientProfileView(data, notes){
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
   if(client.company_id){
-    html += `<p style="margin-top:10px"><b>Company ID:</b> <span class="mono">${esc(client.company_id)}</span><br><span class="small" style="color:var(--muted)">Company name synced from ID</span></p>`;
+    html += `<p style="margin-top:10px"><b>Company ID:</b> <span class="mono">${esc(client.company_id)}</span><br>${client.company_name ? `<b>Company:</b> ${esc(client.company_name)}` : '<span class="small" style="color:var(--muted)">Name syncing...</span>'}</p>`;
   } else if(canEdit()){
     html += `<div style="margin-top:10px"><label>Company ID (optional)</label><input id="cliCompanyId" value="" placeholder="Enter company ID to auto-sync name">
       <button class="btn tiny" style="margin-top:4px" onclick="attachCompanyId(${client.id})">Attach ID</button></div>`;
