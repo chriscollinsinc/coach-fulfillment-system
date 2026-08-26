@@ -1768,6 +1768,15 @@ async function doDeleteContract(contractId){
   }catch(e){ uiAlert(e.message||'Delete failed'); }
 }
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
+async function attachCompanyId(clientId){
+  const companyId = $('#cliCompanyId').value.trim();
+  if(!companyId){ uiAlert('Enter a company ID'); return; }
+  try{
+    await api('PATCH','/api/clients/'+clientId,{company_id:companyId});
+    await refresh();
+    toast('Company ID attached — name synced');
+  }catch(e){ uiAlert(e.message||'Could not attach company ID'); }
+}
 async function loadClientProfile(id){
   try{
     const data = await api('GET','/api/clients/'+id);
@@ -1838,6 +1847,12 @@ function clientProfileView(data, notes){
       </select>`;
   } else {
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
+  }
+  if(client.company_id){
+    html += `<p style="margin-top:10px"><b>Company ID:</b> <span class="mono">${esc(client.company_id)}</span><br><span class="small" style="color:var(--muted)">Company name synced from ID</span></p>`;
+  } else if(canEdit()){
+    html += `<div style="margin-top:10px"><label>Company ID (optional)</label><input id="cliCompanyId" value="" placeholder="Enter company ID to auto-sync name">
+      <button class="btn tiny" style="margin-top:4px" onclick="attachCompanyId(${client.id})">Attach ID</button></div>`;
   }
   html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
     liveContracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
