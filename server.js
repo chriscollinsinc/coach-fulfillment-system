@@ -3435,7 +3435,7 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
     const result = db.prepare(`
       INSERT INTO visits(
         client_id, contract_id, program, cycle, due, completed, team,
-        coach_hist, salesperson, sold, source, cal_coach, sched_hist, created
+        coach_hist, salesperson, sold, source, cal_coach, sched_hist
       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
       contract.client_id,
