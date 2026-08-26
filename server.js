@@ -3451,7 +3451,6 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
       'system',
       assignedCoach,
       null,
-      new Date().toISOString()
     );
     
     visitsToCreate.push({ id: result.lastInsertRowid, cycle: cycleLabel, due: dueDateStr });
