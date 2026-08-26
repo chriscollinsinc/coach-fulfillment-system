@@ -127,6 +127,7 @@ async function keapGetCompanyName(companyId){
   if(!companyId) return '';
   try{
     console.log('[keapGetCompanyName] Looking up company:', companyId);
+    console.log('[keapGetCompanyName] KEAP_TOKEN set?', !!KEAP_TOKEN);
     // Query for a contact in this company to get company data
     const res = await keapGet(`/v1/contacts?company_id=${encodeURIComponent(companyId)}&limit=1`);
     console.log('[keapGetCompanyName] Contact list response:', { ok: res.ok, status: res.status, hasContacts: res.json?.contacts?.length || res.json?.result_set?.length });
