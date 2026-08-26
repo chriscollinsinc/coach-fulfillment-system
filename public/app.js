@@ -1893,7 +1893,7 @@ function clientProfileView(data, notes){
       <td class="small">${c.keap_subscription_id?`<span class="mono">${esc(c.keap_subscription_id)}</span>`:'<span style="color:var(--muted)">not linked</span>'}
         ${D.user.role==='admin' ? `<div style="margin-top:4px;white-space:nowrap">${c.keap_subscription_id?`<button class="btn tiny" onclick="contractKeapResync(${c.id})">Resync</button> `:''}<button class="btn tiny" onclick="contractKeapRelinkDlg(${c.id},'${esc(c.keap_subscription_id||'').replace(/'/g,"\\'")}')">${c.keap_subscription_id?'Change link':'Link to Keap'}</button></div>` : ''}
       </td>
-      ${D.user.role==='admin' ? `<td style="white-space:nowrap">${c.visits>0?`<button class="btn tiny" onclick="regenerateContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits},'${esc(c.start_date||'').replace(/'/g,"\\'")}','${esc(c.first_pay_date||'').replace(/'/g,"\\'")}')">Regenerate schedule</button> `:''}<button class="btn tiny danger" onclick="deleteContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}')">Delete</button></td>` : ''}
+      ${D.user.role==='admin' ? `<td style="white-space:nowrap"><button class="btn tiny danger" onclick="deleteContractDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}')">Delete</button></td>` : ''}
       </tr>`).join('') +
     `</table>
     <p class="small" style="margin-top:8px">
