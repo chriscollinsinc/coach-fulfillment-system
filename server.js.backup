@@ -120,6 +120,66 @@ async function keapPost(p, body){
   finally{ clearTimeout(timer); }
 }
 
+/* Look up company name from Keap by company_id. Returns company name string or empty string
+   if not found or Keap is unreachable. Fetches a contact with the company_id and extracts
+   the company.company_name from the response. */
+async function keapGetCompanyName(companyId){
+  if(!companyId) return '';
+  try{
+    console.log('[keapGetCompanyName] Looking up company:', companyId);
+    console.log('[keapGetCompanyName] KEAP_TOKEN set?', !!KEAP_TOKEN);
+    
+    // Try approach 1: Direct company endpoint (if Keap has it)
+    console.log('[keapGetCompanyName] Trying direct /v1/companies endpoint');
+    const dirRes = await keapGet(`/v1/companies/${encodeURIComponent(companyId)}`);
+    if(dirRes.ok && dirRes.json) {
+      const name = dirRes.json.company_name || dirRes.json.name || '';
+      if(name) {
+        console.log('[keapGetCompanyName] Found via direct endpoint:', name);
+        return name;
+      }
+    }
+    console.log('[keapGetCompanyName] Direct endpoint did not return company name, trying contacts approach');
+    
+    // Try approach 2: Get via contacts
+    const res = await keapGet(`/v1/contacts?company_id=${encodeURIComponent(companyId)}&limit=1`);
+    console.log('[keapGetCompanyName] Contact list response:', { ok: res.ok, status: res.status, hasContacts: res.json?.contacts?.length || res.json?.result_set?.length });
+    if(!res.ok || !res.json) {
+      console.log('[keapGetCompanyName] Failed to get contacts list');
+      return '';
+    }
+    const contacts = res.json.contacts || res.json.result_set || [];
+    if(contacts.length === 0) {
+      console.log('[keapGetCompanyName] No contacts found for company_id:', companyId);
+      return '';
+    }
+    
+    // Check if contact already has company_name at top level
+    if(contacts[0].company_name) {
+      console.log('[keapGetCompanyName] Found company_name on contact:', contacts[0].company_name);
+      return contacts[0].company_name;
+    }
+    
+    // Fetch the first contact with company properties included
+    const contactId = contacts[0].id;
+    console.log('[keapGetCompanyName] Fetching contact details for:', contactId);
+    const contactRes = await keapGet(`/v1/contacts/${contactId}?optional_properties=company`);
+    console.log('[keapGetCompanyName] Contact detail response:', { ok: contactRes.ok, status: contactRes.status, hasCompany: !!contactRes.json?.company, contactKeys: Object.keys(contactRes.json || {}).slice(0,10) });
+    if(!contactRes.ok || !contactRes.json) {
+      console.log('[keapGetCompanyName] Failed to get contact details');
+      return '';
+    }
+    
+    // Try various paths to company name
+    const companyName = contactRes.json.company?.company_name || contactRes.json.company_name || contactRes.json.company?.name || '';
+    console.log('[keapGetCompanyName] Extracted company name:', companyName || '(still empty)');
+    return companyName;
+  }catch(e){
+    console.error('[keapGetCompanyName] Error:', e);
+    return '';
+  }
+}
+
 /* ---------- auth ---------- */
 const sign = v => v + '.' + crypto.createHmac('sha256', SECRET).update(v).digest('hex').slice(0, 32);
 const unsign = t => { if(!t) return null; const i = t.lastIndexOf('.'); if(i < 0) return null;
@@ -231,15 +291,40 @@ function createContractAndVisits({ clientName, program, n, first, firstPayDate, 
   const contractId = Number(cr.lastInsertRowid);
   const iv = INTERVAL[program] ?? 3;
   const ids = [];
+  
+  // DISCIPLINE: Use findOrCreateVisit to create initial visits
   for(let k = 0; k < n; k++){
-    const d = new Date(first + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
-    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id)
-      VALUES(?,?,?,?,?,?,?,?,?)`).run(clientName.trim(), program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, source || 'app', new Date().toISOString().slice(0,10), clientId, contractId);
-    ids.push(Number(r.lastInsertRowid));
+    const d = new Date(first + 'T12:00:00'); 
+    d.setMonth(d.getMonth() + k * iv);
+    const dueDate = d.toISOString().slice(0,10);
+    const cycleLabel = `${k+1} of ${n}`;
+    
+    const result = findOrCreateVisit({
+      contractId: contractId,
+      dueDate: dueDate,
+      cycleLabel: cycleLabel,
+      program: program,
+      team: team,
+      client: clientName.trim(),
+      source: source || 'app',
+      sold: new Date().toISOString().slice(0,10),
+      client_id: clientId
+    });
+    
+    if(result.created) {
+      ids.push(result.id);
+    } else if(result.reason === 'existing_visit_found') {
+      ids.push(result.id);
+    } else {
+      // Should not happen for initial creation, but log if it does
+      console.error(`Failed to create initial visit ${cycleLabel} for contract ${contractId}: ${result.error}`);
+    }
   }
+  
   log(actorEmail || 'system', 'contract.create', { client: clientName, program, n, first, team, source });
   return { clientId, contractId, ids };
 }
+
 
 /* ================= API ================= */
 route('GET', /^\/api\/sso-config$/, null, (req, res) => {
@@ -1311,10 +1396,31 @@ route('POST', /^\/api\/contracts\/(\d+)\/regenerate$/, ['admin'], (req, res, m, 
   const iv = INTERVAL[contract.program] ?? 3;
   const ids = [];
   for(let k = 0; k < n; k++){
-    const d = new Date(anchorDate + 'T12:00:00'); d.setMonth(d.getMonth() + k * iv);
-    const r = db.prepare(`INSERT INTO visits(client,program,cycle,due,team,source,sold,client_id,contract_id)
-      VALUES(?,?,?,?,?,?,?,?,?)`).run(client.name, contract.program, `${k+1} of ${n}`, d.toISOString().slice(0,10), team, 'app', new Date().toISOString().slice(0,10), contract.client_id, contract.id);
-    ids.push(Number(r.lastInsertRowid));
+    const d = new Date(anchorDate + 'T12:00:00'); 
+    d.setMonth(d.getMonth() + k * iv);
+    const dueDate = d.toISOString().slice(0,10);
+    const cycleLabel = `${k+1} of ${n}`;
+    
+    // DISCIPLINE: Use findOrCreateVisit for consistent visit creation
+    const result = findOrCreateVisit({
+      contractId: contract.id,
+      dueDate: dueDate,
+      cycleLabel: cycleLabel,
+      program: contract.program,
+      team: team,
+      client: client.name,
+      source: 'app',
+      sold: new Date().toISOString().slice(0,10),
+      client_id: contract.client_id
+    });
+    
+    if(result.created) {
+      ids.push(result.id);
+    } else if(result.reason === 'existing_visit_found') {
+      ids.push(result.id);
+    } else {
+      console.error(`Failed to create regenerated visit ${cycleLabel} for contract ${contract.id}: ${result.error}`);
+    }
   }
   if(firstPayDateProvided){
     // Explicit from the dialog (always sends this field, even blank) — save exactly
@@ -1631,9 +1737,7 @@ route('POST', /^\/api\/admin\/sheet-recon-2026\/apply$/, ['admin'], (req, res, m
           if(!primary){ skipped++; continue; }
           const cyc = it.type==='carryover' ? 'Carryover' : 'Extra visit';
           const team = clientTeam[p.clientId] || coachTeam[it.coachId] || null;
-          insVisit.run(p.client, primCon.program||'', cyc, it.week, team, 'sheet-2026', todayS, p.clientId, primary, it.week, it.coachId);
-          created++;
-          if(delBlock.run(it.coachId, it.week).changes) blocksDeleted++;
+          const result = findOrCreateVisit({ contractId: primary, dueDate: it.week, cycleLabel: cyc, program: primCon.program || '', team: team, client: p.client, source: 'sheet-2026', sold: todayS, client_id: p.clientId, cal_week: it.week, cal_coach: it.coachId }); if(result.created || result.reason === 'existing_visit_found') { created++; } else { console.error(`Failed to create carryover/extra visit for ${p.clientId}: ${result.error}`); }
         }
       }
     }
@@ -1759,7 +1863,7 @@ function resyncPreview2026(){
     const normal=pc.visits.filter(v=>!v.carryover).sort((a,b)=>a.week.localeCompare(b.week));
     const cad=(cycByClient[cid]||[]).slice().sort((a,b)=>a.due.localeCompare(b.due));
     const claimed=new Array(cad.length).fill(false); const items=[];
-    const tryMatch=(v)=>{ let bi=-1,bd=1e15; for(let i=0;i<cad.length;i++){if(claimed[i])continue;const d=dd(v.week,cad[i].due);if(d<bd){bd=d;bi=i;}} return bi; };
+    const tryMatch=(v)=>{ let bi=-1; for(let i=0;i<cad.length;i++){if(claimed[i]||cad[i].completed)continue;bi=i;break;} if(bi>=0)return bi; let bd=1e15; for(let i=0;i<cad.length;i++){if(claimed[i])continue;const d=dd(v.week,cad[i].due);if(d<bd){bd=d;bi=i;}} return bi; };
     for(const v of normal){ const bi=tryMatch(v);
       if(bi>=0){claimed[bi]=true;const cy=cad[bi];items.push({type:'place',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount,cycle:cy.cycle,due:cy.due,visitId:cy.id,contractId:cy.contract_id,completed:!!cy.completed});}
       else items.push({type:'extra',week:v.week,coach:v.coach,coachId:v.coachId,coCount:v.coCount}); }
@@ -1865,8 +1969,7 @@ route('POST', /^\/api\/admin\/sheet-2026\/apply$/, ['admin'], (req, res, m, body
           if(!primary || !clientActive[p.clientId]){ skipped++; continue; }
           const cyc = it.type==='carryover' ? 'Carryover' : 'Extra visit';
           const team = clientTeam[p.clientId] || coachTeam[it.coachId] || null;
-          insVisit.run(p.client, primCon.program||'', cyc, it.week, team, 'sheet-2026', todayS, p.clientId, primary, it.week, it.coachId);
-          created++;
+          const result = findOrCreateVisit({ contractId: primary, dueDate: it.week, cycleLabel: cyc, program: primCon.program || '', team: team, client: p.client, source: 'sheet-2026', sold: todayS, client_id: p.clientId, cal_week: it.week, cal_coach: it.coachId }); if(result.created || result.reason === 'existing_visit_found') { created++; } else { console.error(`Failed to create carryover/extra visit for ${p.clientId}: ${result.error}`); }
         }
       }
     }
@@ -2747,7 +2850,7 @@ function clientHealth(cl, contracts, visits, assignedCoach){
   const label = level === 'at_risk' ? 'At risk' : level === 'behind' ? 'Behind — recoverable' : 'On track';
   return { level, label, reasons, warnings };
 }
-route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
+route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], async (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
   const result = { ok: true };
@@ -2793,6 +2896,23 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
   if(body.name !== undefined && String(body.name).trim()){
     db.prepare('UPDATE clients SET name=? WHERE id=?').run(String(body.name).trim(), cl.id);
     log(user.email, 'client.rename', { clientId: cl.id, name: body.name });
+  }
+  if(body.company_id !== undefined){
+    const companyId = String(body.company_id || '').trim();
+    if(companyId){
+      // Lookup company name from Keap
+      const companyName = await keapGetCompanyName(companyId);
+      // Sync client name to the company name from Keap
+      db.prepare('UPDATE clients SET name=?, company_id=?, company_name=? WHERE id=?').run(companyName || cl.name, companyId, companyName, cl.id);
+      result.company_id = companyId;
+      result.company_name = companyName;
+      result.synced_name = companyName || cl.name;
+      log(user.email, 'client.attach_company', { clientId: cl.id, oldName: cl.name, newName: companyName || cl.name, company_id: companyId, company_name: companyName });
+    } else {
+      // Empty company_id clears both fields
+      db.prepare('UPDATE clients SET company_id=NULL, company_name=NULL WHERE id=?').run(cl.id);
+      log(user.email, 'client.detach_company', { clientId: cl.id, name: cl.name });
+    }
   }
   send(res, 200, result);
 });
@@ -3225,6 +3345,22 @@ route('GET', /^\/api\/admin\/cadence-change-audit$/, ['admin'], async (req, res)
   try{ send(res, 200, await detectCadenceChanges()); }
   catch(e){ err(res, 500, String(e && e.message || e)); }
 });
+/* Quick test: fetch company name from Keap for debugging company ID lookup.
+   Usage: GET /api/admin/test-company-lookup?companyId=351212 */
+route('GET', /^\/api\/admin\/test-company-lookup$/, ['admin','lead','sales','coach','user'], async (req, res) => {
+  const companyId = new URL(req.url, 'http://x').searchParams.get('companyId');
+  if(!companyId) return err(res, 400, 'companyId parameter required');
+  const result = { companyId, status: 'testing...' };
+  try {
+    const name = await keapGetCompanyName(companyId);
+    result.status = 'ok';
+    result.companyName = name || '(empty string returned)';
+  } catch(e) {
+    result.status = 'error';
+    result.error = String(e);
+  }
+  send(res, 200, result);
+});
 
 /* ---------- backfill sweep: catch anything the webhook ever missed ----------
    Keap's list endpoints don't reliably support a "since" filter we could trust, so
@@ -3360,7 +3496,8 @@ async function keapSyncAllLinkedContracts(actorEmail){
   return summary;
 }
 
-
+/* ================= server ================= */
+const server = 
 /* Generate the next cycle of visits for a contract. Intelligently determines if this is:
    - A first cycle (no visits yet): creates visits 1-N starting from contract start date
    - A partial cycle (e.g., 2 of 4): completes the remaining visits (3 of 4, 4 of 4)
@@ -3467,9 +3604,7 @@ route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], asy
   send(res, 200, { ok: true, visitsCreated: visitsToCreate.length, visits: visitsToCreate });
 });
 
-
-/* ================= server ================= */
-const server = http.createServer((req, res) => {
+http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
 
   if(url.pathname === '/auth/google' && req.method === 'GET'){

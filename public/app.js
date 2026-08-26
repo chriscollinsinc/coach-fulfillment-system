@@ -1717,6 +1717,36 @@ function regenerateContractDlg(contractId, program, visitsN, startDate, firstPay
   const completed = visits.length - notCompleted;
   openDlg(`<h3>Regenerate schedule</h3>
     <p class="small">This will remove ${notCompleted} not-yet-completed visit${notCompleted===1?'':'s'} under this ${esc(program||'')} contract and create ${visitsN} new one${visitsN===1?'':'s'}, spaced on the ${esc(program||'')} cadence starting from the date below.${completed?` ${completed} completed visit${completed===1?'':'s'} will be left exactly as-is.`:''}</p>
+async function generateNextCycleDlg(clientId, contracts){
+  if(!contracts || contracts.length === 0) { uiAlert('No active contracts'); return; }
+  if(contracts.length > 1) { uiAlert('Multiple active contracts — please select which one'); return; } // TODO: select dialog
+  const contract = contracts[0];
+  
+  openDlg(`<h3>Generate next cycle</h3>
+    <p>Program: <b>${esc(contract.program)}</b></p>
+    <p>Visits per cycle: <b>${contract.visits}</b></p>
+    <p class="small" style="color:var(--muted)">This will create the next cycle of visits starting from the last scheduled date, or from the contract start date if no visits exist yet.</p>
+    <div style="margin-top:16px">
+      <button class="btn" onclick="generateNextCycle(${contract.id}); closeDlg()">Generate</button>
+      <button class="btn secondary" onclick="closeDlg()">Cancel</button>
+    </div>
+  `, {wide:true});
+}
+
+async function generateNextCycle(contractId){
+  try{
+    const result = await api('POST', '/api/contracts/' + contractId + '/generate-cycle', {});
+    if(result.ok){
+      await refresh();
+      toast(`Generated ${result.visitsCreated} new visit${result.visitsCreated !== 1 ? 's' : ''}`);
+    }else{
+      uiAlert(result.error || 'Could not generate cycle');
+    }
+  }catch(e){
+    uiAlert(e.message || 'Error generating cycle');
+  }
+}
+
     <label>First pay date (leave blank if unknown/not applicable)</label>
     <input type="date" id="rgFirstPay" value="${esc(firstPayDate||'')}" onchange="onRgFirstPayChange()" oninput="onRgFirstPayChange()">
     <label>Anchor date (first visit due)</label><input type="date" id="rgAnchor" value="${esc(startDate||'')}">
@@ -1885,7 +1915,8 @@ function clientProfileView(data, notes){
       `</table></details>` : ''}
   </div>`;
 
-  html += `<div class="panel"><h2>Visit history</h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
+  html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Generate next cycle</button>`:''}
+    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
