@@ -444,7 +444,7 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
   // (an admin/lead completing on a coach's behalf still credits that coach).
   const creditCoachId = user.role === 'coach' ? user.coach_id : (v.cal_coach || null);
   const completionDate = v.cal_week || new Date().toISOString().slice(0,10);
-  db.prepare('UPDATE visits SET completed=1, completed_on=?, completed_by_coach_id=?, completed_by_email=? WHERE id=?')
+  db.prepare('UPDATE visits SET completed=1, scheduled_week=?, completed_by_coach_id=?, completed_by_email=? WHERE id=?')
     .run(completionDate, creditCoachId, user.email, v.id);
   // Optional store tag for multi-store contracts — record WHICH store was visited.
   // Validated against the parent contract's store list when it defines one.
@@ -503,14 +503,14 @@ route('GET', /^\/api\/visits\/(\d+)\/prep$/, ['admin','lead','sales','coach'], (
   send(res, 200, { visitId: v.id, client: v.client, openCommitments, lastNotes });
 });
 /* Bulk "confirm completed" for the admin/lead Today to-do: mark a batch of placed,
- * past-week, still-open visits as done in one action. Per Mike 2026-08-24, completed_on
+ * past-week, still-open visits as done in one action. Per Mike 2026-08-24, scheduled_week
  * is BACKDATED to each visit's scheduled week (cal_week) — not today — so history and
  * "completed this month" stay accurate. Re-checks each visit server-side (must be open,
  * placed, and within the caller's permission) and skips any that don't qualify. */
 route('POST', /^\/api\/admin\/confirm-completed$/, ['admin','lead'], (req, res, m, body, user) => {
   const ids = Array.isArray(body && body.ids) ? [...new Set(body.ids.map(Number).filter(Boolean))] : [];
   if(!ids.length) return err(res, 400, 'No visits selected');
-  const upd = db.prepare('UPDATE visits SET completed=1, completed_on=?, completed_by_coach_id=?, completed_by_email=? WHERE id=? AND completed=0');
+  const upd = db.prepare('UPDATE visits SET completed=1, scheduled_week=?, completed_by_coach_id=?, completed_by_email=? WHERE id=? AND completed=0');
   let completed=0, skipped=0;
   db.exec('BEGIN');
   try{
@@ -528,7 +528,7 @@ route('POST', /^\/api\/admin\/confirm-completed$/, ['admin','lead'], (req, res, 
 route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin','lead'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
-  db.prepare('UPDATE visits SET completed=0, completed_on=NULL WHERE id=?').run(v.id);
+  db.prepare('UPDATE visits SET completed=0, scheduled_week=NULL WHERE id=?').run(v.id);
   log(user.email, 'visit.reopen', { id: v.id, client: v.client });
   send(res, 200, { ok: true });
 });
@@ -641,9 +641,9 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
       FROM visits v WHERE v.completed=0 AND v.due<? AND ${mine} ORDER BY v.due LIMIT 20`).all(today, user.coach_id, user.coach_id);
     const dueSoonMine = db.prepare(`SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
       FROM visits v WHERE v.completed=0 AND v.due>=? AND v.due<=? AND ${mine} ORDER BY v.due LIMIT 20`).all(today, plus30, user.coach_id, user.coach_id);
-    const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.completed_on
-      FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id=? AND COALESCE(v.completed_on, v.due)>=?
-      AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL) ORDER BY v.completed_on DESC LIMIT 20`).all(user.coach_id, cut30);
+    const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week
+      FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id=? AND COALESCE(v.scheduled_week, v.due)>=?
+      AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL) ORDER BY v.scheduled_week DESC LIMIT 20`).all(user.coach_id, cut30);
     return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes });
   }
 
@@ -666,21 +666,21 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
   let atRisk = db.prepare(`SELECT cl.id, cl.name, cl.assigned_coach_id
     FROM clients cl WHERE cl.status='active' AND cl.deleted_at IS NULL
     AND EXISTS(SELECT 1 FROM contracts k WHERE k.client_id=cl.id AND k.status='active' AND k.program!='Coaching Only')
-    AND NOT EXISTS(SELECT 1 FROM visits v WHERE v.client_id=cl.id AND v.completed=1 AND COALESCE(v.completed_on, v.due)>=?)
+    AND NOT EXISTS(SELECT 1 FROM visits v WHERE v.client_id=cl.id AND v.completed=1 AND COALESCE(v.scheduled_week, v.due)>=?)
     AND NOT EXISTS(SELECT 1 FROM visits v WHERE v.client_id=cl.id AND v.completed=0 AND v.cal_week IS NOT NULL)
     ORDER BY cl.name LIMIT 50`).all(cut60);
   if(teamFilter){
     const teamCoachIds = new Set(db.prepare('SELECT id FROM coaches WHERE team=?').all(teamFilter).map(r=>r.id));
     atRisk = atRisk.filter(c => c.assigned_coach_id && teamCoachIds.has(c.assigned_coach_id));
   }
-  const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.completed_on, v.completed_by_coach_id
-    FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id IS NOT NULL AND COALESCE(v.completed_on, v.due)>=?${tf}
-    AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL) ORDER BY v.completed_on DESC LIMIT 50`).all(cut30, ...tArgs);
+  const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week, v.completed_by_coach_id
+    FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id IS NOT NULL AND COALESCE(v.scheduled_week, v.due)>=?${tf}
+    AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL) ORDER BY v.scheduled_week DESC LIMIT 50`).all(cut30, ...tArgs);
   const holdsExpiring = db.prepare(`SELECT id, name, coach_id, expires FROM prospect_holds
     WHERE status='active' AND expires IS NOT NULL AND expires<=? ORDER BY expires LIMIT 20`).all(plus14)
     .filter(h => { if(!teamFilter) return true; const c = getCoach(h.coach_id); return c && c.team === teamFilter; });
   const pendingCount = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending'").get().c;
-  const completedThisMonth = db.prepare(`SELECT COUNT(*) c FROM visits v WHERE v.completed=1 AND COALESCE(v.completed_on,v.due) LIKE ?${tf}`)
+  const completedThisMonth = db.prepare(`SELECT COUNT(*) c FROM visits v WHERE v.completed=1 AND COALESCE(v.scheduled_week,v.due) LIKE ?${tf}`)
     .get(today.slice(0,7)+'%', ...tArgs).c;
   send(res, 200, { role: user.role, team: teamFilter, overdueNoPlan, lateOnCalendar, dueSoonUnscheduled, toConfirm, atRisk, missingNotes, holdsExpiring, pendingCount, completedThisMonth });
 });
@@ -768,12 +768,12 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
   const assignedClients = db.prepare(`SELECT id, name, status FROM clients WHERE assigned_coach_id=? AND deleted_at IS NULL ORDER BY name`).all(c.id);
   const yr = new Date().getFullYear();
   const visitHistory = db.prepare(`
-    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.completed_on, v.completed_by_email
-    FROM visits v WHERE v.completed_by_coach_id=? ORDER BY v.completed_on DESC LIMIT 500`).all(c.id);
+    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.scheduled_week, v.completed_by_email
+    FROM visits v WHERE v.completed_by_coach_id=? ORDER BY v.scheduled_week DESC LIMIT 500`).all(c.id);
   const upcoming = db.prepare(`
     SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
     FROM visits v WHERE v.cal_coach=? AND v.completed=0 ORDER BY v.due`).all(c.id);
-  const completedThisYear = visitHistory.filter(v => (v.completed_on||'').slice(0,4) === String(yr)).length;
+  const completedThisYear = visitHistory.filter(v => (v.scheduled_week||'').slice(0,4) === String(yr)).length;
   const notes = db.prepare(`
     SELECT n.id, n.client_id, cl.name AS client_name, n.note_date, n.note_type, n.body, n.author_name, n.author_email, n.source
     FROM client_notes n JOIN clients cl ON cl.id = n.client_id
@@ -791,10 +791,10 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
   const overdue = openWork.filter(v => v.due && v.due < todayIso);
   const dueSoon = openWork.filter(v => v.due && v.due >= todayIso && v.due <= in14);
   const missingNotes = db.prepare(`
-    SELECT v.id, v.client, v.client_id, v.completed_on
+    SELECT v.id, v.client, v.client_id, v.scheduled_week
     FROM visits v
     WHERE v.completed_by_coach_id=? AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL)
-    ORDER BY v.completed_on DESC LIMIT 50`).all(c.id);
+    ORDER BY v.scheduled_week DESC LIMIT 50`).all(c.id);
   send(res, 200, {
     coach: c,
     assignedClients,
@@ -1334,7 +1334,7 @@ route('POST', /^\/api\/contracts\/(\d+)\/regenerate$/, ['admin'], (req, res, m, 
  * sitting alongside the correctly Keap-linked one) or ones created by mistake.
  * Completed visit history is never destroyed: a completed visit generated under
  * this contract is only detached (contract_id cleared) so it stays exactly as-is
- * on the client's Visit history — its own program/cycle/completed_on/notes live on
+ * on the client's Visit history — its own program/cycle/scheduled_week/notes live on
  * the visit row itself, not on the contract. Only NOT-YET-completed visits under
  * this contract are removed, since those were generated by the contract being
  * deleted and would otherwise be dangling duplicates on the board. */
@@ -2663,7 +2663,7 @@ function computeHealthMap(){
   const mOverdueNoPlan = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND cal_week IS NULL AND due<? AND client_id IS NOT NULL GROUP BY client_id`, today);
   const mBehind = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND client_id IS NOT NULL AND ((cal_week IS NOT NULL AND due<?) OR (cal_week IS NULL AND due>=? AND due<=?)) GROUP BY client_id`, today, today, plus30);
   const mScheduled = toMap(`SELECT client_id, COUNT(*) v FROM visits WHERE completed=0 AND cal_week>=? AND client_id IS NOT NULL GROUP BY client_id`, today);
-  const mLastDone = toMap(`SELECT client_id, MAX(COALESCE(completed_on,due)) v FROM visits WHERE completed=1 AND client_id IS NOT NULL GROUP BY client_id`);
+  const mLastDone = toMap(`SELECT client_id, MAX(COALESCE(scheduled_week,due)) v FROM visits WHERE completed=1 AND client_id IS NOT NULL GROUP BY client_id`);
   const cs = db.prepare("SELECT client_id, program FROM contracts WHERE status='active'").all();
   const progs = {};
   for(const c of cs) (progs[c.client_id] ||= []).push(c.program);
@@ -2691,7 +2691,7 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
   const openCommitments = db.prepare(`SELECT a.id, a.text, a.created, a.created_visit_id, cv.due AS from_due, cv.cal_week AS from_week
     FROM action_items a LEFT JOIN visits cv ON cv.id=a.created_visit_id
     WHERE a.client_id=? AND a.status='open' ORDER BY a.created`).all(cl.id);
-  const doneCommitments = db.prepare(`SELECT a.id, a.text, a.resolved_at, rv.completed_on AS done_on
+  const doneCommitments = db.prepare(`SELECT a.id, a.text, a.resolved_at, rv.scheduled_week AS done_on
     FROM action_items a LEFT JOIN visits rv ON rv.id=a.resolved_visit_id
     WHERE a.client_id=? AND a.status='done' ORDER BY a.resolved_at DESC LIMIT 20`).all(cl.id);
   send(res, 200, {
@@ -2728,7 +2728,7 @@ function clientHealth(cl, contracts, visits, assignedCoach){
   const dueSoonUnsched = open.filter(v => v.due && v.due >= today && v.due <= plus30 && !v.cal_week);
   const nextScheduled = open.filter(v => v.cal_week && v.cal_week >= today).sort((a,b)=>a.cal_week.localeCompare(b.cal_week))[0] || null;
   const completed = visits.filter(v => v.completed);
-  const lastDone = completed.map(v => v.completed_on || v.due).filter(Boolean).sort().pop() || null;
+  const lastDone = completed.map(v => v.scheduled_week || v.due).filter(Boolean).sort().pop() || null;
   const staleRelationship = (!lastDone || lastDone < cut60) && !nextScheduled;
 
   if(overdueNoPlan.length){

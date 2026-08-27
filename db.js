@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS blocks(
 CREATE TABLE IF NOT EXISTS visits(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client TEXT NOT NULL, program TEXT DEFAULT '', cycle TEXT DEFAULT '',
-  due TEXT, completed INTEGER DEFAULT 0, completed_on TEXT,
+  due TEXT, completed INTEGER DEFAULT 0, scheduled_week TEXT,
   team TEXT, coach_hist TEXT DEFAULT '', salesperson TEXT DEFAULT '',
   sold TEXT, source TEXT DEFAULT 'app',
   cal_coach TEXT, cal_week TEXT, sched_hist TEXT);
@@ -1806,7 +1806,7 @@ function findOrCreateVisit(opts = {}) {
     const insertValues = [contractId, dueDate, cycleLabel, program, team];
     
     // Add any additional fields that were provided
-    const allowedExtraFields = ['client', 'source', 'sold', 'client_id', 'cal_week', 'cal_coach', 'completed', 'completed_on', 'coach_hist', 'salesperson', 'sched_hist'];
+    const allowedExtraFields = ['client', 'source', 'sold', 'client_id', 'cal_week', 'cal_coach', 'completed', 'scheduled_week', 'coach_hist', 'salesperson', 'sched_hist'];
     for (const field of allowedExtraFields) {
       if (field in otherFields && otherFields[field] !== undefined && otherFields[field] !== null) {
         insertFields.push(field);

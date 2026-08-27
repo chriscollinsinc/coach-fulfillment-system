@@ -103,10 +103,10 @@ function calendarPill(v){
  * calendar placement fall back to a plain, non-clickable badge that still shows the date. */
 function completedPill(v){
   if(v.cal_week){
-    const tip = `Completed${v.completed_on?' '+fmt(v.completed_on):''} — was on the calendar week of ${fmtW(v.cal_week)}${v.cal_coach?' — '+(coach(v.cal_coach)?.name||''):''}. Click to view it on the calendar.`;
+    const tip = `Completed for scheduled week: ${fmtW(v.scheduled_week)}${v.cal_coach?' with '+(coach(v.cal_coach)?.name||''):''}. Click to view it on the calendar.`;
     return `<span class="pill p-done" style="cursor:pointer" title="${esc(tip)}" onclick="event.stopPropagation();jumpToCalendar(${v.id})">completed ↗</span>`;
   }
-  const tip = v.completed_on ? `Completed ${fmt(v.completed_on)}` : (v.sched_hist ? `Scheduled ${v.sched_hist}` : 'Completed');
+  const tip = v.scheduled_week ? `Scheduled for: ${fmt(v.scheduled_week)}` : (v.sched_hist ? `Scheduled ${v.sched_hist}` : 'Completed');
   return `<span class="pill p-done" title="${esc(tip)}">completed</span>`;
 }
 const canEdit = () => ['admin','lead'].includes(D.user.role);
@@ -564,7 +564,7 @@ function todayTeamView(t, orphanedData){
     html+=`<div class="panel"><h2>Completed without a note (${t.missingNotes.length})</h2>
     <p class="small" style="margin-bottom:8px">Visits marked done in the last 30 days with no write-up — undocumented work is invisible work.</p>
     <table><tr><th>Client</th><th>Completed</th><th>Coach</th><th></th></tr>`+
-    todayRows(t.missingNotes, 8, v=>`<tr><td><b>${esc(v.client)}</b></td><td class="mono">${fmt(v.completed_on)}</td>
+    todayRows(t.missingNotes, 8, v=>`<tr><td><b>${esc(v.client)}</b></td><td class="mono">${fmt(v.scheduled_week)}</td>
       <td>${esc(coach(v.completed_by_coach_id)?.name||'—')}</td>
       <td>${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Add note</button>`:''}</td></tr>`)+`</table></div>`;
   }
@@ -609,9 +609,9 @@ function todayCoachView(t){
     let h=`<div class="panel"><h2>${title} (${list.length})</h2>`;
     h+= list.length ? `<table><tr><th>Client</th><th>Visit</th><th>Due</th><th></th></tr>`+
       todayRows(list, 10, v=>`<tr><td><b>${esc(v.client)}</b></td><td>${esc(v.cycle||'')} ${esc(v.program||'')}</td>
-        <td class="mono">${fmt(v.due||v.completed_on)}</td>
+        <td class="mono">${fmt(v.due||v.scheduled_week)}</td>
         <td>${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open client</button>`:''}
-        ${!v.completed_on?`<button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Complete</button>`:''}</td></tr>`)+`</table>`
+        ${!v.scheduled_week?`<button class="btn tiny primary" onclick="completeVisitDlg(${v.id})">Complete</button>`:''}</td></tr>`)+`</table>`
       : `<p class="small">${empty}</p>`;
     return h+`</div>`;
   };
@@ -621,7 +621,7 @@ function todayCoachView(t){
     html+=`<div class="panel"><h2>You owe a note (${t.missingNotes.length})</h2>
     <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up.</p>
     <table><tr><th>Client</th><th>Completed</th><th></th></tr>`+
-    t.missingNotes.map(v=>`<tr><td><b>${esc(v.client)}</b></td><td class="mono">${fmt(v.completed_on)}</td>
+    t.missingNotes.map(v=>`<tr><td><b>${esc(v.client)}</b></td><td class="mono">${fmt(v.scheduled_week)}</td>
       <td>${v.client_id?`<button class="btn tiny primary" onclick="openClientProfile(${v.client_id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
   }
   return html;
@@ -1055,7 +1055,7 @@ function visitDrawer(id){
   openDlg(`<h3>${esc(v.client)}</h3>
     <p class="small" style="margin-bottom:10px">${esc(v.cycle)} ${esc(v.program)} · Team ${esc(v.team||'?')}<br>
     Due ${fmt(v.due)}${od?` — <b style="color:var(--bad)">${od} days overdue</b>`:''}<br>
-    ${v.completed?`Completed ${fmt(v.completed_on)}`:v.cal_week?`On calendar: wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}`:'Not scheduled yet'}</p>
+    ${v.completed?`Completed ${fmt(v.scheduled_week)}`:v.cal_week?`On calendar: wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}`:'Not scheduled yet'}</p>
     <div class="btnrow">
       ${v.client_id?`<button class="btn tiny" onclick="closeDlg();openClientProfile(${v.client_id})">View client</button>`:''}
       ${canDo?`<button class="btn tiny" onclick="closeDlg();visitDlg(${v.id})">Edit</button>`:''}
@@ -2056,7 +2056,7 @@ function coachProfileView(data){
     if(todo.dueSoon.length) html += `<h3>Due within 2 weeks (${todo.dueSoon.length})</h3><table><tr><th>Client</th><th>Program</th><th>Due</th></tr>` +
       todo.dueSoon.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('') + `</table>`;
     if(todo.missingNotes.length) html += `<h3>Completed visits missing a note (${todo.missingNotes.length})</h3><table><tr><th>Client</th><th>Completed</th></tr>` +
-      todo.missingNotes.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td class="mono">${fmt(v.completed_on)}</td></tr>`).join('') + `</table>`;
+      todo.missingNotes.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td class="mono">${fmt(v.scheduled_week)}</td></tr>`).join('') + `</table>`;
   }
   html += `</div>`;
 
@@ -2076,7 +2076,7 @@ function coachProfileView(data){
     <p class="small" style="margin-bottom:8px">Every visit ${esc(coach.name)} has completed, credited to them permanently regardless of any later reassignment.</p>` +
     (visitHistory.length ? `<table><tr><th>Client</th><th>Program</th><th>Completed</th></tr>` +
       visitHistory.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td>
-        <td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.completed_on)}</td></tr>`).join('') + `</table>`
+        <td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.scheduled_week)}</td></tr>`).join('') + `</table>`
       : `<p class="small">No completed visits on record yet.</p>`) + `</div>`;
 
   html += `<div class="panel"><h2>Notes</h2>
