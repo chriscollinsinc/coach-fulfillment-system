@@ -1861,7 +1861,28 @@ function migrateKeapRevenueSync(){
 }
 
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
+
+/* Auto-migration: rename completed_on to scheduled_week if the old column still exists */
+function migrateScheduledWeekColumn(){
+  if(getMeta('scheduled_week_migrated')) return;
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(visits)").all();
+    const hasOldColumn = tableInfo.some(col => col.name === 'completed_on');
+    const hasNewColumn = tableInfo.some(col => col.name === 'scheduled_week');
+    
+    if(hasOldColumn && !hasNewColumn){
+      db.exec('ALTER TABLE visits RENAME COLUMN completed_on TO scheduled_week');
+      console.log('✅ Auto-migration: renamed completed_on to scheduled_week');
+    } else if(hasNewColumn) {
+      console.log('✅ Column scheduled_week already exists');
+    }
+    setMeta('scheduled_week_migrated', new Date().toISOString());
+  } catch(e) {
+    console.error('⚠️  Auto-migration failed:', e.message);
+  }
+}
 seed();
+migrateScheduledWeekColumn();
 migratePhase1();
 migrateCoachingAssignments();
 reconcilePendingClients();
