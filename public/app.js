@@ -57,6 +57,7 @@ async function api(method, url, body){
       : r.status===403 ? "You don't have permission to do that"
       : r.status>=500 ? 'Something went wrong on the server — try again in a moment'
       : 'That didn\'t work — check the form and try again');
+    console.warn(`API ${method} ${url} failed: ${r.status}`, j);
     toast(msg); throw new Error(msg);
   }
   return j;
