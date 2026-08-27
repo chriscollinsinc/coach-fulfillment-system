@@ -849,9 +849,16 @@ function completeVisitDlg(id){
   const stores = storeList(v);
   const storeField = stores.length ? `<label>Which store was visited?</label>
     <select id="cvStore"><option value="">— select store —</option>${stores.map(s=>`<option value="${esc(s)}" ${v&&v.store===s?'selected':''}>${esc(s)}</option>`).join('')}</select>` : '';
+  const teamOptions = D.teams.map(t=>`<option value="${esc(t)}" ${v&&v.team===t?'selected':''}>${esc(t)}</option>`).join('');
   openDlg(`<h3>Complete visit${v?' — '+esc(v.client):''}</h3>
     ${v?`<p class="small">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</p>`:''}
     ${storeField}
+    <div class="cvfield"><label>Team (for historical record)</label>
+      <select id="cvTeam"><option value="">— select team —</option>${teamOptions}</select></div>
+    <div class="cvfield"><label>Coach (manual entry if no longer in system)</label>
+      <input type="text" id="cvCoachName" placeholder="Enter coach name or 'N/A' if unknown" value="${v&&v.manual_coach_name?esc(v.manual_coach_name):''}"></div>
+    <div class="cvfield"><label>Date completed (if different from scheduled week)</label>
+      <input type="date" id="cvCompleteDate" value="${v&&v.completed_date?v.completed_date:v&&v.cal_week?v.cal_week:TODAY}"></div>
     <div id="cvPrep" class="cvprep small">Loading last visit…</div>
     <div class="cvfield"><label>Wins ${micBtn('cvWins')}</label>
       <textarea id="cvWins" rows="2" placeholder="What went well — momentum, breakthroughs, quick numbers."></textarea></div>
@@ -887,6 +894,12 @@ async function doCompleteV(id){
   const resolved=[...document.querySelectorAll('.cvResolve:checked')].map(c=>+c.value);
   if(resolved.length) payload.resolvedCommitmentIds = resolved;
   if(storeEl) payload.store = storeEl.value;
+  const teamVal = val('cvTeam');
+  if(teamVal) payload.team = teamVal;
+  const coachName = val('cvCoachName');
+  if(coachName) payload.manual_coach_name = coachName;
+  const completeDate = val('cvCompleteDate');
+  if(completeDate) payload.completed_date = completeDate;
   try{
     await api('POST',`/api/visits/${id}/complete`, payload);
   }catch(e){ closeDlg(); uiAlert(e.message||'Could not complete that visit'); return; }

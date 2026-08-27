@@ -116,7 +116,6 @@ function ensureColumn(table, col, decl){
   if(!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
 }
 ensureColumn('visits', 'client_id', 'INTEGER');
-ensureColumn('visits', 'manual_coach_name', 'TEXT');
 ensureColumn('visits', 'contract_id', 'INTEGER');
 ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
 ensureColumn('clients', 'company_id', 'TEXT');
@@ -220,6 +219,12 @@ ensureColumn('visits', 'completed_by_email', 'TEXT');
  * contracts.stores). App-only label chosen from the parent contract's store list;
  * NULL for ordinary single-store visits. Never sent to Keap. */
 ensureColumn('visits', 'store', 'TEXT');
+/* Manual coach name for historical visits where the original coach is no longer in the system
+   (fired, removed, etc.). Allows marking old LIDs complete with a manual coach name. */
+ensureColumn('visits', 'manual_coach_name', 'TEXT');
+/* Actual completion date for historical visits, allowing manual entry when different from
+   the scheduled week. Used for reconciling archive records with actual completion dates. */
+ensureColumn('visits', 'completed_date', 'TEXT');
 /* Basic profile fields for a coach as a person, not just as a scheduling id —
    shown on their profile page, editable by admins/leads. */
 ensureColumn('coaches', 'phone', 'TEXT');

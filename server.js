@@ -444,10 +444,13 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
   // themself if a coach completed it, otherwise whichever coach it was scheduled under
   // (an admin/lead completing on a coach's behalf still credits that coach).
   const creditCoachId = user.role === 'coach' ? user.coach_id : (v.cal_coach || null);
-  // Use provided completion_date, fall back to cal_week (when scheduled), or today
-  const completionDate = (body && body.completion_date) || v.cal_week || new Date().toISOString().slice(0,10);
-  db.prepare('UPDATE visits SET completed=1, scheduled_week=?, completed_by_coach_id=?, completed_by_email=? WHERE id=?')
-    .run(completionDate, creditCoachId, user.email, v.id);
+  const completionDate = v.cal_week || new Date().toISOString().slice(0,10);
+  // Handle manual team and coach name for historical visits (e.g., fired coaches)
+  const manualTeam = body && body.team ? String(body.team).trim() : null;
+  const manualCoachName = body && body.manual_coach_name ? String(body.manual_coach_name).trim() : null;
+  const completedDate = body && body.completed_date ? String(body.completed_date).trim() : null;
+  db.prepare('UPDATE visits SET completed=1, scheduled_week=?, completed_by_coach_id=?, completed_by_email=?, team=?, manual_coach_name=?, completed_date=? WHERE id=?')
+    .run(completionDate, creditCoachId, user.email, manualTeam || v.team, manualCoachName, completedDate, v.id);
   // Optional store tag for multi-store contracts — record WHICH store was visited.
   // Validated against the parent contract's store list when it defines one.
   if(body && body.store !== undefined){
@@ -460,20 +463,6 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
       db.prepare('UPDATE visits SET store=? WHERE id=?').run(allowed.find(x => x.toLowerCase() === s.toLowerCase()) || s, v.id);
     } else {
       db.prepare('UPDATE visits SET store=NULL WHERE id=?').run(v.id);
-    }
-  }
-  // Handle manual team override for historical visits with fired coaches
-  if(body && body.team !== undefined){
-    const t = String(body.team || '').trim();
-    if(t){
-      db.prepare('UPDATE visits SET team=? WHERE id=?').run(t, v.id);
-    }
-  }
-  // Handle manual coach name for historical record when original coach no longer exists
-  if(body && body.manual_coach_name !== undefined){
-    const cn = String(body.manual_coach_name || '').trim();
-    if(cn){
-      db.prepare('UPDATE visits SET manual_coach_name=? WHERE id=?').run(cn, v.id);
     }
   }
   log(user.email, 'visit.complete', { id: v.id, client: v.client, cycle: v.cycle, store: (body && body.store) || null });
