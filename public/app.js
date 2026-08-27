@@ -928,6 +928,7 @@ function inventory(){
   let rows=D.visits.slice();
   const MONTH_AGO = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0,10);
   const isOrphaned = v => !v.completed && v.cal_coach === null && v.due >= MONTH_AGO;
+  const isCompletedOrphaned = v => v.completed && v.cal_coach === null;
   const stf={
     attention:v=>!v.completed&&!isStale(v),
     active:v=>!v.completed,
@@ -937,6 +938,7 @@ function inventory(){
     oncal:v=>status(v)==='on_calendar',
     completed:v=>!!v.completed,
     orphaned:v=>isOrphaned(v),
+    completed_orphaned:v=>isCompletedOrphaned(v),
     all:()=>true};
   rows=rows.filter(stf[f]||stf.attention);
   if(D.user.role==='lead') rows=rows.filter(v=>!v.team||v.team===D.user.team);
@@ -965,7 +967,8 @@ function inventory(){
       <option value="attention" ${f==='attention'||!stf[f]?'selected':''}>Needs attention — ${count(stf.attention)}</option>
       <option value="overdue" ${f==='overdue'?'selected':''}>Overdue (last 90 days) — ${count(stf.overdue)}</option>
       <option value="stale" ${f==='stale'?'selected':''}>Stale (overdue 90+ days) — ${staleCount}</option>
-      <option value="orphaned" ${f==='orphaned'?'selected':''}>Orphaned (no coach) — ${count(stf.orphaned)}</option>
+      <option value="orphaned" ${f==='orphaned'?'selected':''}>Orphaned (incomplete, no coach) — ${count(stf.orphaned)}</option>
+      <option value="completed_orphaned" ${f==='completed_orphaned'?'selected':''}>Data quality (completed, no coach) — ${count(stf.completed_orphaned)}</option>
       <option value="needs" ${f==='needs'?'selected':''}>Needs scheduling — ${count(stf.needs)}</option>
       <option value="oncal" ${f==='oncal'?'selected':''}>On calendar — ${count(stf.oncal)}</option>
       <option value="active" ${f==='active'?'selected':''}>All active — ${count(stf.active)}</option>
@@ -1000,6 +1003,8 @@ function inventory(){
     if(isOrphaned(v)){
       if(v.due < TODAY) rowBg = 'background:#ffebee'; // red for overdue orphaned
       else if(v.due < new Date(new Date().setMonth(new Date().getMonth()+1)).toISOString().slice(0,7)+'-01') rowBg = 'background:#fff3e0'; // amber for this month
+    } else if(isCompletedOrphaned(v)){
+      rowBg = 'background:#f0f4f8;opacity:0.85'; // muted blue-gray for data quality issue
     }
     html+=`<tr style="cursor:pointer${rowBg?';'+rowBg:''}" onclick="visitDrawer(${v.id})">
       ${showChecks?`<td onclick="event.stopPropagation()"><input type="checkbox" ${sel.has(v.id)?'checked':''} onclick="toggleInvSel(${v.id},this.checked)"></td>`:''}
