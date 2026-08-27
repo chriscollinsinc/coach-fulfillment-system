@@ -461,6 +461,20 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
       db.prepare('UPDATE visits SET store=NULL WHERE id=?').run(v.id);
     }
   }
+  // Handle manual team override for historical visits with fired coaches
+  if(body && body.team !== undefined){
+    const t = String(body.team || '').trim();
+    if(t){
+      db.prepare('UPDATE visits SET team=? WHERE id=?').run(t, v.id);
+    }
+  }
+  // Handle manual coach name for historical record when original coach no longer exists
+  if(body && body.manual_coach_name !== undefined){
+    const cn = String(body.manual_coach_name || '').trim();
+    if(cn){
+      db.prepare('UPDATE visits SET manual_coach_name=? WHERE id=?').run(cn, v.id);
+    }
+  }
   log(user.email, 'visit.complete', { id: v.id, client: v.client, cycle: v.cycle, store: (body && body.store) || null });
   // The Visit Record (Theme A): capture WHAT happened, not just that it happened.
   // Structured fields (wins / issues / focus) + optional freeform, all composed into

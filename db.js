@@ -116,6 +116,7 @@ function ensureColumn(table, col, decl){
   if(!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
 }
 ensureColumn('visits', 'client_id', 'INTEGER');
+ensureColumn('visits', 'manual_coach_name', 'TEXT');
 ensureColumn('visits', 'contract_id', 'INTEGER');
 ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
 ensureColumn('clients', 'company_id', 'TEXT');
