@@ -1927,6 +1927,13 @@ function findOrphanedVisits(){
     };
   });
 }
+/* Dashboard endpoint for non-admins: returns count of orphaned visits by confidence level */
+route('GET', /^\/api\/orphaned-visits$/, ['admin','lead','sales','coach'], (req, res) => {
+  const rows = findOrphanedVisits();
+  const byConfidence = { high: 0, ambiguous: 0, none: 0 };
+  for(const r of rows) byConfidence[r.confidence]++;
+  send(res, 200, { count: rows.length, byConfidence });
+});
 route('GET', /^\/api\/admin\/orphaned-visits-audit$/, ['admin'], (req, res) => {
   const rows = findOrphanedVisits();
   const byConfidence = { high: 0, ambiguous: 0, none: 0 };
