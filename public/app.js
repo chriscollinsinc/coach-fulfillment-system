@@ -1887,7 +1887,7 @@ async function loadClientProfile(id){
     const notes = await api('GET','/api/clients/'+id+'/notes');
     st.clientNotes = notes;
     $('#main').innerHTML = clientProfileView(data, notes);
-  }catch(e){ $('#main').innerHTML = '<div class="panel"><p class="small">Could not load this client.</p></div>'; }
+  }catch(e){ console.error('Failed to load client:', id, e); $('#main').innerHTML = '<div class="panel"><p class="small">Could not load this client: ' + esc(e.message || e) + '</p></div>'; }
 }
 const HEALTH_STYLE = {
   on_track: { bg:'#e2f4ea', border:'var(--ok)', ink:'#186b45' },

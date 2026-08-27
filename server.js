@@ -2679,29 +2679,34 @@ function computeHealthMap(){
   return out;
 }
 route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, res, m) => {
-  const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
-  if(!cl) return err(res, 404, 'not found');
-  const contracts = db.prepare('SELECT * FROM contracts WHERE client_id=? ORDER BY created DESC').all(cl.id);
-  const visits = db.prepare('SELECT * FROM visits WHERE client_id=? ORDER BY due').all(cl.id);
-  const year = new Date().getUTCFullYear();
-  const visitsThisYear = visits.filter(v => v.due && +v.due.slice(0,4) === year);
-  const completedThisYear = visitsThisYear.filter(v => v.completed).length;
-  const assignedCoach = cl.assigned_coach_id ? getCoach(cl.assigned_coach_id) : null;
-  const notes = db.prepare(`SELECT id, note_date, note_type, author_name, body, wins, issues, focus, visit_id, source
-    FROM client_notes WHERE client_id=? ORDER BY note_date DESC, id DESC`).all(cl.id);
-  const openCommitments = db.prepare(`SELECT a.id, a.text, a.created, a.created_visit_id, cv.due AS from_due, cv.cal_week AS from_week
-    FROM action_items a LEFT JOIN visits cv ON cv.id=a.created_visit_id
-    WHERE a.client_id=? AND a.status='open' ORDER BY a.created`).all(cl.id);
-  const doneCommitments = db.prepare(`SELECT a.id, a.text, a.resolved_at, rv.scheduled_week AS done_on
-    FROM action_items a LEFT JOIN visits rv ON rv.id=a.resolved_visit_id
-    WHERE a.client_id=? AND a.status='done' ORDER BY a.resolved_at DESC LIMIT 20`).all(cl.id);
-  send(res, 200, {
-    client: cl,
-    assignedCoach,
-    contracts, visits, notes, openCommitments, doneCommitments,
-    visitProgress: { year, total: visitsThisYear.length, completed: completedThisYear },
-    health: clientHealth(cl, contracts, visits, assignedCoach),
-  });
+  try {
+    const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
+    if(!cl) return err(res, 404, 'not found');
+    const contracts = db.prepare('SELECT * FROM contracts WHERE client_id=? ORDER BY created DESC').all(cl.id);
+    const visits = db.prepare('SELECT * FROM visits WHERE client_id=? ORDER BY due').all(cl.id);
+    const year = new Date().getUTCFullYear();
+    const visitsThisYear = visits.filter(v => v.due && +v.due.slice(0,4) === year);
+    const completedThisYear = visitsThisYear.filter(v => v.completed).length;
+    const assignedCoach = cl.assigned_coach_id ? getCoach(cl.assigned_coach_id) : null;
+    const notes = db.prepare(`SELECT id, note_date, note_type, author_name, body, wins, issues, focus, visit_id, source
+      FROM client_notes WHERE client_id=? ORDER BY note_date DESC, id DESC`).all(cl.id);
+    const openCommitments = db.prepare(`SELECT a.id, a.text, a.created, a.created_visit_id, cv.due AS from_due, cv.cal_week AS from_week
+      FROM action_items a LEFT JOIN visits cv ON cv.id=a.created_visit_id
+      WHERE a.client_id=? AND a.status='open' ORDER BY a.created`).all(cl.id);
+    const doneCommitments = db.prepare(`SELECT a.id, a.text, a.resolved_at, rv.scheduled_week AS done_on
+      FROM action_items a LEFT JOIN visits rv ON rv.id=a.resolved_visit_id
+      WHERE a.client_id=? AND a.status='done' ORDER BY a.resolved_at DESC LIMIT 20`).all(cl.id);
+    send(res, 200, {
+      client: cl,
+      assignedCoach,
+      contracts, visits, notes, openCommitments, doneCommitments,
+      visitProgress: { year, total: visitsThisYear.length, completed: completedThisYear },
+      health: clientHealth(cl, contracts, visits, assignedCoach),
+    });
+  } catch(e) {
+    console.error('ERROR in /api/clients/:id:', e.message, e.stack);
+    err(res, 500, 'database error: ' + e.message);
+  }
 });
 /* One computed answer to "is this client okay?" — shown as the banner at the top
    of every client profile. level: on_track | behind | at_risk | inactive.
