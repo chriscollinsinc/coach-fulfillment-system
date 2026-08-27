@@ -222,8 +222,9 @@ function parseStores(raw){
   try{ const a = JSON.parse(raw || '[]'); return Array.isArray(a) ? a.filter(s => typeof s === 'string') : []; }
   catch(_){ return []; }
 }
-function createContractAndVisits({ clientName, program, n, first, firstPayDate, team, source, keapSubscriptionId, price, keapCompanyId, stores, actorEmail }){
+function createContractAndVisits({ clientName, program, n, first, firstPayDate, team, source, keapSubscriptionId, price, keapCompanyId, company_id, stores, actorEmail }){
   const clientId = resolveClient(clientName, { billing_start: first, keap_id: keapCompanyId || '', fromKeap: source === 'keap' });
+  if(company_id) db.prepare('UPDATE clients SET company_id=? WHERE id=?').run(company_id, clientId);
   const storeList = normStores(stores);
   const cr = db.prepare(`INSERT INTO contracts(client_id,program,visits,start_date,price,status,source,keap_subscription_id,first_pay_date,stores,created)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
@@ -1113,7 +1114,7 @@ route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req,
   if(coachId && !getCoach(coachId)) return err(res, 400, 'unknown coach');
   const { clientId, contractId, ids } = createContractAndVisits({
     clientName: client, program, n: isCoachingOnly ? 0 : n, first: first || null, team, source: 'keap',
-    keapSubscriptionId: pc.keap_subscription_id, price: pc.billing_amount, keapCompanyId: pc.keap_company_id,
+    keapSubscriptionId: pc.keap_subscription_id, price: pc.billing_amount, keapCompanyId: pc.keap_company_id, company_id: pc.keap_company_id,
     actorEmail: user.email,
   });
   if(coachId) db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(coachId, clientId);
@@ -2795,6 +2796,11 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
     db.prepare('UPDATE clients SET name=? WHERE id=?').run(String(body.name).trim(), cl.id);
     log(user.email, 'client.rename', { clientId: cl.id, name: body.name });
   }
+  if(body.company_id !== undefined){
+    const cid = String(body.company_id || '').trim();
+    db.prepare('UPDATE clients SET company_id=? WHERE id=?').run(cid || null, cl.id);
+    log(user.email, 'client.company_id_attach', { clientId: cl.id, name: cl.name, company_id: cid });
+  }
   send(res, 200, result);
 });
 /* ----- 30-day cancellation notice -----
@@ -3078,6 +3084,7 @@ async function queueSubscriptionAsPending(s, opts = {}){
       contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
     }
   }
+  const resolvedCompanyId = await keapResolveCompanyId(s.contact_id);
   db.prepare(`INSERT INTO pending_clients
     (keap_subscription_id,keap_contact_id,keap_company_id,company_name,contact_name,product_desc,billing_amount,billing_cycle,billing_frequency,start_date,status,created)
     VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?)
@@ -3088,7 +3095,7 @@ async function queueSubscriptionAsPending(s, opts = {}){
       billing_cycle=excluded.billing_cycle, billing_frequency=excluded.billing_frequency,
       start_date=excluded.start_date, status='pending'
     WHERE pending_clients.status != 'assigned'`)
-    .run(subId, s.contact_id ? String(s.contact_id) : null, s.contact_id_company || '', companyName, contactName,
+    .run(subId, s.contact_id ? String(s.contact_id) : null, resolvedCompanyId || '', companyName, contactName,
       productName || (s.subscription_plan_id ? String(s.subscription_plan_id) : (s.product_id ? String(s.product_id) : '')),
       Number(s.billing_amount) || null, s.billing_cycle || '', s.billing_frequency || null, s.start_date || null,
       new Date().toISOString());
@@ -3128,6 +3135,27 @@ async function onSubscriptionAdd(subId, opts = {}){
   const sub = await keapFindSubscriptionById(subId);
   if(!sub.ok) return { subId, error: `keap lookup failed (${sub.error || sub.status}) — nothing was queued or changed` };
   return queueSubscriptionAsPending({ ...(sub.json || {}), id: subId }, opts);
+}
+/* Resolve company ID from Keap subscription data.
+ * The subscription's contact_id may be either a person contact or the company itself.
+ * Try fetching as a person first (get their company), then try as a company directly. */
+async function keapResolveCompanyId(contactId){
+  if(!KEAP_TOKEN || !contactId) return null;
+  try {
+    // Try as a person contact first
+    const contactRes = await keapGet(`/v1/contacts/${encodeURIComponent(contactId)}?optional_properties=company`);
+    if(contactRes.ok && contactRes.json && contactRes.json.company && contactRes.json.company.id){
+      return String(contactRes.json.company.id);
+    }
+    // Try as a company directly
+    const companyRes = await keapGet(`/v1/companies/${encodeURIComponent(contactId)}`);
+    if(companyRes.ok && companyRes.json && companyRes.json.id){
+      return String(companyRes.json.id);
+    }
+  } catch(e) {
+    console.error('Company ID resolution failed:', e.message);
+  }
+  return null;
 }
 /* Same list-based fix as keapFindSubscriptionById above, applied to products — Keap's
  * single-item "get one product by id" may have the same broken-GET-by-id shape we

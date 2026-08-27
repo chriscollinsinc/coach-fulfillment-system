@@ -118,6 +118,7 @@ function ensureColumn(table, col, decl){
 ensureColumn('visits', 'client_id', 'INTEGER');
 ensureColumn('visits', 'contract_id', 'INTEGER');
 ensureColumn('contracts', 'keap_subscription_id', 'TEXT');
+ensureColumn('clients', 'company_id', 'TEXT');
 // Phantom-contract cleanup (2026-08-25): archived_at marks a contract as retired
 // without deleting it — used for old duplicate shell contracts created by past sheet
 // imports that never checked for an existing match before inserting. Archived
