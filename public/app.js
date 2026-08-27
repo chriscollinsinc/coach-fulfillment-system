@@ -563,7 +563,7 @@ function todayTeamView(t, orphanedData){
   if(t.missingNotes.length){
     html+=`<div class="panel"><h2>Completed without a note (${t.missingNotes.length})</h2>
     <p class="small" style="margin-bottom:8px">Visits marked done in the last 30 days with no write-up — undocumented work is invisible work.</p>
-    <table><tr><th>Client</th><th>Completed</th><th>Coach</th><th></th></tr>`+
+    <table><tr><th>Client</th><th>Scheduled On</th><th>Coach</th><th></th></tr>`+
     todayRows(t.missingNotes, 8, v=>`<tr><td><b>${esc(v.client)}</b></td><td class="mono">${fmt(v.scheduled_week)}</td>
       <td>${esc(coach(v.completed_by_coach_id)?.name||'—')}</td>
       <td>${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Add note</button>`:''}</td></tr>`)+`</table></div>`;
@@ -620,7 +620,7 @@ function todayCoachView(t){
   if(t.missingNotes.length){
     html+=`<div class="panel"><h2>You owe a note (${t.missingNotes.length})</h2>
     <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up.</p>
-    <table><tr><th>Client</th><th>Completed</th><th></th></tr>`+
+    <table><tr><th>Client</th><th>Scheduled On</th><th></th></tr>`+
     t.missingNotes.map(v=>`<tr><td><b>${esc(v.client)}</b></td><td class="mono">${fmt(v.scheduled_week)}</td>
       <td>${v.client_id?`<button class="btn tiny primary" onclick="openClientProfile(${v.client_id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
   }
@@ -2055,7 +2055,7 @@ function coachProfileView(data){
       todo.overdue.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('') + `</table>`;
     if(todo.dueSoon.length) html += `<h3>Due within 2 weeks (${todo.dueSoon.length})</h3><table><tr><th>Client</th><th>Program</th><th>Due</th></tr>` +
       todo.dueSoon.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('') + `</table>`;
-    if(todo.missingNotes.length) html += `<h3>Completed visits missing a note (${todo.missingNotes.length})</h3><table><tr><th>Client</th><th>Completed</th></tr>` +
+    if(todo.missingNotes.length) html += `<h3>Completed visits missing a note (${todo.missingNotes.length})</h3><table><tr><th>Client</th><th>Scheduled On</th></tr>` +
       todo.missingNotes.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td><td class="mono">${fmt(v.scheduled_week)}</td></tr>`).join('') + `</table>`;
   }
   html += `</div>`;
@@ -2074,7 +2074,7 @@ function coachProfileView(data){
 
   html += `<div class="panel"><h2>Visit history</h2>
     <p class="small" style="margin-bottom:8px">Every visit ${esc(coach.name)} has completed, credited to them permanently regardless of any later reassignment.</p>` +
-    (visitHistory.length ? `<table><tr><th>Client</th><th>Program</th><th>Completed</th></tr>` +
+    (visitHistory.length ? `<table><tr><th>Client</th><th>Program</th><th>Scheduled On</th></tr>` +
       visitHistory.map(v=>`<tr><td>${v.client_id?`<a onclick="openClientProfile(${v.client_id})" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(v.client)}</a>`:esc(v.client)}</td>
         <td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.scheduled_week)}</td></tr>`).join('') + `</table>`
       : `<p class="small">No completed visits on record yet.</p>`) + `</div>`;
