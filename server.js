@@ -444,7 +444,8 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
   // themself if a coach completed it, otherwise whichever coach it was scheduled under
   // (an admin/lead completing on a coach's behalf still credits that coach).
   const creditCoachId = user.role === 'coach' ? user.coach_id : (v.cal_coach || null);
-  const completionDate = v.cal_week || new Date().toISOString().slice(0,10);
+  // Use provided completion_date, fall back to cal_week (when scheduled), or today
+  const completionDate = (body && body.completion_date) || v.cal_week || new Date().toISOString().slice(0,10);
   db.prepare('UPDATE visits SET completed=1, scheduled_week=?, completed_by_coach_id=?, completed_by_email=? WHERE id=?')
     .run(completionDate, creditCoachId, user.email, v.id);
   // Optional store tag for multi-store contracts — record WHICH store was visited.

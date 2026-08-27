@@ -850,6 +850,8 @@ function completeVisitDlg(id){
     <select id="cvTeam"><option value="">— select team —</option>${teamOptions}</select>
     <label>Coach name (manual entry for historical record)</label>
     <input id="cvCoachName" type="text" placeholder="Enter coach name if no longer in system">
+    <label>Date completed (leave blank for today)</label>
+    <input id="cvDateCompleted" type="date" placeholder="YYYY-MM-DD">
     <div id="cvPrep" class="cvprep small">Loading last visit…</div>
     <div class="cvfield"><label>Wins ${micBtn('cvWins')}</label>
       <textarea id="cvWins" rows="2" placeholder="What went well — momentum, breakthroughs, quick numbers."></textarea></div>
@@ -881,6 +883,7 @@ async function doCompleteV(id){
   const storeEl = $('#cvStore');
   const teamEl = $('#cvTeam');
   const coachNameEl = $('#cvCoachName');
+  const dateEl = $('#cvDateCompleted');
   const payload = { wins:val('cvWins'), issues:val('cvIssues'), focus:val('cvFocus') };
   const commits = val('cvCommit').split('\n').map(s=>s.trim()).filter(Boolean);
   if(commits.length) payload.commitments = commits;
@@ -889,6 +892,7 @@ async function doCompleteV(id){
   if(storeEl) payload.store = storeEl.value;
   if(teamEl && teamEl.value) payload.team = teamEl.value;
   if(coachNameEl && coachNameEl.value) payload.manual_coach_name = coachNameEl.value;
+  if(dateEl && dateEl.value) payload.completion_date = dateEl.value;
   try{
     await api('POST',`/api/visits/${id}/complete`, payload);
   }catch(e){ closeDlg(); uiAlert(e.message||'Could not complete that visit'); return; }
