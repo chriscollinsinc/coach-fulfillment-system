@@ -122,6 +122,11 @@ const canEditWeeks = () => ['admin','lead','sales','coach'].includes(D.user.role
 // the server re-derives and enforces this independently, so this never has to be
 // trusted as the real security boundary.
 const ownsVisit = v => D.user.role==='coach' && ((v.cal_coach && v.cal_coach===D.user.coach_id) || (v.client_assigned_coach_id && v.client_assigned_coach_id===D.user.coach_id));
+/* Create a clickable client name link to their profile */
+const clientLink = (name, clientId) => {
+  if(!clientId) return `<span>${esc(name)}</span>`;
+  return `<span style="cursor:pointer;color:var(--primary)" onmouseover="this.style.opacity='0.7'" onmouseout="this.style.opacity='1'" title="Click to view profile" onclick="st.view='clientprofile';st.clientId=${clientId};render()">${esc(name)}</span>`;
+};
 const myTeams = () => D.user.role==='admin' ? D.teams : [D.user.team];
 
 function toast(msg, undo){
