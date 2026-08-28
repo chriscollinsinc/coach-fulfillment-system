@@ -582,7 +582,6 @@ async function confirmBatchMove(visitIds, week) {
     uiAlert('Could not move visits: ' + (e.message || 'unknown error'));
   }
 }
-}
 
 function renderNotesPanel(visit, prep) {
   const panel = document.getElementById('vmNotesPanel');
