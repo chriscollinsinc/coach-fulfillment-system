@@ -313,7 +313,7 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
     coaches: db.prepare(`SELECT c.*,
       (SELECT COUNT(*) FROM clients WHERE assigned_coach_id=c.id AND deleted_at IS NULL) AS assigned_stores,
       (SELECT COUNT(*) FROM visits WHERE cal_coach=c.id AND completed=0) AS upcoming_count
-      FROM coaches c WHERE c.active=1 ORDER BY c.team,c.name`).all(),
+      FROM coaches c ORDER BY c.active DESC, c.team, c.name`).all(),
     blocks: db.prepare('SELECT * FROM blocks').all(),
     visits: db.prepare(`SELECT v.*, cl.assigned_coach_id AS client_assigned_coach_id, ct.stores AS contract_stores
       FROM visits v LEFT JOIN clients cl ON cl.id = v.client_id LEFT JOIN contracts ct ON ct.id = v.contract_id`).all(),

@@ -777,11 +777,6 @@ async function refresh(){
     window.allCoachesForAssignment = D.coaches;
   }
   // Load former (inactive) coaches for the global calendar view
-  try {
-    D.formerCoaches = await api('GET', '/api/coaches/inactive');
-  } catch(e) {
-    D.formerCoaches = [];
-  }
   render();
 }
 const coach = id => D.coaches.find(c=>c.id===id);
@@ -1479,7 +1474,7 @@ function board(){
     html+=`<th class="${now?'wk-now':''}">wk of ${fmtW(w)}${now?' ●':''}</th>`; });
   html+=`</tr>`;
   for(const c of members){
-    html+=`<tr><td class="cname">${esc(c.name)}${global?`<br><span class="small" style="color:var(--muted)">${esc(c.team)}</span>`:''}</td>`;
+    html+=`<tr${c.active?'':' class="coach-inactive"'}><td class="cname">${esc(c.name)}${global?`<br><span class="small" style="color:var(--muted)">${esc(c.team)}</span>`:''}</td>`;
     for(const w of weeks){
       const o=occ[c.id+'|'+w]; const past=w<mondayOf(new Date());
       let cls='slot', inner='', click='';
@@ -1492,8 +1487,8 @@ function board(){
         // card added gets backfilled here (then shows on the "confirm completed" to-do),
         // and a past open week can be set to a custom card — Home/Truck/Training/Off/etc.
         // — to fill in what a coach was actually doing that week.
-        if(placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
-        else if(canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        if(c.active && placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
+        else if(c.active && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
         inner=`<b>${v.completed?'':healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
@@ -1506,7 +1501,7 @@ function board(){
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
         inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
-        if(canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        if(c.active && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       }
       html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
     }
@@ -1556,28 +1551,9 @@ function board(){
     if(!overdue.length&&!thisMo.length&&!nextMo.length) html+=`<h2>To schedule</h2><p class="small">Nothing waiting for ${global?'these teams':'Team '+t} in this window. 🎉</p>`;
   }
 
-  /* Former Coaches table — admin/lead only, visible on global calendar */
-  if(global && canEditWeeks() && D.formerCoaches && D.formerCoaches.length > 0){
-    const formerByTeam = D.formerCoaches.filter(c=>myTeams().includes(c.team));
-    if(formerByTeam.length > 0){
-      html+=`<div class="panel"><h2>Former Coaches</h2>
-        <p class="small" style="margin-bottom:10px">Reactivate a coach to make them available for scheduling again.</p>
-        <table><tr><th>Name</th><th>Team</th><th>Last active</th><th></th></tr>`;
-      for(const c of formerByTeam.sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))){
-        html+=`<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.team)}</td><td class="small">${c.start_date?fmt(c.start_date):'—'}</td>
-          <td><button class="btn tiny primary" onclick="reactivateCoach('${c.id}')">Reactivate</button></td></tr>`;
-      }
-      html+=`</table></div>`;
-    }
-  }
 
   html+=`</div></div>`;
   return html;
-}
-async function reactivateCoach(coachId){
-  if(!confirm('Reactivate this coach? They\'ll be available for scheduling again.')) return;
-  await api('POST',`/api/coaches/${coachId}/reactivate`);
-  await refresh();
 }
 /* Results rail for the calendar client search. Lists every matching visit across the
  * last ~2 years + all future, chronological, color-coded by status; clicking one jumps
