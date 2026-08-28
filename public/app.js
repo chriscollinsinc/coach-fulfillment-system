@@ -2728,7 +2728,7 @@ function clientProfileView(data, notes){
         if (!v.cal_week) btns.push(`<button class="btn tiny primary" onclick="scheduleVisitModal(${v.id})">Schedule now</button>`);
         btns.push(`<button class="btn tiny" onclick="openVisitModal(${v.id})">Complete</button>`);
         if (canEdit()) btns.push(`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>`);
-        return btns.join('');
+        return `<div style="display:flex;gap:4px">${btns.join('')}</div>`;
       })();
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
         <td class="mono">${v.cal_week ? fmtW(v.cal_week) : "—"}</td><td>${pill}</td><td style="white-space: nowrap;">${actionButtons}</td></tr>`;
