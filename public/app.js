@@ -207,7 +207,7 @@ function renderVisitsList(visits, currentVisit) {
                   style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
                           cursor: pointer;">Complete</button>
-          ${!v.cal_coach ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 600;
+          ${!v.cal_coach ? `<button onclick="showAssignCoachModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
                           border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
           ${v.cal_week ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 500;
@@ -552,6 +552,54 @@ async function confirmCoachOffboard(coachId){
     toast(`${c?.name||'Coach'} offboarded`);
   }catch(e){
     uiAlert(e.message || 'Could not offboard coach');
+  }
+}
+function showAssignCoachModal(visitId){
+  const v = D.visits.find(x=>x.id===visitId);
+  if(!v){ uiAlert('Visit not found'); return; }
+  if(v.cal_coach){ uiAlert('This visit already has a coach assigned'); return; }
+
+  const allCoaches = window.allCoachesForAssignment || D.coaches || [];
+  const activeCoaches = allCoaches.filter(c => c.active !== 0);
+  const inactiveCoaches = allCoaches.filter(c => c.active === 0);
+
+  let coachOptions = `<option value="">— Select a coach —</option>`;
+  activeCoaches.forEach(c => {
+    coachOptions += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
+  });
+  if(inactiveCoaches.length > 0){
+    coachOptions += `<optgroup label="Former coaches">`;
+    inactiveCoaches.forEach(c => {
+      coachOptions += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
+    });
+    coachOptions += `</optgroup>`;
+  }
+
+  openDlg(`<h3>Assign Coach to Visit</h3>
+    <p class="small" style="margin-bottom:12px"><strong>${esc(v.client)}</strong> — ${esc(v.program)} ${esc(v.cycle)}<br/>Due: ${fmt(v.due)}</p>
+    <div style="margin-bottom:12px">
+      <label style="display:block;font-weight:500;margin-bottom:6px">Select Coach</label>
+      <select id="assignCoachSelect" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px">
+        ${coachOptions}
+      </select>
+    </div>
+    <div class="dlgrow">
+      <button class="btn" onclick="closeDlg()">Cancel</button>
+      <button class="btn primary" onclick="confirmCoachAssignment(${visitId})">Assign</button>
+    </div>`);
+  setTimeout(() => $('#assignCoachSelect').focus(), 100);
+}
+async function confirmCoachAssignment(visitId){
+  const coachId = $('#assignCoachSelect').value;
+  if(!coachId){ uiAlert('Please select a coach'); return; }
+  try{
+    await api('PATCH',`/api/visits/${visitId}`, { cal_coach: coachId });
+    closeDlg();
+    await refresh();
+    const c = D.coaches.find(x=>x.id===coachId);
+    toast(`Coach assigned → ${c?.name||'Unknown'}`);
+  }catch(e){
+    uiAlert(e.message || 'Could not assign coach');
   }
 }
 async function coachDeleteWithModal(coachId){
