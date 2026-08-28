@@ -203,14 +203,17 @@ function renderVisitsList(visits, currentVisit) {
           </div>
         </div>
         <div style="display: flex; gap: 8px;">
-          <button onclick="closeVisitModal(); openVisitModal(${v.id})"
+          <button onclick="openVisitModal(${v.id})"
                   style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
                           cursor: pointer;">Complete</button>
           ${!v.cal_coach ? `<button onclick="showAssignCoachModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
                           border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
-          ${v.cal_week ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 500;
+          ${v.cal_coach && !v.cal_week ? `<button onclick="scheduleVisitModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 500;
+                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
+                          cursor: pointer;">Schedule</button>` : ''}
+          ${v.cal_week ? `<button onclick="moveVisitModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #ddd; background: #fff; border-radius: 4px;
                           cursor: pointer; color: #333;">Move</button>` : ''}
         </div>
@@ -553,6 +556,21 @@ async function confirmCoachOffboard(coachId){
   }catch(e){
     uiAlert(e.message || 'Could not offboard coach');
   }
+}
+function scheduleVisitModal(visitId){
+  if(!st.placing) st.placing = visitId;
+  closeDlg();
+  // Transition to the board view to schedule the visit
+  st.tab = 'inventory';
+  st.boardView = 'calendar';
+  render();
+}
+function moveVisitModal(visitId){
+  if(!st.placing) st.placing = visitId;
+  closeDlg();
+  st.tab = 'inventory';
+  st.boardView = 'calendar';
+  render();
 }
 function showAssignCoachModal(visitId){
   const v = D.visits.find(x=>x.id===visitId);
