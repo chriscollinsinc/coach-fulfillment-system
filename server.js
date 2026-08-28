@@ -507,6 +507,19 @@ route('GET', /^\/api\/visits\/(\d+)\/prep$/, ['admin','lead','sales','coach'], (
      ORDER BY n.note_date DESC, n.id DESC LIMIT 2`).all(v.client_id, v.id) : [];
   send(res, 200, { visitId: v.id, client: v.client, openCommitments, lastNotes });
 });
+/* Single visit details */
+route('GET', /^\/api\/visits\/(\d+)$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
+  send(res, 200, v);
+});
+/* Visit cycle context: all visits in the same contract/cycle for the modal. */
+route('GET', /^\/api\/visits\/(\d+)\/cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
+  const visits = v.contract_id
+    ? db.prepare('SELECT * FROM visits WHERE contract_id=? ORDER BY cycle').all(v.contract_id)
+    : [v];
+  send(res, 200, { visits });
+});
 /* Bulk "confirm completed" for the admin/lead Today to-do: mark a batch of placed,
  * past-week, still-open visits as done in one action. Per Mike 2026-08-24, scheduled_week
  * is BACKDATED to each visit's scheduled week (cal_week) — not today — so history and
