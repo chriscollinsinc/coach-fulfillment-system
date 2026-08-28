@@ -543,6 +543,18 @@ route('POST', /^\/api\/admin\/confirm-completed$/, ['admin','lead'], (req, res, 
   log(user.email, 'admin.confirm_completed_bulk', { requested: ids.length, completed, skipped });
   send(res, 200, { ok:true, completed, skipped });
 });
+route('POST', /^\/api\/visits\/(\d+)\/assign-coach$/, ['admin','lead'], (req, res, m, body, user) => {
+  const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
+  if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
+  const coachId = body && body.coach_id ? +body.coach_id : null;
+  if(!coachId) return err(res, 400, 'coach_id required');
+  const c = D.coaches.find(x => x.id === coachId);
+  if(!c) return err(res, 404, 'Coach not found');
+  db.prepare('UPDATE visits SET cal_coach=? WHERE id=?').run(coachId, v.id);
+  log(user.email, 'visit.assign_coach', { id: v.id, client: v.client, coach_id: coachId, coach_name: c.name });
+  send(res, 200, { ok:true });
+});
+
 route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin','lead'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');

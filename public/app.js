@@ -57,8 +57,8 @@ async function openVisitModal(id) {
                 overflow: hidden;">
 
       <!-- HEADER -->
-      <div style="padding: 28px 32px; border-bottom: 1px solid #e5e5e5; display: flex;
-                  align-items: center; justify-content: space-between; background: #fff;
+      <div style="padding: 32px 36px; border-bottom: 1px solid #e5e5e5; display: flex;
+                  align-items: center; justify-content: space-between; background: linear-gradient(to bottom, #fafafa, #fff);
                   flex-shrink: 0;">
         <div>
           <div style="font-size: 20px; font-weight: 700; color: #1a1a1a;">${esc(v.client)}</div>
@@ -74,13 +74,13 @@ async function openVisitModal(id) {
       <div style="display: flex; flex: 1; overflow: hidden;">
 
         <!-- LEFT PANEL: VISITS -->
-        <div id="vmVisitsPanel" style="width: 48%; border-right: 1px solid #e5e5e5;
-                    overflow-y: auto; padding: 28px 24px; background: #fafafa;">
+        <div id="vmVisitsPanel" style="width: 48%; border-right: 1px solid #ececec;
+                    overflow-y: auto; padding: 32px 28px; background: #fafafa;">
           <!-- filled by loadVisitData -->
         </div>
 
         <!-- RIGHT PANEL: NOTES -->
-        <div id="vmNotesPanel" style="flex: 1; overflow-y: auto; padding: 28px 28px;
+        <div id="vmNotesPanel" style="flex: 1; overflow-y: auto; padding: 32px 36px;
                   background: #fff; display: flex; flex-direction: column;">
           <!-- filled by loadVisitData -->
         </div>
@@ -203,11 +203,11 @@ function renderVisitsList(visits, currentVisit) {
           </div>
         </div>
         <div style="display: flex; gap: 8px;">
-          <button onclick="closeVisitModal(); openVisitModal(${v.id})"
+          <button onclick="submitVisitNotes(${v.id})"
                   style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
                           cursor: pointer;">Complete</button>
-          ${!v.cal_coach ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 600;
+          ${!v.cal_coach ? `<button onclick="assignCoachToVisit(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
                           border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
           ${v.cal_week ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 500;
@@ -406,6 +406,32 @@ async function submitVisitNotes(visitId) {
     toast('Visit marked complete');
   } catch (e) {
     uiAlert(e.message || 'Could not complete visit');
+  }
+}
+
+
+async function assignCoachToVisit(visitId) {
+  // Get list of available coaches
+  const coaches = D.coaches || [];
+  if (!coaches.length) {
+    uiAlert('No coaches available');
+    return;
+  }
+
+  // Simple selection dialog (could be enhanced with a modal picker)
+  const coachList = coaches.map(c => `${c.id}:${c.name}`).join('\n');
+  const prompt = `Select coach ID (available coaches):\n\n${coaches.map((c, i) => `${i+1}. ${c.name}`).join('\n')}\n\nEnter coach ID:`;
+  const selectedId = window.prompt(prompt);
+  
+  if (!selectedId) return;
+  
+  try {
+    await api('POST', `/api/visits/${visitId}/assign-coach`, { coach_id: +selectedId });
+    closeVisitModal();
+    await refresh();
+    toast('Coach assigned');
+  } catch (e) {
+    uiAlert(e.message || 'Could not assign coach');
   }
 }
 
