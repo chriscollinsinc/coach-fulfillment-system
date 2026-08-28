@@ -1056,6 +1056,12 @@ async function refresh(){
   for(const v of D.visits) if(v.cal_coach && v.cal_week)
     occ[v.cal_coach+'|'+v.cal_week] = {type:'visit', v};
   if(!st.boardTeam) st.boardTeam = D.user.team || D.teams[0];
+  // Load all coaches (active and inactive) for assignment dropdowns
+  try {
+    window.allCoachesForAssignment = await api('GET', '/api/coaches/all');
+  } catch(e) {
+    window.allCoachesForAssignment = D.coaches;
+  }
   render();
 }
 const coach = id => D.coaches.find(c=>c.id===id);
@@ -2872,9 +2878,22 @@ function clientProfileView(data, notes){
   if(canEdit()){
     html += `<label>Assigned coach</label>
       <select id="cliCoach" onchange="saveAssignedCoach(${client.id},this.value)">
-        <option value="">— unassigned —</option>
-        ${D.coaches.map(c=>`<option value="${c.id}" ${assignedCoach&&assignedCoach.id===c.id?'selected':''}>${esc(c.name)} (${c.team})</option>`).join('')}
-      </select>`;
+        <option value="">— unassigned —</option>`;
+    // Show active coaches first, then former/inactive coaches
+    const allCoaches = window.allCoachesForAssignment || D.coaches || [];
+    const activeCoaches = allCoaches.filter(c => c.active !== 0);
+    const inactiveCoaches = allCoaches.filter(c => c.active === 0);
+    activeCoaches.forEach(c => {
+      html += `<option value="${c.id}" ${assignedCoach&&assignedCoach.id===c.id?'selected':''}>${esc(c.name)} (${c.team})</option>`;
+    });
+    if(inactiveCoaches.length > 0) {
+      html += `<optgroup label="Former coaches">`;
+      inactiveCoaches.forEach(c => {
+        html += `<option value="${c.id}" ${assignedCoach&&assignedCoach.id===c.id?'selected':''}>${esc(c.name)} (${c.team})</option>`;
+      });
+      html += `</optgroup>`;
+    }
+    html += `</select>`;
   } else {
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
@@ -2949,6 +2968,7 @@ function clientProfileView(data, notes){
 function openCoachProfile(id){ st.view='coachprofile'; st.coachId=id; render(); }
 async function loadCoachProfile(id){
   const data = await api('GET', '/api/coaches/'+id+'/profile');
+  st.currentCoach = data.coach;  // Store coach data for editCoachDlg
   $('#main').innerHTML = coachProfileView(data);
 }
 function coachProfileView(data){
@@ -3035,7 +3055,8 @@ function coachDeactivateDlg(id, name){
     <button class="btn primary danger" onclick="doDeactivateCoach('${id}','${esc(name).replace(/'/g,"\\'")}')">Deactivate</button></div>`);
 }
 function editCoachDlg(id){
-  const c = D.coaches.find(x=>x.id===id) || st.coachProfileCoach;
+  const c = D.coaches.find(x=>x.id===id) || st.currentCoach;
+  if(!c) { uiAlert('Coach not found'); return; }
   openDlg(`<h3>Edit profile</h3>
     <label>Name</label><input id="ecName" value="${esc(c.name)}">
     <label>Team</label><select id="ecTeam">${teamOpts(c.team)}</select>

@@ -824,6 +824,13 @@ route('GET', /^\/api\/coaches\/inactive$/, ['admin','lead'], (req, res, m, body,
     .filter(c => canEditTeam(user, c.team));
   send(res, 200, rows);
 });
+/* Get all coaches (active and inactive) for assignment purposes */
+route('GET', /^\/api\/coaches\/all$/, ['admin','lead','coach'], (req, res, m, body, user) => {
+  let query = 'SELECT * FROM coaches ORDER BY active DESC, team, name';
+  let rows = db.prepare(query).all();
+  if(user.role !== 'admin') rows = rows.filter(c => canEditTeam(user, c.team));
+  send(res, 200, rows);
+});
 /* ----- coach profile: assigned stores, visit history, notes — the "what happens
    when a coach leaves" answer is that none of this ever disappears. A deactivated
    coach's profile is still fully browsable by admins/leads; only future scheduling
