@@ -380,26 +380,86 @@ async function openRescheduleUI(visitId) {
   const v = D.visits.find(x => x.id === visitId);
   if (!v) return;
   
-  // Show a simple week picker (could be more sophisticated)
+  // Generate week options
   const weeks = [];
   const start = new Date(TODAY);
   for (let i = 0; i < 12; i++) {
+    const weekStart = new Date(start);
+    const weekEnd = new Date(start);
+    weekEnd.setDate(weekEnd.getDate() + 6);
     const wk = fmtW(start.toISOString().slice(0,10));
-    weeks.push(wk);
+    weeks.push({
+      week: wk,
+      display: wk,
+      startDate: start.toISOString().slice(0,10),
+      label: `${fmtMMM(weekStart)} ${weekStart.getDate()} - ${fmtMMM(weekEnd)} ${weekEnd.getDate()}`
+    });
     start.setDate(start.getDate() + 7);
   }
-  
-  const selected = window.prompt(`Choose week for "${esc(v.client)}":\n\n${weeks.join('\n')}`);
-  if (selected && weeks.includes(selected)) {
-    try {
-      await api('POST', `/api/visits/${visitId}/place`, { cal_week: selected });
-      await refresh();
-      await loadVisitModalData(visitId);
-      toast('Visit rescheduled');
-    } catch (e) {
-      uiAlert(e.message || 'Could not reschedule');
-    }
+
+  // Create reschedule modal overlay
+  const overlay = document.createElement('div');
+  overlay.id = 'rescheduleOverlay';
+  overlay.style.cssText = `
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.3); display: flex; align-items: center;
+    justify-content: center; z-index: 10001;
+  `;
+
+  overlay.innerHTML = `
+    <div style="background: #fff; border-radius: 12px; padding: 28px; width: 480px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-height: 70vh; overflow-y: auto;">
+      <div style="font-size: 16px; font-weight: 700; color: #1a1a1a; margin-bottom: 4px;">
+        Schedule Visit
+      </div>
+      <div style="font-size: 12px; color: #666; margin-bottom: 20px;">
+        ${esc(v.client)} · Select a week
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px;">
+        ${weeks.map((w, i) => `
+          <button onclick="confirmReschedule(${visitId}, '${w.week}')"
+                  style="padding: 12px; border: 1px solid #e5e5e5; background: #fff;
+                          border-radius: 6px; cursor: pointer; text-align: left;
+                          transition: all 0.2s; font-size: 11px; color: #333;"
+                  onmouseover="this.style.borderColor='#1d4f91'; this.style.background='#f0f5fb';"
+                  onmouseout="this.style.borderColor='#e5e5e5'; this.style.background='#fff';">
+            <div style="font-weight: 600; color: #1d4f91; margin-bottom: 3px;">${w.display}</div>
+            <div style="font-size: 10px; color: #999;">${w.label}</div>
+          </button>
+        `).join('')}
+      </div>
+
+      <div style="display: flex; gap: 10px;">
+        <button onclick="document.getElementById('rescheduleOverlay').remove()"
+                style="flex: 1; padding: 10px; background: none; border: 1px solid #ddd;
+                        border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 600;
+                        color: #333;">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+}
+
+async function confirmReschedule(visitId, week) {
+  try {
+    await api('POST', `/api/visits/${visitId}/place`, { cal_week: week });
+    document.getElementById('rescheduleOverlay').remove();
+    await refresh();
+    await loadVisitModalData(visitId);
+    toast('Visit rescheduled');
+  } catch (e) {
+    uiAlert(e.message || 'Could not reschedule');
   }
+}
+
+function fmtMMM(date) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return months[date.getMonth()];
 }
 
 async function bulkAssignCoach() {
@@ -458,6 +518,92 @@ async function bulkReschedule() {
   }
 }
 
+async function openNotesHistory(clientId) {
+  try {
+    const response = await api('GET', `/api/clients/${clientId}/notes-history`);
+    const notes = response.notes || [];
+    
+    if (!notes.length) {
+      uiAlert('No notes found for this client');
+      return;
+    }
+
+    // Create notes history modal
+    const overlay = document.createElement('div');
+    overlay.id = 'notesHistoryOverlay';
+    overlay.style.cssText = `
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.3); display: flex; align-items: center;
+      justify-content: center; z-index: 10002;
+    `;
+
+    let notesHtml = notes.map(n => `
+      <div style="margin-bottom: 16px; padding: 14px; background: #f9f9f9;
+                  border: 1px solid #e5e5e5; border-radius: 6px;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+          <div style="font-size: 11px; font-weight: 600; color: #999;">
+            ${fmt(n.note_date || n.date)} · Visit ${n.visit_num || '?'}
+          </div>
+          ${n.author_name ? `<div style="font-size: 10px; color: #bbb;">${esc(n.author_name)}</div>` : ''}
+        </div>
+        
+        ${n.wins ? `<div style="margin-bottom: 6px;">
+          <div style="font-size: 10px; font-weight: 600; color: #2e7d32;">✓ Wins</div>
+          <div style="font-size: 11px; color: #333; line-height: 1.4;">${esc(n.wins)}</div>
+        </div>` : ''}
+        
+        ${n.issues ? `<div style="margin-bottom: 6px;">
+          <div style="font-size: 10px; font-weight: 600; color: #c71c1c;">⚠ Issues</div>
+          <div style="font-size: 11px; color: #333; line-height: 1.4;">${esc(n.issues)}</div>
+        </div>` : ''}
+        
+        ${n.focus ? `<div style="margin-bottom: 6px;">
+          <div style="font-size: 10px; font-weight: 600; color: #1d4f91;">→ Focus</div>
+          <div style="font-size: 11px; color: #333; line-height: 1.4;">${esc(n.focus)}</div>
+        </div>` : ''}
+        
+        ${n.body ? `<div>
+          <div style="font-size: 10px; font-weight: 600; color: #666;">Notes</div>
+          <div style="font-size: 11px; color: #333; line-height: 1.4;">${esc(n.body)}</div>
+        </div>` : ''}
+      </div>
+    `).join('');
+
+    overlay.innerHTML = `
+      <div style="background: #fff; border-radius: 12px; padding: 28px; width: 520px;
+                  max-height: 80vh; overflow-y: auto;
+                  box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+        <div style="display: flex; justify-content: space-between; align-items: center;
+                    margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
+          <div>
+            <div style="font-size: 16px; font-weight: 700; color: #1a1a1a;">Notes History</div>
+            <div style="font-size: 12px; color: #666; margin-top: 4px;">${notes.length} note(s) on file</div>
+          </div>
+          <button onclick="document.getElementById('notesHistoryOverlay').remove()"
+                  style="background: none; border: none; font-size: 24px; cursor: pointer; color: #999;">×</button>
+        </div>
+        
+        <div style="margin-bottom: 20px;">
+          ${notesHtml}
+        </div>
+        
+        <button onclick="document.getElementById('notesHistoryOverlay').remove()"
+                style="width: 100%; padding: 10px; background: #1d4f91; color: #fff;
+                        border: none; border-radius: 6px; font-size: 13px; cursor: pointer;
+                        font-weight: 600;">Close</button>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.remove();
+    });
+  } catch (e) {
+    uiAlert('Could not load notes history: ' + e.message);
+  }
+}
+
+
 
 function renderNotesPanel(visit, prep) {
   const panel = document.getElementById('vmNotesPanel');
@@ -470,10 +616,16 @@ function renderNotesPanel(visit, prep) {
     <div style="display: flex; justify-content: space-between; align-items: center;
                 margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
       <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">Visit Notes</div>
-      <button onclick="openClientProfile(${visit.client_id})"
-              style="padding: 6px 12px; background: none; border: 1px solid #ddd;
-                      border-radius: 4px; font-size: 12px; cursor: pointer;
-                      color: #1d4f91; font-weight: 600;">See full profile →</button>
+      <div style="display: flex; gap: 8px;">
+        <button onclick="openNotesHistory(${visit.client_id})"
+                style="padding: 6px 12px; background: none; border: 1px solid #ddd;
+                        border-radius: 4px; font-size: 12px; cursor: pointer;
+                        color: #666; font-weight: 500;">📋 History</button>
+        <button onclick="openClientProfile(${visit.client_id})"
+                style="padding: 6px 12px; background: none; border: 1px solid #ddd;
+                        border-radius: 4px; font-size: 12px; cursor: pointer;
+                        color: #1d4f91; font-weight: 600;">Profile →</button>
+      </div>
     </div>
   `;
 

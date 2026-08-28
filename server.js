@@ -533,6 +533,22 @@ route('GET', /^\/api\/clients\/(\d+)\/historical-coaches$/, ['admin','lead','sal
   
   send(res, 200, { pastCoaches });
 });
+/* Notes history for a client — all past notes for context/search */
+route('GET', /^\/api\/clients\/(\d+)\/notes-history$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  const clientId = m[1];
+  const notes = db.prepare(`
+    SELECT n.id, n.note_date, n.wins, n.issues, n.focus, n.body, n.author_name,
+           CASE WHEN v.id IS NOT NULL THEN 'Visit ' || v.cycle ELSE NULL END as visit_num
+    FROM client_notes n
+    LEFT JOIN visits v ON v.id=n.visit_id
+    WHERE n.client_id=?
+    ORDER BY n.note_date DESC, n.id DESC
+    LIMIT 100
+  `).all(clientId);
+  
+  send(res, 200, { notes });
+});
+
 
 route('GET', /^\/api\/visits\/(\d+)\/cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
