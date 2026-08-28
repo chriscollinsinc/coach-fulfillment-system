@@ -560,7 +560,7 @@ async function confirmCoachOffboard(coachId){
 function scheduleVisitModal(visitId){
   const v = D.visits.find(x=>x.id===visitId);
   if(!v) return;
-  closeDlg();
+  closeVisitModal();
   // Set up board view to schedule this visit
   st.view = 'board';
   st.boardTeam = v.team;
@@ -574,7 +574,7 @@ function scheduleVisitModal(visitId){
 function moveVisitModal(visitId){
   const v = D.visits.find(x=>x.id===visitId);
   if(!v) return;
-  closeDlg();
+  closeVisitModal();
   // Set up board view to move this visit
   st.view = 'board';
   st.boardTeam = v.team;
