@@ -937,21 +937,8 @@ async function assignCoachToVisit(visitId) {
 
       ${historyHtml}
 
-      <div style="margin-bottom: 16px;">
-        <label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #999; margin-bottom: 8px;">Available Coaches</label>
-        <select id="coachSelect" style="width: 100%; padding: 10px 12px; border: 1px solid #e5e5e5;
-                border-radius: 6px; font-size: 13px; color: #333; background: #fff;">
-          <option value="">— Select a coach —</option>
-          ${coaches.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}
-        </select>
-      </div>
-
       <div style="margin-bottom: 20px;">
-        <label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #999; margin-bottom: 8px;">Or enter coach ID/name</label>
-        <input id="coachIdInput" type="text" style="width: 100%; padding: 10px 12px; border: 1px solid #e5e5e5;
-                border-radius: 6px; font-size: 13px; color: #333;" placeholder="Coach ID or name">
+        ${generateCoachSelectorHTML('coachSelect', true)}
       </div>
 
       <div style="display: flex; gap: 10px;">
@@ -987,18 +974,48 @@ async function assignCoachAndClose(visitId, coachId) {
   }
 }
 
+/* Generate coach selector dropdown with active and former coaches */
+function generateCoachSelectorHTML(selectId = 'coachSelect', includeLabel = true) {
+  const allCoaches = window.allCoachesForAssignment || D.coaches || [];
+  const activeCoaches = allCoaches.filter(c => c.active !== 0);
+  const inactiveCoaches = allCoaches.filter(c => c.active === 0);
+  
+  let html = '';
+  if(includeLabel) {
+    html += `<label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; color: #999; margin-bottom: 8px;">Select Coach</label>`;
+  }
+  
+  html += `<select id="${selectId}" style="width: 100%; padding: 10px 12px; border: 1px solid #e5e5e5; border-radius: 6px; font-size: 13px; color: #333; background: #fff;">
+    <option value="">— Select a coach —</option>`;
+  
+  // Add active coaches
+  activeCoaches.forEach(c => {
+    html += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
+  });
+  
+  // Add former coaches in optgroup
+  if(inactiveCoaches.length > 0) {
+    html += `<optgroup label="Former coaches">`;
+    inactiveCoaches.forEach(c => {
+      html += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
+    });
+    html += `</optgroup>`;
+  }
+  
+  html += `</select>`;
+  return html;
+}
+
 async function confirmCoachSelection(visitId) {
-  const selectVal = ($('#coachSelect') || {}).value || '';
-  const inputVal = ($('#coachIdInput') || {}).value || '';
-  const coachId = selectVal || inputVal;
+  const coachId = ($('#coachSelect') || {}).value || '';
 
   if (!coachId) {
-    uiAlert('Please select or enter a coach');
+    uiAlert('Please select a coach');
     return;
   }
 
-  const coaches = D.coaches || [];
-  const c = coaches.find(x => x.id === +coachId || x.name.toLowerCase().includes(coachId.toLowerCase()));
+  const allCoaches = window.allCoachesForAssignment || D.coaches || [];
+  const c = allCoaches.find(x => x.id === coachId);
   
   if (!c) {
     uiAlert('Coach not found');
@@ -2363,8 +2380,27 @@ async function loadPending(){
   }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
 }
 function coachOptsFor(team){
-  const list = D.coaches.filter(c=>!team||c.team===team);
-  return `<option value="">— select —</option>` + list.map(c=>`<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`).join('');
+  const allCoaches = window.allCoachesForAssignment || D.coaches || [];
+  const activeList = allCoaches.filter(c => c.active !== 0 && (!team || c.team === team));
+  const inactiveList = allCoaches.filter(c => c.active === 0 && (!team || c.team === team));
+  
+  let html = `<option value="">— select —</option>`;
+  
+  // Add active coaches
+  activeList.forEach(c => {
+    html += `<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`;
+  });
+  
+  // Add former coaches in optgroup
+  if(inactiveList.length > 0) {
+    html += `<optgroup label="Former coaches">`;
+    inactiveList.forEach(c => {
+      html += `<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`;
+    });
+    html += `</optgroup>`;
+  }
+  
+  return html;
 }
 function assignPendingDlg(id, holdId){
   const r = (st.pendingList||[]).find(x=>x.id===id); if(!r) return;
