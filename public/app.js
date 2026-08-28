@@ -285,138 +285,303 @@ function renderVisitsList(visits, currentVisit) {
   const panel = document.getElementById('vmVisitsPanel');
   if (!panel) return;
 
-  // Group by current vs previous cycle
   const current = visits.filter(v => !v.completed);
   const previous = visits.filter(v => v.completed);
+  const completedCount = previous.length;
+  const totalCount = current.length + previous.length;
+  const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
   let html = '';
 
-  // Current cycle
+  // CYCLE PROGRESS
+  html += `
+    <div style="margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <div style="font-size: 12px; font-weight: 600; color: #333;">Cycle Progress</div>
+        <div style="font-size: 12px; color: #666;">${completedCount} of ${totalCount}</div>
+      </div>
+      <div style="width: 100%; height: 8px; background: #e5e5e5; border-radius: 4px; overflow: hidden;">
+        <div style="width: ${progressPercent}%; height: 100%; background: #2e7d32; transition: width 0.3s ease;"></div>
+      </div>
+    </div>
+  `;
+
+  // Batch selection state
+  window.modalBatchSelected = window.modalBatchSelected || new Set();
+
+  // CURRENT CYCLE
   if (current.length) {
-    html += `<div style="margin-bottom: 40px;">
-      <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
-                  color: #999; letter-spacing: 1px; margin-bottom: 16px;">
-        Current Cycle (${current.length} visits)
-      </div>`;
+    const showBatchCheckboxes = current.length >= 2;
+    const allSelected = current.every(v => window.modalBatchSelected.has(v.id));
+
+    html += `<div style="margin-bottom: 24px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; color: #999; letter-spacing: 1px;">
+          Current Cycle (${current.length})
+        </div>`;
+
+    if (showBatchCheckboxes) {
+      html += `<label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; color: #666;">
+        <input type="checkbox" id="selectAllVisits" onchange="toggleSelectAll(this.checked, [${current.map(v => v.id).join(',')}])" 
+               ${allSelected ? 'checked' : ''} style="cursor: pointer;">
+        Select all
+      </label>`;
+    }
+
+    html += `</div>`;
 
     current.forEach((v, idx) => {
       const isCurrent = v.id === currentVisit.id;
+      const isSelected = window.modalBatchSelected.has(v.id);
       const statusLabel = v.completed ? 'Completed' :
                          v.cal_week ? 'On calendar' :
                          v.due && v.due < TODAY ? 'Overdue' : 'Needs scheduling';
       const statusColor = v.completed ? '#2e7d32' :
                          v.cal_week ? '#2e7d32' :
                          v.due && v.due < TODAY ? '#c71c1c' : '#b8860b';
-      const bgColor = v.due && v.due < TODAY && !v.completed ? '#fff5f5' : '#fff';
-      const borderColor = v.due && v.due < TODAY && !v.completed ? '#ffcccc' : '#e5e5e5';
+      const isOverdue = v.due && v.due < TODAY && !v.completed;
+      const bgColor = isOverdue ? '#fff5f5' : (isSelected ? '#f0f7ff' : '#fff');
+      const borderColor = isCurrent ? '#1d4f91' : (isOverdue ? '#ffcccc' : '#e5e5e5');
+      const borderWidth = isCurrent ? '2px' : '1px';
 
-      html += `<div style="background: ${bgColor}; border: 1px solid ${borderColor};
-                          border-radius: 8px; padding: 16px; margin-bottom: 12px;
-                          ${isCurrent ? 'box-shadow: 0 0 0 2px #1d4f91;' : ''}">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start;
-                    margin-bottom: 12px;">
-          <div style="font-size: 13px; font-weight: 700; color: #1a1a1a;">
-            Visit ${idx + 1} of ${current.length}
-          </div>
-          <div style="font-size: 11px; padding: 4px 10px; background: ${statusColor}20;
-                      color: ${statusColor}; border-radius: 4px; font-weight: 500;">
-            ${statusLabel}
-          </div>
-        </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
-                    margin-bottom: 12px; font-size: 12px;">
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;
-                        text-transform: uppercase; margin-bottom: 4px;">
-              Scheduled week
+      html += `<div onclick="switchVisitInModal(${v.id})" style="background: ${bgColor}; border: ${borderWidth} solid ${borderColor};
+                          border-radius: 8px; padding: 14px; margin-bottom: 12px; cursor: pointer;
+                          transition: all 0.2s; ${isCurrent ? 'box-shadow: 0 0 0 2px #1d4f9133;' : ''}
+                          ${showBatchCheckboxes ? '' : 'user-select: none;'}">
+        <div style="display: flex; gap: 10px; align-items: flex-start;">
+          ${showBatchCheckboxes ? `<input type="checkbox" onclick="event.stopPropagation(); toggleSelectVisit(${v.id})"
+                   ${isSelected ? 'checked' : ''} style="margin-top: 2px; cursor: pointer; flex-shrink: 0;">` : ''}
+          <div style="flex: 1;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
+              <div style="font-size: 12px; font-weight: 700; color: #1a1a1a;">Visit ${idx + 1} of ${current.length}</div>
+              <div style="font-size: 10px; padding: 3px 8px; background: ${statusColor}20; color: ${statusColor};
+                          border-radius: 3px; font-weight: 600;">${statusLabel}</div>
             </div>
-            <div style="color: #333; font-weight: 500;">${v.cal_week ? fmtW(v.cal_week) : '—'}</div>
-          </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;
-                        text-transform: uppercase; margin-bottom: 4px;">
-              Status
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 11px; margin-bottom: 10px;">
+              <div>
+                <div style="color: #999; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 3px;">Due</div>
+                <div style="color: #333; font-weight: 500;">${fmt(v.due || '—')}</div>
+              </div>
+              <div>
+                <div style="color: #999; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 3px;">Scheduled</div>
+                <div style="color: #333; font-weight: 500;">${v.cal_week ? fmtW(v.cal_week) : '—'}</div>
+              </div>
+              <div>
+                <div style="color: #999; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 3px;">Coach</div>
+                <div style="color: #333; font-weight: 500;">${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}</div>
+              </div>
+              <div>
+                <div style="color: #999; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 3px;">Team</div>
+                <div style="color: #333; font-weight: 500;">${esc(v.team || '?')}</div>
+              </div>
             </div>
-            <div style="color: #333; font-weight: 500;">${statusLabel}</div>
-          </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;
-                        text-transform: uppercase; margin-bottom: 4px;">
-              Coach
-            </div>
-            <div style="color: #333; font-weight: 500;">
-              ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+              ${!v.cal_coach ? `<button onclick="event.stopPropagation(); showAssignCoachModal(${v.id})" style="padding: 5px 10px; font-size: 10px; font-weight: 600;
+                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
+              ${v.cal_coach && !v.cal_week ? `<button onclick="event.stopPropagation(); openSchedulePickerModal(${v.id})" style="padding: 5px 10px; font-size: 10px; font-weight: 600;
+                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px; cursor: pointer;">Schedule</button>` : ''}
+              ${v.cal_week ? `<button onclick="event.stopPropagation(); openMovePickerModal(${v.id})" style="padding: 5px 10px; font-size: 10px; font-weight: 600;
+                          border: 1px solid #ddd; background: #fff; border-radius: 4px; cursor: pointer; color: #333;">Move</button>` : ''}
             </div>
           </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;
-                        text-transform: uppercase; margin-bottom: 4px;">
-              Team
-            </div>
-            <div style="color: #333; font-weight: 500;">${esc(v.team || '?')}</div>
-          </div>
-        </div>
-        <div style="display: flex; gap: 8px;">
-          <button onclick="openVisitModal(${v.id})"
-                  style="padding: 6px 12px; font-size: 11px; font-weight: 500;
-                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
-                          cursor: pointer;">Complete</button>
-          ${!v.cal_coach ? `<button onclick="showAssignCoachModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
-                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
-                          border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
-          ${v.cal_coach && !v.cal_week ? `<button onclick="openSchedulePickerModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 500;
-                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
-                          cursor: pointer;">Schedule</button>` : ''}
-          ${v.cal_week ? `<button onclick="openMovePickerModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 500;
-                          border: 1px solid #ddd; background: #fff; border-radius: 4px;
-                          cursor: pointer; color: #333;">Move</button>` : ''}
         </div>
       </div>`;
     });
 
-    html += '</div>';
+    html += `</div>`;
   }
 
-  // Previous cycle
+  // BATCH TOOLBAR
+  if (window.modalBatchSelected.size > 0) {
+    html += `<div style="position: sticky; bottom: 0; background: #f5f5f5; border-top: 1px solid #e5e5e5;
+                         padding: 12px; border-radius: 6px; margin-top: 16px;">
+      <div style="font-size: 12px; margin-bottom: 10px; color: #333; font-weight: 600;">
+        ${window.modalBatchSelected.size} selected
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button onclick="batchAssignCoach()" style="flex: 1; padding: 8px; font-size: 11px; font-weight: 600;
+                border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px; cursor: pointer;">
+          Assign Coach
+        </button>
+        <button onclick="batchMoveVisits()" style="flex: 1; padding: 8px; font-size: 11px; font-weight: 600;
+                border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px; cursor: pointer;">
+          Move All
+        </button>
+        <button onclick="clearBatchSelection()" style="flex: 1; padding: 8px; font-size: 11px; font-weight: 600;
+                border: 1px solid #ddd; background: #fff; color: #333; border-radius: 4px; cursor: pointer;">
+          Clear
+        </button>
+      </div>
+    </div>`;
+  }
+
+  // PREVIOUS CYCLE (completed)
   if (previous.length) {
-    html += `<div>
-      <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
-                  color: #999; letter-spacing: 1px; margin-bottom: 16px;">
-        Previous Cycle (${previous.length} completed)
+    html += `<div style="margin-top: 24px; opacity: 0.7;">
+      <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; color: #999; letter-spacing: 1px; margin-bottom: 12px;">
+        Completed (${previous.length})
       </div>`;
 
     previous.forEach((v, idx) => {
-      html += `<div style="background: #f5f5f5; border: 1px solid #e5e5e5;
-                          border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: 0.8;">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start;
-                    margin-bottom: 12px;">
-          <div style="font-size: 13px; font-weight: 600; color: #666;">
-            Visit ${idx + 1} of ${previous.length}
-          </div>
-          <div style="font-size: 11px; padding: 4px 10px; background: #e8f5e9;
-                      color: #2e7d32; border-radius: 4px; font-weight: 500;">Completed</div>
-        </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 12px;">
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;">Completed date</div>
-            <div style="color: #666; font-weight: 500; margin-top: 4px;">
-              ${v.completed_date ? fmt(v.completed_date) : fmt(v.cal_week)}
-            </div>
-          </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;">Coach</div>
-            <div style="color: #666; font-weight: 500; margin-top: 4px;">
-              ${v.manual_coach_name || (v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—')}
-            </div>
-          </div>
-        </div>
+      html += `<div style="background: #f5f5f5; border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px; margin-bottom: 10px; cursor: pointer;"
+               onclick="switchVisitInModal(${v.id})">
+        <div style="font-size: 11px; font-weight: 600; color: #666; margin-bottom: 6px;">Visit ${idx + 1} of ${previous.length}</div>
+        <div style="font-size: 10px; color: #999;">Completed: ${fmt(v.completed_date || v.cal_week)}</div>
       </div>`;
     });
 
-    html += '</div>';
+    html += `</div>`;
   }
 
   panel.innerHTML = html;
+}
+
+function switchVisitInModal(visitId) {
+  const v = D.visits.find(x => x.id === visitId);
+  if (!v) return;
+  // Re-render the entire modal for the new visit
+  loadVisitModalData(visitId);
+}
+
+function toggleSelectVisit(visitId) {
+  if (window.modalBatchSelected.has(visitId)) {
+    window.modalBatchSelected.delete(visitId);
+  } else {
+    window.modalBatchSelected.add(visitId);
+  }
+  const visits = D.visits.find(x => x.id === visitId)?.client ? 
+                 D.visits.filter(v => !v.completed) : [];
+  renderVisitsList(D.visits, D.visits.find(x => x.id === visitId) || D.visits[0]);
+}
+
+function toggleSelectAll(checked, visitIds) {
+  if (checked) {
+    visitIds.forEach(id => window.modalBatchSelected.add(id));
+  } else {
+    visitIds.forEach(id => window.modalBatchSelected.delete(id));
+  }
+  const currentVisit = document.querySelector('[onclick*="switchVisitInModal"]') ? 
+                       D.visits.find(x => x.id === parseInt(document.querySelector('[style*="box-shadow: 0 0 0 2px"]')?.getAttribute('onclick').match(/\d+/)[0])) 
+                       : null;
+  renderVisitsList(D.visits, currentVisit || D.visits[0]);
+}
+
+function clearBatchSelection() {
+  window.modalBatchSelected.clear();
+  const currentVisit = D.visits.find(x => !x.completed) || D.visits[0];
+  renderVisitsList(D.visits, currentVisit);
+}
+
+async function batchAssignCoach() {
+  const selectedIds = Array.from(window.modalBatchSelected);
+  if (selectedIds.length === 0) return;
+  
+  const allCoaches = D.coaches || [];
+  const activeCoaches = allCoaches.filter(c => c.active !== 0);
+  
+  let coachOptions = `<option value="">— Select a coach —</option>`;
+  activeCoaches.forEach(c => {
+    coachOptions += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
+  });
+
+  openDlg(`<h3>Assign Coach to ${selectedIds.length} Visits</h3>
+    <p class="small" style="margin-bottom:12px">Select a coach to assign to all ${selectedIds.length} selected visits.</p>
+    <div style="margin-bottom:12px">
+      <label style="display:block;font-weight:500;margin-bottom:6px">Select Coach</label>
+      <select id="batchCoachSelect" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px">
+        ${coachOptions}
+      </select>
+    </div>
+    <div class="dlgrow">
+      <button class="btn" onclick="closeDlg()">Cancel</button>
+      <button class="btn primary" onclick="confirmBatchCoachAssignment([${selectedIds.join(',')}])">Assign</button>
+    </div>`);
+  setTimeout(() => ($('#batchCoachSelect') || {}).focus?.(), 100);
+}
+
+async function confirmBatchCoachAssignment(visitIds) {
+  const coachId = ($('#batchCoachSelect') || {}).value;
+  if (!coachId) { uiAlert('Please select a coach'); return; }
+  try {
+    let assigned = 0;
+    for (const id of visitIds) {
+      await api('PATCH', `/api/visits/${id}`, { cal_coach: coachId });
+      assigned++;
+    }
+    closeDlg();
+    window.modalBatchSelected.clear();
+    await refresh();
+    toast(`Assigned ${assigned} visit(s) to ${coach(coachId).name}`);
+  } catch (e) {
+    uiAlert('Could not assign coach: ' + (e.message || 'unknown error'));
+  }
+}
+
+async function batchMoveVisits() {
+  const selectedIds = Array.from(window.modalBatchSelected);
+  if (selectedIds.length === 0) return;
+  
+  // Open week picker for batch move
+  const overlay = document.createElement('div');
+  overlay.id = 'batchMoveOverlay';
+  overlay.style.cssText = `position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.3); display: flex; align-items: center;
+    justify-content: center; z-index: 10001;`;
+  
+  const startDate = new Date();
+  const weeks = [];
+  for(let i = 0; i < 12; i++) {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() + (i * 7));
+    const mon = new Date(d);
+    mon.setDate(d.getDate() - d.getDay() + 1);
+    const weekStr = mon.toISOString().slice(0,10);
+    weeks.push({ label: `Week of ${formatDatePicker(mon)}`, value: weekStr });
+  }
+  
+  let html = `<div style="background: #fff; border-radius: 8px; padding: 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 90%; max-width: 500px;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+      <h2 style="margin: 0; font-size: 18px; color: #1a1a1a;">Move ${selectedIds.length} Visits</h2>
+      <button onclick="closeBatchMoveOverlay()" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #999;">×</button>
+    </div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 20px;">`;
+  
+  weeks.forEach(w => {
+    html += `<button onclick="confirmBatchMove([${selectedIds.join(',')}], '${w.value}')"
+      style="padding: 12px; border: 1px solid #1d4f91; background: #f5f5f5; border-radius: 6px; cursor: pointer; font-size: 12px; color: #333; font-weight: 500;">${w.label}</button>`;
+  });
+  
+  html += `</div><button onclick="closeBatchMoveOverlay()" style="width: 100%; padding: 10px; border: 1px solid #ddd; background: #fff; border-radius: 4px; cursor: pointer; color: #666; font-weight: 500;">Cancel</button></div>`;
+  
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeBatchMoveOverlay(); });
+}
+
+function closeBatchMoveOverlay() {
+  const overlay = document.getElementById('batchMoveOverlay');
+  if (overlay) overlay.remove();
+}
+
+async function confirmBatchMove(visitIds, week) {
+  try {
+    closeBatchMoveOverlay();
+    let moved = 0;
+    for (const id of visitIds) {
+      const v = D.visits.find(x => x.id === id);
+      if (v && v.cal_coach) {
+        await api('POST', `/api/visits/${id}/place`, { coach: v.cal_coach, week });
+        moved++;
+      }
+    }
+    window.modalBatchSelected.clear();
+    await refresh();
+    toast(`Moved ${moved} visit(s) to week of ${formatDatePicker(new Date(week))}`);
+  } catch (e) {
+    uiAlert('Could not move visits: ' + (e.message || 'unknown error'));
+  }
+}
 }
 
 function renderNotesPanel(visit, prep) {
