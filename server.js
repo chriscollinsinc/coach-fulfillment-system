@@ -781,6 +781,15 @@ route('GET', /^\/api\/coaches\/inactive$/, ['admin','lead'], (req, res, m, body,
     .filter(c => canEditTeam(user, c.team));
   send(res, 200, rows);
 });
+route('POST', /^\/api\/coaches\/([\w-]+)\/reactivate$/, ['admin','lead'], (req, res, m, body, user) => {
+  const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
+  if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  if(c.active) return err(res, 400, 'Coach is already active');
+  db.prepare('UPDATE coaches SET active=1 WHERE id=?').run(c.id);
+  log(user.email, 'coach.reactivate', { id: c.id, name: c.name, team: c.team });
+  send(res, 200, { ok: true });
+});
+
 /* Permanently delete a coach (only allowed for inactive/former coaches) */
 route('DELETE', /^\/api\/coaches\/([\w-]+)\/permanent$/, ['admin','lead'], (req, res, m, body, user) => {
   const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');

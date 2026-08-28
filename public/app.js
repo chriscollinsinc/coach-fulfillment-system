@@ -776,6 +776,12 @@ async function refresh(){
   } catch(e) {
     window.allCoachesForAssignment = D.coaches;
   }
+  // Load former (inactive) coaches for the global calendar view
+  try {
+    D.formerCoaches = await api('GET', '/api/coaches/inactive');
+  } catch(e) {
+    D.formerCoaches = [];
+  }
   render();
 }
 const coach = id => D.coaches.find(c=>c.id===id);
@@ -1549,8 +1555,29 @@ function board(){
     html+=section(`Coming up · ${MO[nextM[1]]}`,nextMo);
     if(!overdue.length&&!thisMo.length&&!nextMo.length) html+=`<h2>To schedule</h2><p class="small">Nothing waiting for ${global?'these teams':'Team '+t} in this window. 🎉</p>`;
   }
+
+  /* Former Coaches table — admin/lead only, visible on global calendar */
+  if(global && canEditWeeks() && D.formerCoaches && D.formerCoaches.length > 0){
+    const formerByTeam = D.formerCoaches.filter(c=>myTeams().includes(c.team));
+    if(formerByTeam.length > 0){
+      html+=`<div class="panel"><h2>Former Coaches</h2>
+        <p class="small" style="margin-bottom:10px">Reactivate a coach to make them available for scheduling again.</p>
+        <table><tr><th>Name</th><th>Team</th><th>Last active</th><th></th></tr>`;
+      for(const c of formerByTeam.sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))){
+        html+=`<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.team)}</td><td class="small">${c.start_date?fmt(c.start_date):'—'}</td>
+          <td><button class="btn tiny primary" onclick="reactivateCoach('${c.id}')">Reactivate</button></td></tr>`;
+      }
+      html+=`</table></div>`;
+    }
+  }
+
   html+=`</div></div>`;
   return html;
+}
+async function reactivateCoach(coachId){
+  if(!confirm('Reactivate this coach? They\'ll be available for scheduling again.')) return;
+  await api('POST',`/api/coaches/${coachId}/reactivate`);
+  await refresh();
 }
 /* Results rail for the calendar client search. Lists every matching visit across the
  * last ~2 years + all future, chronological, color-coded by status; clicking one jumps
