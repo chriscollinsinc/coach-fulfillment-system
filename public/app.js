@@ -592,7 +592,7 @@ function renderNotesPanel(visit, prep) {
   let html = `
     <div style="display: flex; justify-content: space-between; align-items: center;
                 margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
-      <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">Visit Notes</div>
+      <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">Visit Notes — ${esc(visit.program)} ${esc(visit.cycle)}</div>
       <button onclick="openClientProfile(${visit.client_id})"
               style="padding: 6px 12px; background: none; border: 1px solid #ddd;
                       border-radius: 4px; font-size: 12px; cursor: pointer;
