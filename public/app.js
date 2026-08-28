@@ -592,7 +592,7 @@ function renderNotesPanel(visit, prep) {
   let html = `
     <div style="display: flex; justify-content: space-between; align-items: center;
                 margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
-      <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">Visit Notes — ${esc(visit.program)} ${esc(visit.cycle)}</div>
+      <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">Visit Notes</div>
       <button onclick="openClientProfile(${visit.client_id})"
               style="padding: 6px 12px; background: none; border: 1px solid #ddd;
                       border-radius: 4px; font-size: 12px; cursor: pointer;
@@ -2717,14 +2717,22 @@ function clientProfileView(data, notes){
   </div>`;
 
   html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Generate next cycle</button>`:''}
-    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
+    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled on</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
-      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td>
-        <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
-    }).join('') +
+      const actionButtons = (() => {
+        if (v.completed) return `${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}`;
+        const btns = [];
+        if (!v.cal_week) btns.push(`<button class="btn tiny primary" onclick="scheduleVisitModal(${v.id})">Schedule now</button>`);
+        btns.push(`<button class="btn tiny" onclick="openVisitModal(${v.id})">Complete</button>`);
+        if (canEdit()) btns.push(`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>`);
+        return btns.join('');
+      })();
+      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
+        <td class="mono">${v.cal_week ? fmtW(v.cal_week) : "—"}</td><td>${pill}</td><td style="white-space: nowrap;">${actionButtons}</td></tr>`;
+    }).join("") +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
   html += `<div class="panel"><h2>Notes</h2>
