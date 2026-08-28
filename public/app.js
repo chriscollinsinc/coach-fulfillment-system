@@ -759,6 +759,98 @@ function renderNotesPanel(visit, prep) {
   panel.innerHTML = html;
 }
 
+async function openVisitNotes(visitId) {
+  try {
+    const prep = await api('GET', `/api/visits/${visitId}/prep`);
+    const visit = await api('GET', `/api/visits/${visitId}`);
+    
+    if (!prep || !prep.lastNotes) {
+      uiAlert('No notes found for this visit');
+      return;
+    }
+
+    const notes = prep.lastNotes[0];
+    
+    // Create notes modal
+    const overlay = document.createElement('div');
+    overlay.id = 'visitNotesOverlay';
+    overlay.style.cssText = `
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.3); display: flex; align-items: center;
+      justify-content: center; z-index: 10002;
+    `;
+
+    let contentHtml = `
+      <div style="margin-bottom: 16px; font-size: 12px; color: #666;">
+        ${notes.visit_num || 'Visit'} · ${fmt(notes.created_at || notes.date)}
+      </div>
+    `;
+
+    if (notes.wins || notes.issues || notes.focus || notes.body) {
+      if (notes.wins) {
+        contentHtml += `<div style="margin-bottom: 12px;">
+          <div style="font-weight: 600; color: #2e7d32; margin-bottom: 4px;">✓ Wins</div>
+          <div style="color: #333; line-height: 1.4; font-size: 12px;">${esc(notes.wins)}</div>
+        </div>`;
+      }
+      
+      if (notes.issues) {
+        contentHtml += `<div style="margin-bottom: 12px;">
+          <div style="font-weight: 600; color: #c71c1c; margin-bottom: 4px;">⚠ Issues / Roadblocks</div>
+          <div style="color: #333; line-height: 1.4; font-size: 12px;">${esc(notes.issues)}</div>
+        </div>`;
+      }
+      
+      if (notes.focus) {
+        contentHtml += `<div style="margin-bottom: 12px;">
+          <div style="font-weight: 600; color: #1d4f91; margin-bottom: 4px;">→ Focus for Next Visit</div>
+          <div style="color: #333; line-height: 1.4; font-size: 12px;">${esc(notes.focus)}</div>
+        </div>`;
+      }
+      
+      if (notes.body) {
+        contentHtml += `<div>
+          <div style="font-weight: 600; color: #666; margin-bottom: 4px;">Notes</div>
+          <div style="color: #333; line-height: 1.4; font-size: 12px; white-space: pre-wrap;">${esc(notes.body)}</div>
+        </div>`;
+      }
+    } else {
+      contentHtml += '<p style="color: #999; font-size: 12px;">No notes recorded for this visit.</p>';
+    }
+
+    overlay.innerHTML = `
+      <div style="background: #fff; border-radius: 12px; padding: 28px; width: 480px;
+                  max-height: 80vh; overflow-y: auto;
+                  box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+        <div style="display: flex; justify-content: space-between; align-items: center;
+                    margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
+          <div>
+            <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">${esc(visit.client)}</div>
+            <div style="font-size: 12px; color: #666; margin-top: 4px;">${visit.program} · Cycle ${visit.cycle}</div>
+          </div>
+          <button onclick="document.getElementById('visitNotesOverlay').remove()"
+                  style="background: none; border: none; font-size: 24px; cursor: pointer; color: #999;">×</button>
+        </div>
+        
+        <div>${contentHtml}</div>
+        
+        <button onclick="document.getElementById('visitNotesOverlay').remove()"
+                style="width: 100%; padding: 10px; margin-top: 20px; background: #1d4f91; color: #fff;
+                        border: none; border-radius: 6px; font-size: 13px; cursor: pointer;
+                        font-weight: 600;">Close</button>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.remove();
+    });
+  } catch (e) {
+    uiAlert('Could not load visit notes: ' + e.message);
+  }
+}
+
+
 
 async function submitVisitNotes(visitId) {
   const val = (id) => (($('#' + id) || {}).value || '').trim();
@@ -2816,13 +2908,15 @@ function clientProfileView(data, notes){
   </div>`;
 
   html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Generate next cycle</button>`:''}
-    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
+    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
-      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td>
-        <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
+      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
+        <td class="mono" style="font-size:11px">${v.cal_week ? fmtW(v.cal_week) : '—'}</td>
+        <td>${pill}</td>
+        <td style="white-space:nowrap">${v.completed ? `<button class="btn tiny" onclick="openVisitNotes(${v.id})">View notes</button>` : ''} ${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
     }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
