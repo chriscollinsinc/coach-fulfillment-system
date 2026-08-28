@@ -57,8 +57,8 @@ async function openVisitModal(id) {
                 overflow: hidden;">
 
       <!-- HEADER -->
-      <div style="padding: 32px 36px; border-bottom: 1px solid #e5e5e5; display: flex;
-                  align-items: center; justify-content: space-between; background: linear-gradient(to bottom, #fafafa, #fff);
+      <div style="padding: 28px 32px; border-bottom: 1px solid #e5e5e5; display: flex;
+                  align-items: center; justify-content: space-between; background: #fff;
                   flex-shrink: 0;">
         <div>
           <div style="font-size: 20px; font-weight: 700; color: #1a1a1a;">${esc(v.client)}</div>
@@ -74,13 +74,13 @@ async function openVisitModal(id) {
       <div style="display: flex; flex: 1; overflow: hidden;">
 
         <!-- LEFT PANEL: VISITS -->
-        <div id="vmVisitsPanel" style="width: 48%; border-right: 1px solid #ececec;
-                    overflow-y: auto; padding: 32px 28px; background: #fafafa;">
+        <div id="vmVisitsPanel" style="width: 48%; border-right: 1px solid #e5e5e5;
+                    overflow-y: auto; padding: 28px 24px; background: #fafafa;">
           <!-- filled by loadVisitData -->
         </div>
 
         <!-- RIGHT PANEL: NOTES -->
-        <div id="vmNotesPanel" style="flex: 1; overflow-y: auto; padding: 32px 36px;
+        <div id="vmNotesPanel" style="flex: 1; overflow-y: auto; padding: 28px 28px;
                   background: #fff; display: flex; flex-direction: column;">
           <!-- filled by loadVisitData -->
         </div>
@@ -116,18 +116,8 @@ async function loadVisitModalData(visitId) {
     const visits = cycleData.visits || [];
     const prep = prevNotes || {};
 
-    // Store current selected visit for click-to-switch
-    window.visitModalState = window.visitModalState || {};
-    window.visitModalState.selectedVisitId = visitId;
-    window.visitModalState.allVisits = visits;
-    window.visitModalState.cycleInfo = cycleData;
-
-    // Calculate cycle progress
-    const completed = visits.filter(x => x.completed).length;
-    const total = visits.length;
-
     // Render visits panel
-    renderVisitsList(visits, v, completed, total);
+    renderVisitsList(visits, v);
 
     // Render notes panel
     renderNotesPanel(v, prep);
@@ -137,69 +127,19 @@ async function loadVisitModalData(visitId) {
   }
 }
 
-async function switchVisitInModal(newVisitId) {
-  const state = window.visitModalState || {};
-  if (!state.allVisits) return;
-  
-  const newVisit = state.allVisits.find(x => x.id === newVisitId);
-  if (!newVisit) return;
-  
-  // Fetch prep data for new visit
-  try {
-    const prep = await api('GET', `/api/visits/${newVisitId}/prep`);
-    state.selectedVisitId = newVisitId;
-    
-    const completed = state.allVisits.filter(x => x.completed).length;
-    const total = state.allVisits.length;
-    
-    renderVisitsList(state.allVisits, newVisit, completed, total);
-    renderNotesPanel(newVisit, prep || {});
-  } catch (e) {
-    uiAlert('Could not load visit: ' + e.message);
-  }
-}
-
-function renderVisitsList(visits, currentVisit, completedCount = 0, totalCount = 0) {
+function renderVisitsList(visits, currentVisit) {
   const panel = document.getElementById('vmVisitsPanel');
   if (!panel) return;
 
   // Group by current vs previous cycle
   const current = visits.filter(v => !v.completed);
   const previous = visits.filter(v => v.completed);
-  
-  const total = current.length + previous.length;
-  const completed = previous.length;
-  const progressPct = total > 0 ? Math.round((completed / total) * 100) : 0;
 
   let html = '';
 
-  // Cycle progress header
-  html += `<div style="margin-bottom: 24px;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-      <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: #999; letter-spacing: 0.5px;">
-        Cycle Progress
-      </div>
-      <div style="font-size: 12px; font-weight: 600; color: #333;">${completed}/${total}</div>
-    </div>
-    <div style="height: 6px; background: #e5e5e5; border-radius: 3px; overflow: hidden;">
-      <div style="height: 100%; background: #2e7d32; width: ${progressPct}%; transition: width 0.3s;"></div>
-    </div>
-    <div style="font-size: 11px; color: #666; margin-top: 6px;">${progressPct}% complete</div>
-  </div>`;
-
-  // Batch selection toolbar (shown if multiple visits)
-  if (current.length > 1) {
-    html += `<div style="margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
-      <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #333;">
-        <input type="checkbox" id="selectAllVisits" onchange="toggleBatchSelect(this.checked)" style="cursor: pointer;">
-        <span>Select for batch actions</span>
-      </label>
-    </div>`;
-  }
-
   // Current cycle
   if (current.length) {
-    html += `<div style="margin-bottom: 32px;">
+    html += `<div style="margin-bottom: 40px;">
       <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
                   color: #999; letter-spacing: 1px; margin-bottom: 16px;">
         Current Cycle (${current.length} visits)
@@ -207,58 +147,47 @@ function renderVisitsList(visits, currentVisit, completedCount = 0, totalCount =
 
     current.forEach((v, idx) => {
       const isCurrent = v.id === currentVisit.id;
-      const isOverdue = v.due && v.due < TODAY && !v.completed;
-      const daysOverdue = isOverdue ? Math.floor((new Date(TODAY) - new Date(v.due)) / (1000*60*60*24)) : 0;
-      
       const statusLabel = v.completed ? 'Completed' :
                          v.cal_week ? 'On calendar' :
-                         isOverdue ? 'Overdue' : 'Needs scheduling';
-      
-      let statusColor = v.completed ? '#2e7d32' :
-                       v.cal_week ? '#2e7d32' :
-                       isOverdue ? '#c71c1c' : '#b8860b';
-      
-      let bgColor = isOverdue ? '#fff5f5' : isCurrent ? '#f0f5fb' : '#fff';
-      let borderColor = isOverdue ? '#ffcccc' : isCurrent ? '#1d4f91' : '#e5e5e5';
-      let borderWidth = isCurrent ? '2px' : '1px';
+                         v.due && v.due < TODAY ? 'Overdue' : 'Needs scheduling';
+      const statusColor = v.completed ? '#2e7d32' :
+                         v.cal_week ? '#2e7d32' :
+                         v.due && v.due < TODAY ? '#c71c1c' : '#b8860b';
+      const bgColor = v.due && v.due < TODAY && !v.completed ? '#fff5f5' : '#fff';
+      const borderColor = v.due && v.due < TODAY && !v.completed ? '#ffcccc' : '#e5e5e5';
 
-      html += `<div onclick="switchVisitInModal(${v.id})" style="background: ${bgColor}; border: ${borderWidth} solid ${borderColor};
-                          border-radius: 10px; padding: 16px; margin-bottom: 12px; cursor: pointer;
-                          transition: all 0.2s; ${isCurrent ? 'box-shadow: 0 0 0 3px rgba(29,79,145,0.1);' : ''}">
-        
-        <!-- Batch checkbox -->
-        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
-          <div style="display: flex; gap: 10px; align-items: center; flex: 1;">
-            <input type="checkbox" class="batchVisitSelect" data-visit-id="${v.id}" style="cursor: pointer;" onchange="updateBatchUI()">
-            <div>
-              <div style="font-size: 13px; font-weight: 700; color: #1a1a1a;">
-                Visit ${idx + 1} of ${current.length}
-              </div>
-              ${isOverdue ? `<div style="font-size: 11px; color: #c71c1c; font-weight: 600; margin-top: 2px;">${daysOverdue} days overdue</div>` : ''}
-            </div>
+      html += `<div style="background: ${bgColor}; border: 1px solid ${borderColor};
+                          border-radius: 8px; padding: 16px; margin-bottom: 12px;
+                          ${isCurrent ? 'box-shadow: 0 0 0 2px #1d4f91;' : ''}">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;
+                    margin-bottom: 12px;">
+          <div style="font-size: 13px; font-weight: 700; color: #1a1a1a;">
+            Visit ${idx + 1} of ${current.length}
           </div>
           <div style="font-size: 11px; padding: 4px 10px; background: ${statusColor}20;
                       color: ${statusColor}; border-radius: 4px; font-weight: 500;">
             ${statusLabel}
           </div>
         </div>
-
-        <!-- Visit details grid -->
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; font-size: 12px;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+                    margin-bottom: 12px; font-size: 12px;">
           <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600; text-transform: uppercase; margin-bottom: 4px;">
-              Due
-            </div>
-            <div style="color: #333; font-weight: 500;">${v.due ? fmt(v.due) : '—'}</div>
-          </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600; text-transform: uppercase; margin-bottom: 4px;">
-              Scheduled
+            <div style="color: #999; font-size: 10px; font-weight: 600;
+                        text-transform: uppercase; margin-bottom: 4px;">
+              Scheduled week
             </div>
             <div style="color: #333; font-weight: 500;">${v.cal_week ? fmtW(v.cal_week) : '—'}</div>
           </div>
           <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600; text-transform: uppercase; margin-bottom: 4px;">
+            <div style="color: #999; font-size: 10px; font-weight: 600;
+                        text-transform: uppercase; margin-bottom: 4px;">
+              Status
+            </div>
+            <div style="color: #333; font-weight: 500;">${statusLabel}</div>
+          </div>
+          <div>
+            <div style="color: #999; font-size: 10px; font-weight: 600;
+                        text-transform: uppercase; margin-bottom: 4px;">
               Coach
             </div>
             <div style="color: #333; font-weight: 500;">
@@ -266,30 +195,24 @@ function renderVisitsList(visits, currentVisit, completedCount = 0, totalCount =
             </div>
           </div>
           <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600; text-transform: uppercase; margin-bottom: 4px;">
+            <div style="color: #999; font-size: 10px; font-weight: 600;
+                        text-transform: uppercase; margin-bottom: 4px;">
               Team
             </div>
             <div style="color: #333; font-weight: 500;">${esc(v.team || '?')}</div>
           </div>
         </div>
-
-        <!-- Action buttons -->
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <button onclick="event.stopPropagation(); submitVisitNotes(${v.id})" 
+        <div style="display: flex; gap: 8px;">
+          <button onclick="closeVisitModal(); openVisitModal(${v.id})"
                   style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
-                          cursor: pointer; transition: all 0.2s;"
-                  onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">Complete</button>
-          ${!v.cal_coach ? `<button onclick="event.stopPropagation(); assignCoachToVisit(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
+                          cursor: pointer;">Complete</button>
+          ${!v.cal_coach ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 600;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
                           border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
-          <button onclick="event.stopPropagation(); openRescheduleUI(${v.id})" 
-                  style="padding: 6px 12px; font-size: 11px; font-weight: 500;
+          ${v.cal_week ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #ddd; background: #fff; border-radius: 4px;
-                          cursor: pointer; color: #333; transition: all 0.2s;"
-                  onmouseover="this.style.background='#f6f6f6'" onmouseout="this.style.background='#fff'">
-            ${v.cal_week ? 'Move' : 'Schedule'}
-          </button>
+                          cursor: pointer; color: #333;">Move</button>` : ''}
         </div>
       </div>`;
     });
@@ -297,7 +220,7 @@ function renderVisitsList(visits, currentVisit, completedCount = 0, totalCount =
     html += '</div>';
   }
 
-  // Previous cycle (completed visits)
+  // Previous cycle
   if (previous.length) {
     html += `<div>
       <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
@@ -307,9 +230,7 @@ function renderVisitsList(visits, currentVisit, completedCount = 0, totalCount =
 
     previous.forEach((v, idx) => {
       html += `<div style="background: #f5f5f5; border: 1px solid #e5e5e5;
-                          border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: 0.7;
-                          cursor: pointer; transition: all 0.2s;" onclick="switchVisitInModal(${v.id})"
-                  onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">
+                          border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: 0.8;">
         <div style="display: flex; justify-content: space-between; align-items: flex-start;
                     margin-bottom: 12px;">
           <div style="font-size: 13px; font-weight: 600; color: #666;">
@@ -320,7 +241,7 @@ function renderVisitsList(visits, currentVisit, completedCount = 0, totalCount =
         </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 12px;">
           <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;">Completed</div>
+            <div style="color: #999; font-size: 10px; font-weight: 600;">Completed date</div>
             <div style="color: #666; font-weight: 500; margin-top: 4px;">
               ${v.completed_date ? fmt(v.completed_date) : fmt(v.cal_week)}
             </div>
@@ -341,352 +262,29 @@ function renderVisitsList(visits, currentVisit, completedCount = 0, totalCount =
   panel.innerHTML = html;
 }
 
-function toggleBatchSelect(checked) {
-  document.querySelectorAll('.batchVisitSelect').forEach(cb => cb.checked = checked);
-  updateBatchUI();
-}
-
-function updateBatchUI() {
-  const selected = Array.from(document.querySelectorAll('.batchVisitSelect:checked')).map(cb => +cb.dataset.visitId);
-  const state = window.visitModalState || {};
-  state.selectedVisits = selected;
-  
-  // Show batch actions if any selected
-  let toolbar = document.getElementById('batchActionsToolbar');
-  if (!toolbar && selected.length > 0) {
-    const notesPanel = document.getElementById('vmNotesPanel');
-    toolbar = document.createElement('div');
-    toolbar.id = 'batchActionsToolbar';
-    toolbar.style.cssText = `
-      position: absolute; top: 32px; right: 36px; background: #1d4f91; color: #fff;
-      padding: 12px 16px; border-radius: 6px; font-size: 12px; font-weight: 600;
-      display: flex; gap: 12px; z-index: 100;
-    `;
-    toolbar.innerHTML = `
-      <span>${selected.length} selected</span>
-      <button onclick="bulkAssignCoach()" style="background: rgba(255,255,255,0.2); border: none; color: #fff;
-              padding: 4px 10px; border-radius: 4px; cursor: pointer; font-weight: 600;">Assign Coach</button>
-      <button onclick="bulkReschedule()" style="background: rgba(255,255,255,0.2); border: none; color: #fff;
-              padding: 4px 10px; border-radius: 4px; cursor: pointer; font-weight: 600;">Move All</button>
-    `;
-    notesPanel.parentElement.insertBefore(toolbar, notesPanel);
-  } else if (toolbar && selected.length === 0) {
-    toolbar.remove();
-  }
-}
-
-async function openRescheduleUI(visitId) {
-  event.stopPropagation();
-  const v = D.visits.find(x => x.id === visitId);
-  if (!v) return;
-  
-  // Generate week options
-  const weeks = [];
-  const start = new Date(TODAY);
-  for (let i = 0; i < 12; i++) {
-    const weekStart = new Date(start);
-    const weekEnd = new Date(start);
-    weekEnd.setDate(weekEnd.getDate() + 6);
-    const wk = fmtW(start.toISOString().slice(0,10));
-    weeks.push({
-      week: wk,
-      display: wk,
-      startDate: start.toISOString().slice(0,10),
-      label: `${fmtMMM(weekStart)} ${weekStart.getDate()} - ${fmtMMM(weekEnd)} ${weekEnd.getDate()}`
-    });
-    start.setDate(start.getDate() + 7);
-  }
-
-  // Create reschedule modal overlay
-  const overlay = document.createElement('div');
-  overlay.id = 'rescheduleOverlay';
-  overlay.style.cssText = `
-    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.3); display: flex; align-items: center;
-    justify-content: center; z-index: 10001;
-  `;
-
-  overlay.innerHTML = `
-    <div style="background: #fff; border-radius: 12px; padding: 28px; width: 480px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-height: 70vh; overflow-y: auto;">
-      <div style="font-size: 16px; font-weight: 700; color: #1a1a1a; margin-bottom: 4px;">
-        Schedule Visit
-      </div>
-      <div style="font-size: 12px; color: #666; margin-bottom: 20px;">
-        ${esc(v.client)} · Select a week
-      </div>
-
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px;">
-        ${weeks.map((w, i) => `
-          <button onclick="confirmReschedule(${visitId}, '${w.week}')"
-                  style="padding: 12px; border: 1px solid #e5e5e5; background: #fff;
-                          border-radius: 6px; cursor: pointer; text-align: left;
-                          transition: all 0.2s; font-size: 11px; color: #333;"
-                  onmouseover="this.style.borderColor='#1d4f91'; this.style.background='#f0f5fb';"
-                  onmouseout="this.style.borderColor='#e5e5e5'; this.style.background='#fff';">
-            <div style="font-weight: 600; color: #1d4f91; margin-bottom: 3px;">${w.display}</div>
-            <div style="font-size: 10px; color: #999;">${w.label}</div>
-          </button>
-        `).join('')}
-      </div>
-
-      <div style="display: flex; gap: 10px;">
-        <button onclick="document.getElementById('rescheduleOverlay').remove()"
-                style="flex: 1; padding: 10px; background: none; border: 1px solid #ddd;
-                        border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 600;
-                        color: #333;">Cancel</button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) overlay.remove();
-  });
-}
-
-async function confirmReschedule(visitId, week) {
-  try {
-    await api('POST', `/api/visits/${visitId}/place`, { cal_week: week });
-    document.getElementById('rescheduleOverlay').remove();
-    await refresh();
-    await loadVisitModalData(visitId);
-    toast('Visit rescheduled');
-  } catch (e) {
-    uiAlert(e.message || 'Could not reschedule');
-  }
-}
-
-function fmtMMM(date) {
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return months[date.getMonth()];
-}
-
-async function bulkAssignCoach() {
-  const state = window.visitModalState || {};
-  const selected = state.selectedVisits || [];
-  if (!selected.length) return;
-  
-  const coaches = D.coaches || [];
-  const coachList = coaches.map((c, i) => `${i+1}. ${c.name}`).join('\n');
-  const coachNum = window.prompt(`Assign to which coach?\n\n${coachList}\n\nEnter number:`);
-  if (!coachNum) return;
-  
-  const coach = coaches[+coachNum - 1];
-  if (!coach) {
-    uiAlert('Invalid selection');
-    return;
-  }
-  
-  try {
-    for (const vid of selected) {
-      await api('POST', `/api/visits/${vid}/assign-coach`, { coach_id: coach.id });
-    }
-    await refresh();
-    await loadVisitModalData(state.selectedVisitId || selected[0]);
-    toast(`Assigned ${selected.length} visits to ${coach.name}`);
-  } catch (e) {
-    uiAlert(e.message || 'Could not assign coaches');
-  }
-}
-
-async function bulkReschedule() {
-  const state = window.visitModalState || {};
-  const selected = state.selectedVisits || [];
-  if (!selected.length) return;
-  
-  const weeks = [];
-  const start = new Date(TODAY);
-  for (let i = 0; i < 12; i++) {
-    const wk = fmtW(start.toISOString().slice(0,10));
-    weeks.push(wk);
-    start.setDate(start.getDate() + 7);
-  }
-  
-  const selected_week = window.prompt(`Move all to which week?\n\n${weeks.join('\n')}`);
-  if (!selected_week || !weeks.includes(selected_week)) return;
-  
-  try {
-    for (const vid of selected) {
-      await api('POST', `/api/visits/${vid}/place`, { cal_week: selected_week });
-    }
-    await refresh();
-    await loadVisitModalData(state.selectedVisitId || selected[0]);
-    toast(`Moved ${selected.length} visits`);
-  } catch (e) {
-    uiAlert(e.message || 'Could not reschedule');
-  }
-}
-
-async function openNotesHistory(clientId) {
-  try {
-    const response = await api('GET', `/api/clients/${clientId}/notes-history`);
-    const notes = response.notes || [];
-    
-    if (!notes.length) {
-      uiAlert('No notes found for this client');
-      return;
-    }
-
-    // Create notes history modal
-    const overlay = document.createElement('div');
-    overlay.id = 'notesHistoryOverlay';
-    overlay.style.cssText = `
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      background: rgba(0,0,0,0.3); display: flex; align-items: center;
-      justify-content: center; z-index: 10002;
-    `;
-
-    let notesHtml = notes.map(n => `
-      <div style="margin-bottom: 16px; padding: 14px; background: #f9f9f9;
-                  border: 1px solid #e5e5e5; border-radius: 6px;">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
-          <div style="font-size: 11px; font-weight: 600; color: #999;">
-            ${fmt(n.note_date || n.date)} · Visit ${n.visit_num || '?'}
-          </div>
-          ${n.author_name ? `<div style="font-size: 10px; color: #bbb;">${esc(n.author_name)}</div>` : ''}
-        </div>
-        
-        ${n.wins ? `<div style="margin-bottom: 6px;">
-          <div style="font-size: 10px; font-weight: 600; color: #2e7d32;">✓ Wins</div>
-          <div style="font-size: 11px; color: #333; line-height: 1.4;">${esc(n.wins)}</div>
-        </div>` : ''}
-        
-        ${n.issues ? `<div style="margin-bottom: 6px;">
-          <div style="font-size: 10px; font-weight: 600; color: #c71c1c;">⚠ Issues</div>
-          <div style="font-size: 11px; color: #333; line-height: 1.4;">${esc(n.issues)}</div>
-        </div>` : ''}
-        
-        ${n.focus ? `<div style="margin-bottom: 6px;">
-          <div style="font-size: 10px; font-weight: 600; color: #1d4f91;">→ Focus</div>
-          <div style="font-size: 11px; color: #333; line-height: 1.4;">${esc(n.focus)}</div>
-        </div>` : ''}
-        
-        ${n.body ? `<div>
-          <div style="font-size: 10px; font-weight: 600; color: #666;">Notes</div>
-          <div style="font-size: 11px; color: #333; line-height: 1.4;">${esc(n.body)}</div>
-        </div>` : ''}
-      </div>
-    `).join('');
-
-    overlay.innerHTML = `
-      <div style="background: #fff; border-radius: 12px; padding: 28px; width: 520px;
-                  max-height: 80vh; overflow-y: auto;
-                  box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
-        <div style="display: flex; justify-content: space-between; align-items: center;
-                    margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
-          <div>
-            <div style="font-size: 16px; font-weight: 700; color: #1a1a1a;">Notes History</div>
-            <div style="font-size: 12px; color: #666; margin-top: 4px;">${notes.length} note(s) on file</div>
-          </div>
-          <button onclick="document.getElementById('notesHistoryOverlay').remove()"
-                  style="background: none; border: none; font-size: 24px; cursor: pointer; color: #999;">×</button>
-        </div>
-        
-        <div style="margin-bottom: 20px;">
-          ${notesHtml}
-        </div>
-        
-        <button onclick="document.getElementById('notesHistoryOverlay').remove()"
-                style="width: 100%; padding: 10px; background: #1d4f91; color: #fff;
-                        border: none; border-radius: 6px; font-size: 13px; cursor: pointer;
-                        font-weight: 600;">Close</button>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) overlay.remove();
-    });
-  } catch (e) {
-    uiAlert('Could not load notes history: ' + e.message);
-  }
-}
-
-
-
 function renderNotesPanel(visit, prep) {
   const panel = document.getElementById('vmNotesPanel');
   if (!panel) return;
 
   const lastNotes = (prep.lastNotes || [])[0];
-  const openCommitments = prep.openCommitments || [];
 
   let html = `
     <div style="display: flex; justify-content: space-between; align-items: center;
                 margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
       <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">Visit Notes</div>
-      <div style="display: flex; gap: 8px;">
-        <button onclick="openNotesHistory(${visit.client_id})"
-                style="padding: 6px 12px; background: none; border: 1px solid #ddd;
-                        border-radius: 4px; font-size: 12px; cursor: pointer;
-                        color: #666; font-weight: 500;">📋 History</button>
-        <button onclick="openClientProfile(${visit.client_id})"
-                style="padding: 6px 12px; background: none; border: 1px solid #ddd;
-                        border-radius: 4px; font-size: 12px; cursor: pointer;
-                        color: #1d4f91; font-weight: 600;">Profile →</button>
-      </div>
+      <button onclick="openClientProfile(${visit.client_id})"
+              style="padding: 6px 12px; background: none; border: 1px solid #ddd;
+                      border-radius: 4px; font-size: 12px; cursor: pointer;
+                      color: #1d4f91; font-weight: 600;">See full profile →</button>
     </div>
-  `;
 
-  // PREVIOUS VISIT CONTEXT — shown FIRST so coaches see context before writing
-  if (lastNotes) {
-    html += `
-      <div style="margin-bottom: 24px; padding: 16px; background: #f0f5fb; border: 1px solid #dde8f7;
-                  border-radius: 8px; border-left: 4px solid #1d4f91;">
-        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
-                    color: #1d4f91; letter-spacing: 0.5px; margin-bottom: 12px;">
-          📋 Last Visit Context
-        </div>
-        
-        <div style="font-size: 11px; color: #666; margin-bottom: 12px;">
-          ${lastNotes.visit_num || 'Previous visit'} · ${fmt(lastNotes.created_at || lastNotes.date)}
-        </div>
-
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px;">
-          ${lastNotes.wins ? `
-            <div>
-              <div style="font-weight: 600; color: #2e7d32; margin-bottom: 4px; font-size: 11px;">✓ Wins</div>
-              <div style="color: #333; line-height: 1.4; font-size: 11px;">${esc(lastNotes.wins)}</div>
-            </div>
-          ` : ''}
-          ${lastNotes.issues ? `
-            <div>
-              <div style="font-weight: 600; color: #c71c1c; margin-bottom: 4px; font-size: 11px;">⚠ Issues</div>
-              <div style="color: #333; line-height: 1.4; font-size: 11px;">${esc(lastNotes.issues)}</div>
-            </div>
-          ` : ''}
-        </div>
-
-        ${lastNotes.focus ? `
-          <div style="margin-bottom: 12px;">
-            <div style="font-weight: 600; color: #1d4f91; margin-bottom: 4px; font-size: 11px;">→ Focus for This Visit</div>
-            <div style="color: #333; line-height: 1.4; font-size: 11px;">${esc(lastNotes.focus)}</div>
-          </div>
-        ` : ''}
-
-        ${openCommitments.length > 0 ? `
-          <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #dde8f7;">
-            <div style="font-weight: 600; color: #b8860b; margin-bottom: 8px; font-size: 11px;">📌 Open Commitments</div>
-            <ul style="margin: 0; padding-left: 20px; font-size: 11px; color: #333; line-height: 1.6;">
-              ${openCommitments.slice(0, 5).map(c => `<li>${esc(typeof c === 'string' ? c : (c.text || c))}</li>`).join('')}
-              ${openCommitments.length > 5 ? `<li style="color: #999; font-style: italic;">+${openCommitments.length - 5} more</li>` : ''}
-            </ul>
-          </div>
-        ` : ''}
-      </div>
-    `;
-  }
-
-  // CURRENT VISIT NOTES — input section
-  html += `
     <div style="margin-bottom: 24px;">
       <!-- WINS -->
       <div style="margin-bottom: 20px;">
         <div style="display: flex; justify-content: space-between; align-items: center;
                     margin-bottom: 8px;">
           <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">✓ Wins</div>
+                      color: #1a1a1a; letter-spacing: 0.5px;">Wins</div>
           <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
                           padding: 2px; font-size: 13px;">✎</button>
         </div>
@@ -701,7 +299,7 @@ function renderNotesPanel(visit, prep) {
         <div style="display: flex; justify-content: space-between; align-items: center;
                     margin-bottom: 8px;">
           <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">⚠ Issues / Roadblocks</div>
+                      color: #1a1a1a; letter-spacing: 0.5px;">Issues / Roadblocks</div>
           <button style="background: none; border: none; color: #c71c1c; cursor: pointer;
                           padding: 2px; font-size: 13px;">✎</button>
         </div>
@@ -716,7 +314,7 @@ function renderNotesPanel(visit, prep) {
         <div style="display: flex; justify-content: space-between; align-items: center;
                     margin-bottom: 8px;">
           <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">→ Focus for Next Visit</div>
+                      color: #1a1a1a; letter-spacing: 0.5px;">Focus for Next Visit</div>
           <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
                           padding: 2px; font-size: 13px;">✎</button>
         </div>
@@ -731,7 +329,7 @@ function renderNotesPanel(visit, prep) {
         <div style="display: flex; justify-content: space-between; align-items: center;
                     margin-bottom: 8px;">
           <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">📌 New Commitments</div>
+                      color: #1a1a1a; letter-spacing: 0.5px;">New Commitments</div>
           <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
                           padding: 2px; font-size: 13px;">✎</button>
         </div>
@@ -742,6 +340,36 @@ function renderNotesPanel(visit, prep) {
       </div>
     </div>
   `;
+
+  // Previous visit reference
+  if (lastNotes) {
+    html += `
+      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e5e5;">
+        <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
+                    color: #999; letter-spacing: 0.5px; margin-bottom: 10px;">
+          Previous Visit (reference)
+        </div>
+        <div style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 6px;
+                    padding: 12px; font-size: 11px;">
+          <div style="color: #999; margin-bottom: 8px;">
+            ${lastNotes.visit_num || 'Previous visit'} · ${fmt(lastNotes.created_at || lastNotes.date)}
+          </div>
+          ${lastNotes.wins ? `<div style="margin-bottom: 8px;">
+            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Wins</div>
+            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.wins)}</div>
+          </div>` : ''}
+          ${lastNotes.issues ? `<div style="margin-bottom: 8px;">
+            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Issues / Roadblocks</div>
+            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.issues)}</div>
+          </div>` : ''}
+          ${lastNotes.focus ? `<div>
+            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Focus for Next Visit</div>
+            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.focus)}</div>
+          </div>` : ''}
+        </div>
+      </div>
+    `;
+  }
 
   // Action buttons
   html += `
@@ -758,99 +386,6 @@ function renderNotesPanel(visit, prep) {
 
   panel.innerHTML = html;
 }
-
-async function openVisitNotes(visitId) {
-  try {
-    const prep = await api('GET', `/api/visits/${visitId}/prep`);
-    const visit = await api('GET', `/api/visits/${visitId}`);
-    
-    if (!prep || !prep.lastNotes) {
-      uiAlert('No notes found for this visit');
-      return;
-    }
-
-    const notes = prep.lastNotes[0];
-    
-    // Create notes modal
-    const overlay = document.createElement('div');
-    overlay.id = 'visitNotesOverlay';
-    overlay.style.cssText = `
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      background: rgba(0,0,0,0.3); display: flex; align-items: center;
-      justify-content: center; z-index: 10002;
-    `;
-
-    let contentHtml = `
-      <div style="margin-bottom: 16px; font-size: 12px; color: #666;">
-        ${notes.visit_num || 'Visit'} · ${fmt(notes.created_at || notes.date)}
-      </div>
-    `;
-
-    if (notes.wins || notes.issues || notes.focus || notes.body) {
-      if (notes.wins) {
-        contentHtml += `<div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; color: #2e7d32; margin-bottom: 4px;">✓ Wins</div>
-          <div style="color: #333; line-height: 1.4; font-size: 12px;">${esc(notes.wins)}</div>
-        </div>`;
-      }
-      
-      if (notes.issues) {
-        contentHtml += `<div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; color: #c71c1c; margin-bottom: 4px;">⚠ Issues / Roadblocks</div>
-          <div style="color: #333; line-height: 1.4; font-size: 12px;">${esc(notes.issues)}</div>
-        </div>`;
-      }
-      
-      if (notes.focus) {
-        contentHtml += `<div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; color: #1d4f91; margin-bottom: 4px;">→ Focus for Next Visit</div>
-          <div style="color: #333; line-height: 1.4; font-size: 12px;">${esc(notes.focus)}</div>
-        </div>`;
-      }
-      
-      if (notes.body) {
-        contentHtml += `<div>
-          <div style="font-weight: 600; color: #666; margin-bottom: 4px;">Notes</div>
-          <div style="color: #333; line-height: 1.4; font-size: 12px; white-space: pre-wrap;">${esc(notes.body)}</div>
-        </div>`;
-      }
-    } else {
-      contentHtml += '<p style="color: #999; font-size: 12px;">No notes recorded for this visit.</p>';
-    }
-
-    overlay.innerHTML = `
-      <div style="background: #fff; border-radius: 12px; padding: 28px; width: 480px;
-                  max-height: 80vh; overflow-y: auto;
-                  box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
-        <div style="display: flex; justify-content: space-between; align-items: center;
-                    margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
-          <div>
-            <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">${esc(visit.client)}</div>
-            <div style="font-size: 12px; color: #666; margin-top: 4px;">${visit.program} · Cycle ${visit.cycle}</div>
-          </div>
-          <button onclick="document.getElementById('visitNotesOverlay').remove()"
-                  style="background: none; border: none; font-size: 24px; cursor: pointer; color: #999;">×</button>
-        </div>
-        
-        <div>${contentHtml}</div>
-        
-        <button onclick="document.getElementById('visitNotesOverlay').remove()"
-                style="width: 100%; padding: 10px; margin-top: 20px; background: #1d4f91; color: #fff;
-                        border: none; border-radius: 6px; font-size: 13px; cursor: pointer;
-                        font-weight: 600;">Close</button>
-      </div>
-    `;
-
-    document.body.appendChild(overlay);
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) overlay.remove();
-    });
-  } catch (e) {
-    uiAlert('Could not load visit notes: ' + e.message);
-  }
-}
-
-
 
 async function submitVisitNotes(visitId) {
   const val = (id) => (($('#' + id) || {}).value || '').trim();
@@ -871,165 +406,6 @@ async function submitVisitNotes(visitId) {
     toast('Visit marked complete');
   } catch (e) {
     uiAlert(e.message || 'Could not complete visit');
-  }
-}
-
-
-async function assignCoachToVisit(visitId) {
-  const v = D.visits.find(x => x.id === visitId);
-  if (!v) return;
-  
-  const coaches = D.coaches || [];
-  if (!coaches.length) {
-    uiAlert('No coaches available');
-    return;
-  }
-
-  // Load historical coaches if available
-  let pastCoaches = [];
-  try {
-    if (v.client_id) {
-      const hist = await api('GET', `/api/clients/${v.client_id}/historical-coaches`);
-      pastCoaches = hist.pastCoaches || [];
-    }
-  } catch (e) {
-    // silently fail if endpoint not available yet
-  }
-
-  // Create coach selector modal overlay
-  const overlay = document.createElement('div');
-  overlay.id = 'coachSelectorOverlay';
-  overlay.style.cssText = `
-    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.3); display: flex; align-items: center;
-    justify-content: center; z-index: 10001;
-  `;
-
-  let historyHtml = '';
-  if (pastCoaches.length) {
-    historyHtml = `
-      <div style="margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
-        <label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #999; margin-bottom: 10px;">Past Coaches</label>
-        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-          ${pastCoaches.slice(0, 5).map(pc => `
-            <button onclick="assignCoachAndClose(${visitId}, ${pc.coach_id || 'null'})"
-                    style="padding: 6px 12px; border: 1px solid #1d4f91; background: #fff;
-                            color: #1d4f91; border-radius: 6px; font-size: 12px; cursor: pointer;
-                            font-weight: 500;">
-              ${esc(pc.coach_name || 'Unknown')}
-            </button>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-
-  overlay.innerHTML = `
-    <div style="background: #fff; border-radius: 12px; padding: 28px; width: 420px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-height: 80vh; overflow-y: auto;">
-      <div style="font-size: 16px; font-weight: 700; color: #1a1a1a; margin-bottom: 4px;">
-        Assign Coach to ${esc(v.client)}
-      </div>
-      <div style="font-size: 12px; color: #666; margin-bottom: 20px;">
-        Select from available coaches, past relationships, or enter manually
-      </div>
-
-      ${historyHtml}
-
-      <div style="margin-bottom: 20px;">
-        ${generateCoachSelectorHTML('coachSelect', true)}
-      </div>
-
-      <div style="display: flex; gap: 10px;">
-        <button onclick="document.getElementById('coachSelectorOverlay').remove()"
-                style="flex: 1; padding: 10px; background: none; border: 1px solid #ddd;
-                        border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 600;
-                        color: #333;">Cancel</button>
-        <button onclick="confirmCoachSelection(${visitId})"
-                style="flex: 1; padding: 10px; background: #1d4f91; color: #fff;
-                        border: none; border-radius: 6px; font-size: 13px; cursor: pointer;
-                        font-weight: 600;">Assign</button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) overlay.remove();
-  });
-}
-
-async function assignCoachAndClose(visitId, coachId) {
-  if (!coachId) return;
-  try {
-    await api('POST', `/api/visits/${visitId}/assign-coach`, { coach_id: coachId });
-    document.getElementById('coachSelectorOverlay').remove();
-    closeVisitModal();
-    await refresh();
-    const c = D.coaches.find(x => x.id === coachId);
-    toast(`Coach assigned: ${c?.name || 'Unknown'}`);
-  } catch (e) {
-    uiAlert(e.message || 'Could not assign coach');
-  }
-}
-
-/* Generate coach selector dropdown with active and former coaches */
-function generateCoachSelectorHTML(selectId = 'coachSelect', includeLabel = true) {
-  const allCoaches = window.allCoachesForAssignment || D.coaches || [];
-  const activeCoaches = allCoaches.filter(c => c.active !== 0);
-  const inactiveCoaches = allCoaches.filter(c => c.active === 0);
-  
-  let html = '';
-  if(includeLabel) {
-    html += `<label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; color: #999; margin-bottom: 8px;">Select Coach</label>`;
-  }
-  
-  html += `<select id="${selectId}" style="width: 100%; padding: 10px 12px; border: 1px solid #e5e5e5; border-radius: 6px; font-size: 13px; color: #333; background: #fff;">
-    <option value="">— Select a coach —</option>`;
-  
-  // Add active coaches
-  activeCoaches.forEach(c => {
-    html += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
-  });
-  
-  // Add former coaches in optgroup
-  if(inactiveCoaches.length > 0) {
-    html += `<optgroup label="Former coaches">`;
-    inactiveCoaches.forEach(c => {
-      html += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
-    });
-    html += `</optgroup>`;
-  }
-  
-  html += `</select>`;
-  return html;
-}
-
-async function confirmCoachSelection(visitId) {
-  const coachId = ($('#coachSelect') || {}).value || '';
-
-  if (!coachId) {
-    uiAlert('Please select a coach');
-    return;
-  }
-
-  const allCoaches = window.allCoachesForAssignment || D.coaches || [];
-  const c = allCoaches.find(x => x.id === coachId);
-  
-  if (!c) {
-    uiAlert('Coach not found');
-    return;
-  }
-
-  try {
-    await api('POST', `/api/visits/${visitId}/assign-coach`, { coach_id: c.id });
-    document.getElementById('coachSelectorOverlay').remove();
-    closeVisitModal();
-    await refresh();
-    toast(`Coach assigned: ${c.name}`);
-  } catch (e) {
-    uiAlert(e.message || 'Could not assign coach');
   }
 }
 
@@ -2380,27 +1756,8 @@ async function loadPending(){
   }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
 }
 function coachOptsFor(team){
-  const allCoaches = window.allCoachesForAssignment || D.coaches || [];
-  const activeList = allCoaches.filter(c => c.active !== 0 && (!team || c.team === team));
-  const inactiveList = allCoaches.filter(c => c.active === 0 && (!team || c.team === team));
-  
-  let html = `<option value="">— select —</option>`;
-  
-  // Add active coaches
-  activeList.forEach(c => {
-    html += `<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`;
-  });
-  
-  // Add former coaches in optgroup
-  if(inactiveList.length > 0) {
-    html += `<optgroup label="Former coaches">`;
-    inactiveList.forEach(c => {
-      html += `<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`;
-    });
-    html += `</optgroup>`;
-  }
-  
-  return html;
+  const list = D.coaches.filter(c=>!team||c.team===team);
+  return `<option value="">— select —</option>` + list.map(c=>`<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`).join('');
 }
 function assignPendingDlg(id, holdId){
   const r = (st.pendingList||[]).find(x=>x.id===id); if(!r) return;
@@ -2963,15 +2320,13 @@ function clientProfileView(data, notes){
   </div>`;
 
   html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Generate next cycle</button>`:''}
-    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled</th><th>Status</th><th></th></tr>` +
+    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
-      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
-        <td class="mono" style="font-size:11px">${v.cal_week ? fmtW(v.cal_week) : '—'}</td>
-        <td>${pill}</td>
-        <td style="white-space:nowrap">${v.completed ? `<button class="btn tiny" onclick="openVisitNotes(${v.id})">View notes</button>` : ''} ${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
+      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td>
+        <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
     }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
@@ -3488,10 +2843,20 @@ async function loadFormerCoaches(){
   try{
     const rows = await api('GET','/api/coaches/inactive');
     $('#formerCoachesOut').innerHTML = rows.length ?
-      `<table><tr><th>Coach</th><th>Team</th></tr>` +
-      rows.map(c=>`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a></td><td>${esc(c.team)}</td></tr>`).join('') +
+      `<table><tr><th>Coach</th><th>Team</th><th></th></tr>` +
+      rows.map(c=>`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a></td><td>${esc(c.team)}</td><td><button class="btn tiny danger" onclick="deleteCoachPermanently('${c.id}','${esc(c.name)}')">Delete permanently</button></td></tr>`).join('') +
       `</table>` : `<p>None.</p>`;
   }catch(e){ $('#formerCoachesOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function deleteCoachPermanently(id, name){
+  if(!confirm(`Are you sure you want to permanently delete ${name}? This cannot be undone. All historical data about visits they completed will be preserved, but their profile will be removed from the system.`)) return;
+  try{
+    await api('DELETE','/api/coaches/'+id+'/permanent');
+    uiAlert(`${name} has been permanently deleted.`);
+    loadFormerCoaches();
+  }catch(e){
+    uiAlert('Error: ' + e.message);
+  }
 }
 async function loadCancelledContracts(){
   try{

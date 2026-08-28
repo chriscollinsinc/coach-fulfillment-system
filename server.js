@@ -513,43 +513,6 @@ route('GET', /^\/api\/visits\/(\d+)$/, ['admin','lead','sales','coach'], (req, r
   send(res, 200, v);
 });
 /* Visit cycle context: all visits in the same contract/cycle for the modal. */
-/* Historical coaches for a client — helps assign coaches from past relationships */
-route('GET', /^\/api\/clients\/(\d+)\/historical-coaches$/, ['admin','lead','sales','coach'], (req, res, m) => {
-  const clientId = m[1];
-  const historicalVisits = db.prepare(`
-    SELECT DISTINCT cal_coach, manual_coach_name, completed_date, team
-    FROM visits
-    WHERE client_id=? AND (cal_coach IS NOT NULL OR manual_coach_name IS NOT NULL)
-    ORDER BY completed_date DESC NULLS LAST
-    LIMIT 20
-  `).all(clientId);
-  
-  const pastCoaches = historicalVisits.map(v => ({
-    coach_id: v.cal_coach,
-    coach_name: v.manual_coach_name || (v.cal_coach ? D.coaches.find(c => c.id === v.cal_coach)?.name : null),
-    last_visit: v.completed_date,
-    team: v.team
-  })).filter(c => c.coach_id || c.coach_name);
-  
-  send(res, 200, { pastCoaches });
-});
-/* Notes history for a client — all past notes for context/search */
-route('GET', /^\/api\/clients\/(\d+)\/notes-history$/, ['admin','lead','sales','coach'], (req, res, m) => {
-  const clientId = m[1];
-  const notes = db.prepare(`
-    SELECT n.id, n.note_date, n.wins, n.issues, n.focus, n.body, n.author_name,
-           CASE WHEN v.id IS NOT NULL THEN 'Visit ' || v.cycle ELSE NULL END as visit_num
-    FROM client_notes n
-    LEFT JOIN visits v ON v.id=n.visit_id
-    WHERE n.client_id=?
-    ORDER BY n.note_date DESC, n.id DESC
-    LIMIT 100
-  `).all(clientId);
-  
-  send(res, 200, { notes });
-});
-
-
 route('GET', /^\/api\/visits\/(\d+)\/cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   const visits = v.contract_id
@@ -580,18 +543,6 @@ route('POST', /^\/api\/admin\/confirm-completed$/, ['admin','lead'], (req, res, 
   log(user.email, 'admin.confirm_completed_bulk', { requested: ids.length, completed, skipped });
   send(res, 200, { ok:true, completed, skipped });
 });
-route('POST', /^\/api\/visits\/(\d+)\/assign-coach$/, ['admin','lead'], (req, res, m, body, user) => {
-  const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
-  if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
-  const coachId = body && body.coach_id ? +body.coach_id : null;
-  if(!coachId) return err(res, 400, 'coach_id required');
-  const c = D.coaches.find(x => x.id === coachId);
-  if(!c) return err(res, 404, 'Coach not found');
-  db.prepare('UPDATE visits SET cal_coach=? WHERE id=?').run(coachId, v.id);
-  log(user.email, 'visit.assign_coach', { id: v.id, client: v.client, coach_id: coachId, coach_name: c.name });
-  send(res, 200, { ok:true });
-});
-
 route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin','lead'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
@@ -823,6 +774,21 @@ route('GET', /^\/api\/coaches\/inactive$/, ['admin','lead'], (req, res, m, body,
   const rows = db.prepare('SELECT * FROM coaches WHERE active=0 ORDER BY team,name').all()
     .filter(c => canEditTeam(user, c.team));
   send(res, 200, rows);
+});
+/* Permanently delete a coach (only allowed for inactive/former coaches) */
+route('DELETE', /^\/api\/coaches\/([\w-]+)\/permanent$/, ['admin','lead'], (req, res, m, body, user) => {
+  const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
+  if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  if(c.active !== 0) return err(res, 400, 'Only former coaches (inactive=0) can be permanently deleted. Deactivate the coach first.');
+  // Permanent deletion of a coach — this is irreversible and removes all coach records
+  // NOTE: completed_by_coach_id references in visits table will become orphaned (NULL) if
+  // we want to maintain referential integrity, or we leave them as-is if there's no
+  // foreign key constraint. For now, we leave completed_by_coach_id intact so historical
+  // visit records still show who did the work, even if that coach record no longer exists.
+  // This maintains historical accuracy while removing the coach from the active system.
+  db.prepare('DELETE FROM coaches WHERE id=?').run(c.id);
+  log(user.email, 'coach.permanent_delete', { id: c.id, name: c.name, team: c.team });
+  send(res, 200, { ok: true, deleted: c.name });
 });
 /* Get all coaches (active and inactive) for assignment purposes */
 route('GET', /^\/api\/coaches\/all$/, ['admin','lead','coach'], (req, res, m, body, user) => {
