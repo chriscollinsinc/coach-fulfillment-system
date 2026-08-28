@@ -464,6 +464,7 @@ function renderNotesPanel(visit, prep) {
   if (!panel) return;
 
   const lastNotes = (prep.lastNotes || [])[0];
+  const openCommitments = prep.openCommitments || [];
 
   let html = `
     <div style="display: flex; justify-content: space-between; align-items: center;
@@ -474,14 +475,66 @@ function renderNotesPanel(visit, prep) {
                       border-radius: 4px; font-size: 12px; cursor: pointer;
                       color: #1d4f91; font-weight: 600;">See full profile →</button>
     </div>
+  `;
 
+  // PREVIOUS VISIT CONTEXT — shown FIRST so coaches see context before writing
+  if (lastNotes) {
+    html += `
+      <div style="margin-bottom: 24px; padding: 16px; background: #f0f5fb; border: 1px solid #dde8f7;
+                  border-radius: 8px; border-left: 4px solid #1d4f91;">
+        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
+                    color: #1d4f91; letter-spacing: 0.5px; margin-bottom: 12px;">
+          📋 Last Visit Context
+        </div>
+        
+        <div style="font-size: 11px; color: #666; margin-bottom: 12px;">
+          ${lastNotes.visit_num || 'Previous visit'} · ${fmt(lastNotes.created_at || lastNotes.date)}
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px;">
+          ${lastNotes.wins ? `
+            <div>
+              <div style="font-weight: 600; color: #2e7d32; margin-bottom: 4px; font-size: 11px;">✓ Wins</div>
+              <div style="color: #333; line-height: 1.4; font-size: 11px;">${esc(lastNotes.wins)}</div>
+            </div>
+          ` : ''}
+          ${lastNotes.issues ? `
+            <div>
+              <div style="font-weight: 600; color: #c71c1c; margin-bottom: 4px; font-size: 11px;">⚠ Issues</div>
+              <div style="color: #333; line-height: 1.4; font-size: 11px;">${esc(lastNotes.issues)}</div>
+            </div>
+          ` : ''}
+        </div>
+
+        ${lastNotes.focus ? `
+          <div style="margin-bottom: 12px;">
+            <div style="font-weight: 600; color: #1d4f91; margin-bottom: 4px; font-size: 11px;">→ Focus for This Visit</div>
+            <div style="color: #333; line-height: 1.4; font-size: 11px;">${esc(lastNotes.focus)}</div>
+          </div>
+        ` : ''}
+
+        ${openCommitments.length > 0 ? `
+          <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #dde8f7;">
+            <div style="font-weight: 600; color: #b8860b; margin-bottom: 8px; font-size: 11px;">📌 Open Commitments</div>
+            <ul style="margin: 0; padding-left: 20px; font-size: 11px; color: #333; line-height: 1.6;">
+              ${openCommitments.slice(0, 5).map(c => `<li>${esc(typeof c === 'string' ? c : (c.text || c))}</li>`).join('')}
+              ${openCommitments.length > 5 ? `<li style="color: #999; font-style: italic;">+${openCommitments.length - 5} more</li>` : ''}
+            </ul>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  // CURRENT VISIT NOTES — input section
+  html += `
     <div style="margin-bottom: 24px;">
       <!-- WINS -->
       <div style="margin-bottom: 20px;">
         <div style="display: flex; justify-content: space-between; align-items: center;
                     margin-bottom: 8px;">
           <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">Wins</div>
+                      color: #1a1a1a; letter-spacing: 0.5px;">✓ Wins</div>
           <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
                           padding: 2px; font-size: 13px;">✎</button>
         </div>
@@ -496,7 +549,7 @@ function renderNotesPanel(visit, prep) {
         <div style="display: flex; justify-content: space-between; align-items: center;
                     margin-bottom: 8px;">
           <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">Issues / Roadblocks</div>
+                      color: #1a1a1a; letter-spacing: 0.5px;">⚠ Issues / Roadblocks</div>
           <button style="background: none; border: none; color: #c71c1c; cursor: pointer;
                           padding: 2px; font-size: 13px;">✎</button>
         </div>
@@ -511,7 +564,7 @@ function renderNotesPanel(visit, prep) {
         <div style="display: flex; justify-content: space-between; align-items: center;
                     margin-bottom: 8px;">
           <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">Focus for Next Visit</div>
+                      color: #1a1a1a; letter-spacing: 0.5px;">→ Focus for Next Visit</div>
           <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
                           padding: 2px; font-size: 13px;">✎</button>
         </div>
@@ -526,7 +579,7 @@ function renderNotesPanel(visit, prep) {
         <div style="display: flex; justify-content: space-between; align-items: center;
                     margin-bottom: 8px;">
           <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">New Commitments</div>
+                      color: #1a1a1a; letter-spacing: 0.5px;">📌 New Commitments</div>
           <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
                           padding: 2px; font-size: 13px;">✎</button>
         </div>
@@ -537,36 +590,6 @@ function renderNotesPanel(visit, prep) {
       </div>
     </div>
   `;
-
-  // Previous visit reference
-  if (lastNotes) {
-    html += `
-      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e5e5;">
-        <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
-                    color: #999; letter-spacing: 0.5px; margin-bottom: 10px;">
-          Previous Visit (reference)
-        </div>
-        <div style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 6px;
-                    padding: 12px; font-size: 11px;">
-          <div style="color: #999; margin-bottom: 8px;">
-            ${lastNotes.visit_num || 'Previous visit'} · ${fmt(lastNotes.created_at || lastNotes.date)}
-          </div>
-          ${lastNotes.wins ? `<div style="margin-bottom: 8px;">
-            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Wins</div>
-            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.wins)}</div>
-          </div>` : ''}
-          ${lastNotes.issues ? `<div style="margin-bottom: 8px;">
-            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Issues / Roadblocks</div>
-            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.issues)}</div>
-          </div>` : ''}
-          ${lastNotes.focus ? `<div>
-            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Focus for Next Visit</div>
-            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.focus)}</div>
-          </div>` : ''}
-        </div>
-      </div>
-    `;
-  }
 
   // Action buttons
   html += `
@@ -583,6 +606,7 @@ function renderNotesPanel(visit, prep) {
 
   panel.innerHTML = html;
 }
+
 
 async function submitVisitNotes(visitId) {
   const val = (id) => (($('#' + id) || {}).value || '').trim();
