@@ -364,7 +364,7 @@ route('PATCH', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, u
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
   const f = {};
-  for(const k of ['client','program','cycle','due','team']) if(body[k] !== undefined) f[k] = body[k];
+  for(const k of ['client','program','cycle','due','team','cal_coach']) if(body[k] !== undefined) f[k] = body[k];
   // Store tag (multi-store contracts): '' clears it; otherwise must be one of the
   // parent contract's stores when that contract defines a list (keeps labels clean).
   if(body.store !== undefined){
@@ -378,6 +378,12 @@ route('PATCH', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, u
     } else {
       f.store = null;
     }
+  }
+  // Validate coach exists (if setting cal_coach) — allows both active and inactive coaches
+  if(body.cal_coach !== undefined && body.cal_coach){
+    const coach = getCoach(body.cal_coach);
+    if(!coach) return err(res, 400, 'Coach not found');
+    if(!canEditTeam(user, coach.team)) return err(res, 403, 'Coach is not on your team');
   }
   // Moving an open visit to another team can't leave it sitting on the old team's
   // board: if it's scheduled under a coach who isn't on the new team, unschedule it
