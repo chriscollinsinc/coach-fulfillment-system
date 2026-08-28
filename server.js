@@ -513,6 +513,27 @@ route('GET', /^\/api\/visits\/(\d+)$/, ['admin','lead','sales','coach'], (req, r
   send(res, 200, v);
 });
 /* Visit cycle context: all visits in the same contract/cycle for the modal. */
+/* Historical coaches for a client — helps assign coaches from past relationships */
+route('GET', /^\/api\/clients\/(\d+)\/historical-coaches$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  const clientId = m[1];
+  const historicalVisits = db.prepare(`
+    SELECT DISTINCT cal_coach, manual_coach_name, completed_date, team
+    FROM visits
+    WHERE client_id=? AND (cal_coach IS NOT NULL OR manual_coach_name IS NOT NULL)
+    ORDER BY completed_date DESC NULLS LAST
+    LIMIT 20
+  `).all(clientId);
+  
+  const pastCoaches = historicalVisits.map(v => ({
+    coach_id: v.cal_coach,
+    coach_name: v.manual_coach_name || (v.cal_coach ? D.coaches.find(c => c.id === v.cal_coach)?.name : null),
+    last_visit: v.completed_date,
+    team: v.team
+  })).filter(c => c.coach_id || c.coach_name);
+  
+  send(res, 200, { pastCoaches });
+});
+
 route('GET', /^\/api\/visits\/(\d+)\/cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   const visits = v.contract_id

@@ -411,25 +411,141 @@ async function submitVisitNotes(visitId) {
 
 
 async function assignCoachToVisit(visitId) {
-  // Get list of available coaches
+  const v = D.visits.find(x => x.id === visitId);
+  if (!v) return;
+  
   const coaches = D.coaches || [];
   if (!coaches.length) {
     uiAlert('No coaches available');
     return;
   }
 
-  // Simple selection dialog (could be enhanced with a modal picker)
-  const coachList = coaches.map(c => `${c.id}:${c.name}`).join('\n');
-  const prompt = `Select coach ID (available coaches):\n\n${coaches.map((c, i) => `${i+1}. ${c.name}`).join('\n')}\n\nEnter coach ID:`;
-  const selectedId = window.prompt(prompt);
-  
-  if (!selectedId) return;
-  
+  // Load historical coaches if available
+  let pastCoaches = [];
   try {
-    await api('POST', `/api/visits/${visitId}/assign-coach`, { coach_id: +selectedId });
+    if (v.client_id) {
+      const hist = await api('GET', `/api/clients/${v.client_id}/historical-coaches`);
+      pastCoaches = hist.pastCoaches || [];
+    }
+  } catch (e) {
+    // silently fail if endpoint not available yet
+  }
+
+  // Create coach selector modal overlay
+  const overlay = document.createElement('div');
+  overlay.id = 'coachSelectorOverlay';
+  overlay.style.cssText = `
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.3); display: flex; align-items: center;
+    justify-content: center; z-index: 10001;
+  `;
+
+  let historyHtml = '';
+  if (pastCoaches.length) {
+    historyHtml = `
+      <div style="margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
+        <label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+                      color: #999; margin-bottom: 10px;">Past Coaches</label>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          ${pastCoaches.slice(0, 5).map(pc => `
+            <button onclick="assignCoachAndClose(${visitId}, ${pc.coach_id || 'null'})"
+                    style="padding: 6px 12px; border: 1px solid #1d4f91; background: #fff;
+                            color: #1d4f91; border-radius: 6px; font-size: 12px; cursor: pointer;
+                            font-weight: 500;">
+              ${esc(pc.coach_name || 'Unknown')}
+            </button>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  overlay.innerHTML = `
+    <div style="background: #fff; border-radius: 12px; padding: 28px; width: 420px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-height: 80vh; overflow-y: auto;">
+      <div style="font-size: 16px; font-weight: 700; color: #1a1a1a; margin-bottom: 4px;">
+        Assign Coach to ${esc(v.client)}
+      </div>
+      <div style="font-size: 12px; color: #666; margin-bottom: 20px;">
+        Select from available coaches, past relationships, or enter manually
+      </div>
+
+      ${historyHtml}
+
+      <div style="margin-bottom: 16px;">
+        <label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+                      color: #999; margin-bottom: 8px;">Available Coaches</label>
+        <select id="coachSelect" style="width: 100%; padding: 10px 12px; border: 1px solid #e5e5e5;
+                border-radius: 6px; font-size: 13px; color: #333; background: #fff;">
+          <option value="">— Select a coach —</option>
+          ${coaches.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}
+        </select>
+      </div>
+
+      <div style="margin-bottom: 20px;">
+        <label style="display: block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+                      color: #999; margin-bottom: 8px;">Or enter coach ID/name</label>
+        <input id="coachIdInput" type="text" style="width: 100%; padding: 10px 12px; border: 1px solid #e5e5e5;
+                border-radius: 6px; font-size: 13px; color: #333;" placeholder="Coach ID or name">
+      </div>
+
+      <div style="display: flex; gap: 10px;">
+        <button onclick="document.getElementById('coachSelectorOverlay').remove()"
+                style="flex: 1; padding: 10px; background: none; border: 1px solid #ddd;
+                        border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 600;
+                        color: #333;">Cancel</button>
+        <button onclick="confirmCoachSelection(${visitId})"
+                style="flex: 1; padding: 10px; background: #1d4f91; color: #fff;
+                        border: none; border-radius: 6px; font-size: 13px; cursor: pointer;
+                        font-weight: 600;">Assign</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+}
+
+async function assignCoachAndClose(visitId, coachId) {
+  if (!coachId) return;
+  try {
+    await api('POST', `/api/visits/${visitId}/assign-coach`, { coach_id: coachId });
+    document.getElementById('coachSelectorOverlay').remove();
     closeVisitModal();
     await refresh();
-    toast('Coach assigned');
+    const c = D.coaches.find(x => x.id === coachId);
+    toast(`Coach assigned: ${c?.name || 'Unknown'}`);
+  } catch (e) {
+    uiAlert(e.message || 'Could not assign coach');
+  }
+}
+
+async function confirmCoachSelection(visitId) {
+  const selectVal = ($('#coachSelect') || {}).value || '';
+  const inputVal = ($('#coachIdInput') || {}).value || '';
+  const coachId = selectVal || inputVal;
+
+  if (!coachId) {
+    uiAlert('Please select or enter a coach');
+    return;
+  }
+
+  const coaches = D.coaches || [];
+  const c = coaches.find(x => x.id === +coachId || x.name.toLowerCase().includes(coachId.toLowerCase()));
+  
+  if (!c) {
+    uiAlert('Coach not found');
+    return;
+  }
+
+  try {
+    await api('POST', `/api/visits/${visitId}/assign-coach`, { coach_id: c.id });
+    document.getElementById('coachSelectorOverlay').remove();
+    closeVisitModal();
+    await refresh();
+    toast(`Coach assigned: ${c.name}`);
   } catch (e) {
     uiAlert(e.message || 'Could not assign coach');
   }
