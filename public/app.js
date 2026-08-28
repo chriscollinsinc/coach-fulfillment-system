@@ -103,6 +103,160 @@ function closeVisitModal() {
   if (modal) modal.remove();
 }
 
+/* ========== SCHEDULE PICKER MODAL ========== */
+function openSchedulePickerModal(visitId) {
+  const v = D.visits.find(x => x.id === visitId);
+  if (!v) return;
+  
+  const overlay = document.createElement('div');
+  overlay.id = 'schedulePickerOverlay';
+  overlay.style.cssText = `position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.3); display: flex; align-items: center;
+    justify-content: center; z-index: 10001;`;
+  
+  const startDate = new Date(v.due || new Date().toISOString().slice(0,10));
+  const weeks = [];
+  for(let i = 0; i < 12; i++) {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() + (i * 7));
+    const mon = new Date(d);
+    mon.setDate(d.getDate() - d.getDay() + 1);
+    const weekStr = mon.toISOString().slice(0,10);
+    weeks.push({ label: `Week of ${formatDatePicker(mon)}`, value: weekStr, date: mon });
+  }
+  
+  let html = `<div style="background: #fff; border-radius: 8px; padding: 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 90%; max-width: 500px;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+      <h2 style="margin: 0; font-size: 18px; color: #1a1a1a;">Schedule Visit</h2>
+      <button onclick="closeSchedulePickerModal()" style="background: none; border: none;
+        font-size: 24px; cursor: pointer; color: #999;">×</button>
+    </div>
+    <p style="margin: 0 0 16px 0; color: #666; font-size: 13px;">
+      <strong>${esc(v.client)}</strong> — ${esc(v.program)}<br/>
+      Due: ${fmt(v.due || new Date().toISOString().slice(0,10))}<br/>
+      Coach: ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '(not assigned)'}
+    </p>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 20px;">`;
+  
+  weeks.forEach(w => {
+    html += `<button onclick="submitScheduleWeek(${visitId}, '${w.value}')"
+      style="padding: 12px; border: 1px solid #1d4f91; background: #f5f5f5;
+        border-radius: 6px; cursor: pointer; font-size: 12px;
+        color: #333; font-weight: 500; transition: all 0.2s;">${w.label}</button>`;
+  });
+  
+  html += `</div><button onclick="closeSchedulePickerModal()" style="width: 100%; padding: 10px;
+    border: 1px solid #ddd; background: #fff; border-radius: 4px;
+    cursor: pointer; color: #666; font-weight: 500;">Cancel</button></div>`;
+  
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSchedulePickerModal(); });
+}
+
+function closeSchedulePickerModal() {
+  const overlay = document.getElementById('schedulePickerOverlay');
+  if (overlay) overlay.remove();
+}
+
+/* ========== MOVE PICKER MODAL ========== */
+function openMovePickerModal(visitId) {
+  const v = D.visits.find(x => x.id === visitId);
+  if (!v || !v.cal_week || !v.cal_coach) return;
+  
+  const overlay = document.createElement('div');
+  overlay.id = 'movePickerOverlay';
+  overlay.style.cssText = `position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.3); display: flex; align-items: center;
+    justify-content: center; z-index: 10001;`;
+  
+  const startDate = new Date(v.cal_week);
+  const weeks = [];
+  for(let i = -4; i < 8; i++) {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() + (i * 7));
+    const mon = new Date(d);
+    mon.setDate(d.getDate() - d.getDay() + 1);
+    const weekStr = mon.toISOString().slice(0,10);
+    const isCurrent = weekStr === v.cal_week;
+    weeks.push({ label: `Week of ${formatDatePicker(mon)}${isCurrent ? ' (current)' : ''}`, value: weekStr, date: mon, current: isCurrent });
+  }
+  
+  let html = `<div style="background: #fff; border-radius: 8px; padding: 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 90%; max-width: 500px;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+      <h2 style="margin: 0; font-size: 18px; color: #1a1a1a;">Move Visit</h2>
+      <button onclick="closeMovePickerModal()" style="background: none; border: none;
+        font-size: 24px; cursor: pointer; color: #999;">×</button>
+    </div>
+    <p style="margin: 0 0 16px 0; color: #666; font-size: 13px;">
+      <strong>${esc(v.client)}</strong> — ${esc(v.program)}<br/>
+      Currently scheduled: ${fmt(v.cal_week)}<br/>
+      Coach: ${esc(coach(v.cal_coach)?.name || '')}
+    </p>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 20px;">`;
+  
+  weeks.forEach(w => {
+    const bgColor = w.current ? '#e3f2fd' : '#f5f5f5';
+    const borderColor = w.current ? '#1d4f91' : '#1d4f91';
+    html += `<button onclick="submitMoveWeek(${visitId}, '${w.value}')"
+      style="padding: 12px; border: 2px solid ${borderColor}; background: ${bgColor};
+        border-radius: 6px; cursor: pointer; font-size: 12px;
+        color: #333; font-weight: 500; transition: all 0.2s;">${w.label}</button>`;
+  });
+  
+  html += `</div><button onclick="closeMovePickerModal()" style="width: 100%; padding: 10px;
+    border: 1px solid #ddd; background: #fff; border-radius: 4px;
+    cursor: pointer; color: #666; font-weight: 500;">Cancel</button></div>`;
+  
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeMovePickerModal(); });
+}
+
+function closeMovePickerModal() {
+  const overlay = document.getElementById('movePickerOverlay');
+  if (overlay) overlay.remove();
+}
+
+async function submitMoveWeek(visitId, week) {
+  try {
+    closeMovePickerModal();
+    const v = D.visits.find(v => v.id === visitId);
+    if(!v || !v.cal_coach) { uiAlert('Visit or coach not found'); return; }
+    const result = await api('POST', `/api/visits/${visitId}/place`, { coach: v.cal_coach, week });
+    if (result && result.ok) {
+      await loadVisitModalData(visitId);
+      toast(`Moved to week of ${formatDatePicker(new Date(week))}`);
+    }
+  } catch (e) {
+    uiAlert('Could not move visit: ' + (e.message || 'unknown error'));
+  }
+}
+
+
+async function submitScheduleWeek(visitId, week) {
+  try {
+    closeSchedulePickerModal();
+    const v = D.visits.find(v => v.id === visitId);
+    if(!v || !v.cal_coach) { uiAlert('Visit or coach not found'); return; }
+    const result = await api('POST', `/api/visits/${visitId}/place`, { coach: v.cal_coach, week });
+    if (result && result.ok) {
+      await loadVisitModalData(visitId);
+      toast(`Scheduled for week of ${formatDatePicker(new Date(week))}`);
+    }
+  } catch (e) {
+    uiAlert('Could not schedule: ' + (e.message || 'unknown error'));
+  }
+}
+
+function formatDatePicker(d) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${months[d.getMonth()]} ${d.getDate()}`;
+}
+
+
 async function loadVisitModalData(visitId) {
   try {
     // Fetch visit details, cycle visits, and previous visit notes
@@ -210,10 +364,10 @@ function renderVisitsList(visits, currentVisit) {
           ${!v.cal_coach ? `<button onclick="showAssignCoachModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
                           border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
-          ${v.cal_coach && !v.cal_week ? `<button onclick="scheduleVisitModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 500;
+          ${v.cal_coach && !v.cal_week ? `<button onclick="openSchedulePickerModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
                           cursor: pointer;">Schedule</button>` : ''}
-          ${v.cal_week ? `<button onclick="moveVisitModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 500;
+          ${v.cal_week ? `<button onclick="openMovePickerModal(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #ddd; background: #fff; border-radius: 4px;
                           cursor: pointer; color: #333;">Move</button>` : ''}
         </div>
