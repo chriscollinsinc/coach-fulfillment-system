@@ -558,18 +558,31 @@ async function confirmCoachOffboard(coachId){
   }
 }
 function scheduleVisitModal(visitId){
-  if(!st.placing) st.placing = visitId;
+  const v = D.visits.find(x=>x.id===visitId);
+  if(!v) return;
   closeDlg();
-  // Transition to the board view to schedule the visit
-  st.tab = 'inventory';
-  st.boardView = 'calendar';
+  // Set up board view to schedule this visit
+  st.view = 'board';
+  st.boardTeam = v.team;
+  if(v.due){
+    st.boardY = +v.due.slice(0,4);
+    st.boardM = +v.due.slice(5,7) - 1;
+  }
+  st.placing = visitId;
   render();
 }
 function moveVisitModal(visitId){
-  if(!st.placing) st.placing = visitId;
+  const v = D.visits.find(x=>x.id===visitId);
+  if(!v) return;
   closeDlg();
-  st.tab = 'inventory';
-  st.boardView = 'calendar';
+  // Set up board view to move this visit
+  st.view = 'board';
+  st.boardTeam = v.team;
+  if(v.cal_week){
+    st.boardY = +v.cal_week.slice(0,4);
+    st.boardM = +v.cal_week.slice(5,7) - 1;
+  }
+  st.placing = visitId;
   render();
 }
 function showAssignCoachModal(visitId){
