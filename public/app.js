@@ -2766,7 +2766,7 @@ function clientProfileView(data, notes){
         return `<div style="display:flex;gap:4px">${btns.join('')}</div>`;
       })();
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
-        <td class="mono">${v.cal_week ? fmtW(v.cal_week) : "—"}</td><td>${pill}</td><td>${v.completed_by ? esc(coach(v.completed_by)?.name||'—') : '—'}</td><td style="white-space: nowrap;">${actionButtons}</td></tr>`;
+        <td class="mono">${v.cal_week ? fmtW(v.cal_week) : "—"}</td><td>${pill}</td><td>${v.completed_by_coach_id ? esc(coach(v.completed_by_coach_id)?.name||'—') : '—'}</td><td style="white-space: nowrap;">${actionButtons}</td></tr>`;
     }).join("") +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
