@@ -1500,7 +1500,7 @@ function board(){
         // card added gets backfilled here (then shows on the "confirm completed" to-do),
         // and a past open week can be set to a custom card — Home/Truck/Training/Off/etc.
         // — to fill in what a coach was actually doing that week.
-        if(c.active && placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
+        if(placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
         else if((c.active || (formerCoachesView && past)) && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
