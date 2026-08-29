@@ -1645,6 +1645,17 @@ function dictate(targetId){
 }
 function cellDlg(cid,w){
   if(st.view === 'formercoaches'){
+    const o=occ[cid+'|'+w];
+    // If there's already a block/visit placed, offer to delete it
+    if(o){
+      const label = o.type==='visit' ? `${o.v.client} - ${o.v.cycle} ${o.v.program}` : (o.label||BLOCKKINDS[o.kind]||o.kind);
+      openDlg(`<h3>Remove from ${esc(coach(cid).name)} — week of ${fmt(w)}</h3>
+        <p>Delete <b>${esc(label)}</b>?</p>
+        <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+        <button class="btn danger" onclick="deleteBlock('${cid}','${w}')">Delete</button></div>`);
+      return;
+    }
+    // Otherwise show visit selector for empty cells
     const formerCoachVisits = D.visits.filter(v => v.program && !v.cal_coach);
     const visitOpts = formerCoachVisits.map(v => `<option value="${v.id}">${v.client} (${v.program}) - wk of ${fmtW(v.cal_week)}</option>`).join('');
     if(!visitOpts){ alert(`No unscheduled visits found for ${coach(cid).name}`); return; }
@@ -1660,8 +1671,10 @@ function cellDlg(cid,w){
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveCell('${cid}','${w}')">Save</button></div>`);
 }
-async function saveCell(cid,w){
-  await api('PUT','/api/blocks',{coach:cid,week:w,kind:$('#ctKind').value,label:$('#ctLabel').value.trim()});
+async function deleteBlock(cid,w){
+  await api('PUT','/api/blocks',{coach:cid,week:w,kind:'open',label:''});
+  closeDlg(); await refresh();
+}
   closeDlg(); await refresh();
 }
 async function savePastVisitPlacement(cid, w){
