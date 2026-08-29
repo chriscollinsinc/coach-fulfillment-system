@@ -1675,8 +1675,6 @@ async function deleteBlock(cid,w){
   await api('PUT','/api/blocks',{coach:cid,week:w,kind:'open',label:''});
   closeDlg(); await refresh();
 }
-  closeDlg(); await refresh();
-}
 async function savePastVisitPlacement(cid, w){
   const visitId = $('#visitToPlace').value;
   await api('POST', '/api/place-past-visit', {visit_id: visitId, coach_id: cid, week: w});
