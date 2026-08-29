@@ -1030,7 +1030,7 @@ function render(){
   if(r==='coach' && D.user.coach_id) views.myprofile='My Profile';
   if(r==='admin') views.admin='Admin';
   views.faq='FAQ';
-  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && !(st.view==='pending'&&hasPending)){
+  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && st.view!=='formercoaches' && !(st.view==='pending'&&hasPending)){
     // First landing: leads live on the Schedule Board day-to-day, not the capacity dashboard
     st.view = r==='lead' ? 'board' : Object.keys(views)[0];
   }
