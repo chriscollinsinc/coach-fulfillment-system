@@ -1283,7 +1283,12 @@ async function bulkConfirmCompleted(){
   }catch(e){ uiAlert(e.message||'Bulk confirm failed'); }
 }
 const invJump = f => `st.invFilter='${f}';st.invSel=new Set();go('inventory')`;
-const placeJump = v => `st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()`;
+const placeJump = v => {
+  const targetView = st.view === 'formercoaches' ? 'formercoaches' : 'board';
+  const teamCmd = st.view === 'formercoaches' ? '' : `st.boardTeam='${esc(v.team)}';`;
+  const dateCmd = v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:'';
+  return `st.view='${targetView}';${teamCmd}${dateCmd}st.placing=${v.id};render()`;
+};
 function todayRows(list, maxN, rowFn){
   return list.slice(0,maxN).map(rowFn).join('') +
     (list.length>maxN?`<tr><td colspan="9" class="small">…and ${list.length-maxN} more</td></tr>`:'');
