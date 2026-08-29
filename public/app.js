@@ -1640,7 +1640,7 @@ function dictate(targetId){
 }
 function cellDlg(cid,w){
   if(st.view === 'formercoaches'){
-    const formerCoachVisits = D.visits.filter(v => !v.cal_coach);
+    const formerCoachVisits = D.visits.filter(v => v.program);
     const visitOpts = formerCoachVisits.map(v => `<option value="${v.id}">${v.client} (${v.program}) - wk of ${fmtW(v.cal_week)}</option>`).join('');
     if(!visitOpts){ alert(`No past visits found for ${coach(cid).name}`); return; }
     openDlg(`<h3>Backfill past visit: ${esc(coach(cid).name)} — week of ${fmt(w)}</h3><label>Select visit to place</label><select id="visitToPlace">${visitOpts}</select><div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button><button class="btn primary" onclick="savePastVisitPlacement('${cid}','${w}')">Place visit</button></div>`);
