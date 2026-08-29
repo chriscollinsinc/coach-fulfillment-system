@@ -1069,6 +1069,7 @@ function render(){
   if(st.view==='dashboard'){ m.innerHTML=dashboard(); loadToday(); }
   if(st.view==='board') m.innerHTML=board();
   if(st.view==='global') m.innerHTML=board();
+  if(st.view==='formercoaches') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
   if(st.view==='clients'){ m.innerHTML=clientsView(); loadClients(); }
@@ -1429,9 +1430,12 @@ function board(){
   const global = st.view==='global';
   const t=st.boardTeam, y=st.boardY, m=st.boardM;
   const weeks=mondaysInMonth(y,m);
-  const members = global
-    ? D.coaches.filter(c=>myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
-    : D.coaches.filter(c=>c.team===t);
+  const formerCoachesView = st.view === 'formercoaches';
+  const members = formerCoachesView
+    ? D.coaches.filter(c=>!c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
+    : global
+    ? D.coaches.filter(c=>c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
+    : D.coaches.filter(c=>c.active && c.team===t);
   const placing = st.placing ? D.visits.find(v=>v.id===st.placing) : null;
   // Calendar client search: matches a visit's client name (case-insensitive substring).
   // Drives both the cell glow on the grid below and the results rail on the right.
@@ -1447,6 +1451,9 @@ function board(){
   const nextMo=cand.filter(v=>inMonth(v,nextM[0],nextM[1]));
 
   let html='';
+  if(formerCoachesView){
+    html+=`<div class="placebanner" style="background:#f0f0f0;color:#333">📋 Historical record-keeping: You can edit past weeks only. This view is for maintaining accurate coach history.</div>`;
+  }
   if(placing){
     html+=`<div class="placebanner">Placing <b>${clientLink(placing.client, placing.client_id)}</b> — ${esc(placing.cycle)} ${esc(placing.program)}, due ${fmt(placing.due)}.
       Click any open week — <b>including past weeks</b>, to backfill a visit that already happened. <button class="btn tiny" onclick="st.placing=null;render()">Cancel</button></div>`;
@@ -1455,6 +1462,7 @@ function board(){
     ${global?`<span class="btn primary" style="cursor:default" title="All teams shown together">All teams</span>`:''}
     ${myTeams().map(x=>`<button class="btn ${(!global&&x===t)?'primary':''}" onclick="st.view='board';st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
     ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
+    ${canEditWeeks()?`<button class="btn ${st.view==='formercoaches'?'primary':''}" onclick="st.view='formercoaches';st.placing=null;render()">Former Coaches</button>`:""}
     <span style="flex:1"></span>
     <div class="calsearch">
       <input id="calSearchBox" placeholder="🔍 Search a client's visits…" autocomplete="off" value="${esc(st.calSearch||'')}"
@@ -1488,7 +1496,7 @@ function board(){
         // and a past open week can be set to a custom card — Home/Truck/Training/Off/etc.
         // — to fill in what a coach was actually doing that week.
         if(c.active && placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
-        else if(c.active && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        else if((c.active || (formerCoachesView && past)) && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
         inner=`<b>${v.completed?'':healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
@@ -1501,7 +1509,7 @@ function board(){
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
         inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
-        if(c.active && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        if((c.active || (formerCoachesView && past)) && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       }
       html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
     }
