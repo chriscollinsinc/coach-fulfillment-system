@@ -2752,7 +2752,7 @@ function clientProfileView(data, notes){
   </div>`;
 
   html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Generate next cycle</button>`:''}
-    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled on</th><th>Status</th><th></th></tr>` +
+    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled on</th><th>Status</th><th>Completed by</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
@@ -2766,7 +2766,7 @@ function clientProfileView(data, notes){
         return `<div style="display:flex;gap:4px">${btns.join('')}</div>`;
       })();
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
-        <td class="mono">${v.cal_week ? fmtW(v.cal_week) : "—"}</td><td>${pill}</td><td style="white-space: nowrap;">${actionButtons}</td></tr>`;
+        <td class="mono">${v.cal_week ? fmtW(v.cal_week) : "—"}</td><td>${pill}</td><td>${v.completed_by ? esc(coach(v.completed_by)?.name||'—') : '—'}</td><td style="white-space: nowrap;">${actionButtons}</td></tr>`;
     }).join("") +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
