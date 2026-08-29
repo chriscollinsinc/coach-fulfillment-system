@@ -1655,11 +1655,7 @@ function cellDlg(cid,w){
         <button class="btn danger" onclick="deleteBlock('${cid}','${w}')">Delete</button></div>`);
       return;
     }
-    // Otherwise show visit selector for empty cells
-    const formerCoachVisits = D.visits.filter(v => v.program && !v.cal_coach);
-    const visitOpts = formerCoachVisits.map(v => `<option value="${v.id}">${v.client} (${v.program}) - wk of ${fmtW(v.cal_week)}</option>`).join('');
-    if(!visitOpts){ alert(`No unscheduled visits found for ${coach(cid).name}`); return; }
-    openDlg(`<h3>Backfill visit: ${esc(coach(cid).name)} — week of ${fmt(w)}</h3><label>Select visit to place</label><select id="visitToPlace">${visitOpts}</select><div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button><button class="btn primary" onclick="savePastVisitPlacement('${cid}','${w}')">Place visit</button></div>`);
+    // For empty cells, do nothing - placement happens via PLACE ON CALENDAR button
     return;
   }
   const o=occ[cid+'|'+w]; const cur=o&&o.type==='block'?o.kind:'open';
