@@ -1662,8 +1662,7 @@ async function saveCell(cid,w){
 async function savePastVisitPlacement(cid, w){
   const visitId = $('#visitToPlace').value;
   await api('POST', '/api/place-past-visit', {visit_id: visitId, coach_id: cid, week: w});
-  closeDlg(); render();
-}
+  closeDlg(); await refresh();
 }
 
 /* ---------- inventory ---------- */

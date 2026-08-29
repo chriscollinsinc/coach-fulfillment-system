@@ -580,13 +580,13 @@ route('PUT', /^\/api\/blocks$/, ['admin','lead','sales','coach'], (req, res, m, 
 });
 
 /* ----- prospect holds (soft pencil launch dates) ----- */
-route('POST', /^\\/api\\/place-past-visit$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
+route('POST', /^\/api\/place-past-visit$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const visit = db.prepare('SELECT * FROM visits WHERE id=?').get(body.visit_id);
   if(!visit) return err(res, 404, 'Visit not found');
   const coach = getCoach(body.coach_id);
   if(!coach) return err(res, 400, 'unknown coach');
   if(!canEditTeam(user, coach.team)) return err(res, 403, 'Not your team');
-  if(!\/^\\d{4}-\\d{2}-\\d{2}$\/.test(body.week || '')) return err(res, 400, 'bad week');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(body.week || '')) return err(res, 400, 'bad week');
   body.week = snapMonday(body.week);
   
   // Update the visit to assign it to the coach for this week
