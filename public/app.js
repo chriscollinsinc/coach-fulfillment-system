@@ -3153,7 +3153,7 @@ function adminPeopleView(){
     <div class="controls"><button class="btn primary" onclick="coachDlg()">＋ Add coach</button>
     <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
   for(const t of D.teams){
-    const members=D.coaches.filter(c=>c.team===t);
+    const members=D.coaches.filter(c=>c.team===t && c.active);
     html+=`<h3 style="display:flex;align-items:center;gap:8px">Team ${esc(t)} (${members.length})
       <button class="btn tiny" onclick="renameTeamDlg('${esc(t).replace(/'/g,"\\'")}')">Rename</button>
       ${members.length?'':`<button class="btn tiny danger" onclick="deleteTeam('${esc(t).replace(/'/g,"\\'")}')">Delete</button>`}
