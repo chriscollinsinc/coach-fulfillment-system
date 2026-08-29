@@ -409,7 +409,7 @@ route('DELETE', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
 });
 route('POST', /^\/api\/visits\/(\d+)\/place$/, ['admin','lead'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
-  const c = getCoach(body.coach); if(!c || !c.active) return err(res, 400, 'unknown coach');
+  const c = getCoach(body.coach); if(!c) return err(res, 400, 'unknown coach');
   if(!canEditTeam(user, v.team) || !canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
   if(!/^\d{4}-\d{2}-\d{2}$/.test(body.week || '')) return err(res, 400, 'bad week');
   body.week = snapMonday(body.week);
