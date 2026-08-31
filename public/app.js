@@ -1263,6 +1263,10 @@ async function deleteBlock(cid,w){
   await api('PUT','/api/blocks',{coach:cid,week:w,kind:'open',label:''});
   closeDlg(); await refresh();
 }
+async function saveCell(cid,w){
+  await api('PUT','/api/blocks',{coach:cid,week:w,kind:$('#ctKind').value,label:$('#ctLabel').value.trim()});
+  closeDlg(); await refresh();
+}
 
 /* ---------- inventory ---------- */
 const hint = t => `<span title="${esc(t)}" style="cursor:help;color:var(--muted);border-bottom:1px dotted var(--muted)">?</span>`;
