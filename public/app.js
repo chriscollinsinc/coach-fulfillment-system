@@ -1550,8 +1550,9 @@ function runAvail(){
   const results=[];
   
   // Filter coaches by team and certification levels
-  // Exclude Advisor Only coaches (they cannot take new clients)
+  // Exclude Advisor Only coaches and deactivated coaches (they cannot take new clients)
   const eligibleCoaches = D.coaches.filter(c => {
+    if(!c.active) return false; // Skip deactivated/former coaches
     if(c.is_advisor_only) return false; // Skip Advisor Only coaches
     return team==='Any' || c.team===team;
   });
