@@ -445,7 +445,7 @@ async function refresh(){
   D = await api('GET','/api/state');
   _gsClients = null; // stale after any data change — refetched on next search keystroke
   occ = {};
-  for(const b of D.blocks) occ[b.coach_id+'|'+b.week] = {type:'block', kind:b.kind, label:b.label};
+  for(const b of D.blocks) if(b.kind !== 'launch_open') occ[b.coach_id+'|'+b.week] = {type:'block', kind:b.kind, label:b.label};
   for(const v of D.visits) if(v.cal_coach && v.cal_week)
     occ[v.cal_coach+'|'+v.cal_week] = {type:'visit', v};
   if(!st.boardTeam) st.boardTeam = D.user.team || D.teams[0];
