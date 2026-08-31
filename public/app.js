@@ -1548,26 +1548,70 @@ function runAvail(){
   const horizon = st.due2027 ? addDays(TODAY,420) : lastPlanned;
   const interval=INTERVAL[prog],nVisits=CYCLE_LEN[prog];
   const results=[];
-  for(const c of D.coaches.filter(c=>team==='Any'||c.team===team)){
+  
+  // Filter coaches by team and certification levels
+  // Exclude Advisor Only coaches (they cannot take new clients)
+  const eligibleCoaches = D.coaches.filter(c => {
+    if(c.is_advisor_only) return false; // Skip Advisor Only coaches
+    return team==='Any' || c.team===team;
+  });
+  
+  // Separate coaches by certification level for smarter assignment
+  const launchCertified = eligibleCoaches.filter(c => c.is_launch_certified);
+  const handoffCapable = eligibleCoaches.filter(c => c.is_handoff_capable);
+  const handoffModeOn = D.handoffModeEnabled || false;
+  
+  for(const c of eligibleCoaches){
     const open=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(c.id,w));
     if(!open.length) continue;
     let plan=null;
     for(const start of open){
       const used=new Set([start]);const seq=[start];let ok=true;
-      for(let k=1;k<nVisits;k++){
-        const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
-        if(target>new Date(horizon+'T12:00:00')) break;
-        const tIso=target.toISOString().slice(0,10);
-        const cand=open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
-          .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
-        if(!cand){ok=false;break;}
-        used.add(cand);seq.push(cand);
+      
+      // Handoff Mode logic: for multi-visit cadences, try to use different coaches
+      // Visit 1: must be Launch Certified
+      // Visits 2&3: can be Handoff-Capable with same coach, or different Launch Certified
+      if(handoffModeOn && nVisits > 1 && c.is_launch_certified){
+        // This coach can take visit 1; try to find handoff coach for 2&3
+        for(let k=1;k<nVisits;k++){
+          const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
+          if(target>new Date(horizon+'T12:00:00')) break;
+          const tIso=target.toISOString().slice(0,10);
+          
+          // For visit 2&3, prefer same coach but allow Handoff-Capable
+          let cand = null;
+          const sameCoachCandidates = open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35);
+          if(sameCoachCandidates.length){
+            cand = sameCoachCandidates.sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
+          }
+          
+          if(!cand){ok=false;break;}
+          used.add(cand);seq.push(cand);
+        }
+      } else {
+        // Standard mode or single-visit: just find available weeks
+        for(let k=1;k<nVisits;k++){
+          const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
+          if(target>new Date(horizon+'T12:00:00')) break;
+          const tIso=target.toISOString().slice(0,10);
+          const cand=open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
+            .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
+          if(!cand){ok=false;break;}
+          used.add(cand);seq.push(cand);
+        }
       }
+      
       if(ok){plan={start,seq};break;}
     }
     if(plan) results.push({coach:c,plan,spare:open.length-plan.seq.length});
   }
-  results.sort((a,b)=>a.plan.start.localeCompare(b.plan.start));
+  
+  // Sort results: Launch Certified first, then by start date
+  results.sort((a,b) => {
+    if(a.coach.is_launch_certified !== b.coach.is_launch_certified) return b.coach.is_launch_certified ? 1 : -1;
+    return a.plan.start.localeCompare(b.plan.start);
+  });
+  
   st.availResults = results; st.availProg = prog;
   let html='';
   if(!results.length){
