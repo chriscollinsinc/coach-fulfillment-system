@@ -1678,15 +1678,16 @@ function runAvail(){
       html+=`<tr><td>${coachInfo}</td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
       <td>${r.plan.seq.map((w,vidx)=>{
         const assignedCoach = r.coachAssignments ? getCoach(r.coachAssignments[vidx]) : r.coach;
-        const label = assignedCoach && assignedCoach.id !== r.coach.id ? `${fmtW(w)}*` : fmtW(w);
-        return `<span class="result-week" title="${assignedCoach?.name || 'unknown'}">${label}</span>`;
-      }).join('')}</td><td class="num">${r.spare}</td>
+        const isHandoff = assignedCoach && assignedCoach.id !== r.coach.id;
+        const label = isHandoff ? `${fmtW(w)}<br/><small>${assignedCoach?.name || 'unknown'}</small>` : fmtW(w);
+        return `<span class="result-week" style="display:inline-block;text-align:center">${label}</span>`;
+      }).join(' ')}</td><td class="num">${r.spare}</td>
       <td><button class="btn tiny" onclick="previewAvailCoach(${i})">Preview calendar</button></td></tr>`;
     });
     html+=`</table>`;
   }
   let note = `Planning horizon: through ${fmt(horizon)}. ${st.due2027?'Months past the current plan read as fully open — treat those as estimates.':'Check the box above to look into 2027 (not yet planned).'}`;
-  if(st.handoffMode && results.some(r=>r.coachAssignments)) note += ` Visits marked with * are assigned to different coaches.`;
+  if(st.handoffMode > 0 && results.some(r=>r.coachAssignments)) note += ` Visits marked with * are assigned to different coaches.`;
   html+=`<p class="small" style="margin-top:8px">${note}</p>`;
   $('#aOut').innerHTML=html;
   closePreviewOverlay();
