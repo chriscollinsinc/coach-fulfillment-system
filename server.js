@@ -748,6 +748,10 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
     if(body.start_date && !/^\d{4}-\d{2}-\d{2}$/.test(body.start_date)) return err(res, 400, 'bad start date');
     db.prepare('UPDATE coaches SET start_date=? WHERE id=?').run(body.start_date || null, c.id);
   }
+  // Handle coach certification levels
+  if(body.is_launch_certified !== undefined) db.prepare('UPDATE coaches SET is_launch_certified=? WHERE id=?').run(body.is_launch_certified ? 1 : 0, c.id);
+  if(body.is_advisor_only !== undefined) db.prepare('UPDATE coaches SET is_advisor_only=? WHERE id=?').run(body.is_advisor_only ? 1 : 0, c.id);
+  if(body.is_handoff_capable !== undefined) db.prepare('UPDATE coaches SET is_handoff_capable=? WHERE id=?').run(body.is_handoff_capable ? 1 : 0, c.id);
   log(user.email, 'coach.edit', { id: c.id, ...body });
   send(res, 200, { ok: true });
 });
@@ -3732,3 +3736,21 @@ scheduleNightly();
     }catch(e){ console.error('Startup catch-up backup failed:', e.message); }
   }
 })();
+
+/* Settings endpoints for global toggles */
+route('GET', /^\/api\/settings\/handoff-mode$/, ['admin','lead'], (req, res, m, body, user) => {
+  const setting = db.prepare('SELECT value FROM settings WHERE key=?').get('handoff_mode_enabled');
+  const enabled = setting ? Boolean(parseInt(setting.value)) : false;
+  send(res, 200, { handoff_mode_enabled: enabled });
+});
+route('PUT', /^\/api\/settings\/handoff-mode$/, ['admin'], (req, res, m, body, user) => {
+  if(body.enabled === undefined) return err(res, 400, 'enabled required');
+  const val = body.enabled ? '1' : '0';
+  db.prepare(`
+    INSERT INTO settings(key,value,updated)
+    VALUES(?,?,?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated
+  `).run('handoff_mode_enabled', val, new Date().toISOString());
+  log(user.email, 'settings.handoff_mode', { enabled: body.enabled });
+  send(res, 200, { ok: true, handoff_mode_enabled: body.enabled });
+});
