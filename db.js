@@ -1867,6 +1867,51 @@ function migrateKeapRevenueSync(){
   console.log(`Keap revenue sync: priced ${priced} contract(s) from Keap's monthly-equivalent amount, linked keap_subscription_id on ${subLinked}, skipped ${skippedNoContract} (no active contract to price).`);
 }
 
+
+/* Auto-migration: add coach certification levels (Launch Certified, Advisor Only, Handoff-Capable) */
+function migrateCoachCertifications(){
+  if(getMeta('coach_certifications_migrated')) return;
+  try {
+    // Create settings table for global toggles
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS settings(
+        key TEXT PRIMARY KEY,
+        value TEXT DEFAULT '0',
+        updated TEXT
+      );
+    `);
+    
+    // Add certification columns to coaches table
+    const tableInfo = db.prepare("PRAGMA table_info(coaches)").all();
+    const cols = tableInfo.map(r => r.name);
+    
+    if(!cols.includes('is_launch_certified')) {
+      db.exec(`ALTER TABLE coaches ADD COLUMN is_launch_certified INTEGER DEFAULT 1`);
+      console.log('✅ Added is_launch_certified column to coaches');
+    }
+    if(!cols.includes('is_advisor_only')) {
+      db.exec(`ALTER TABLE coaches ADD COLUMN is_advisor_only INTEGER DEFAULT 0`);
+      console.log('✅ Added is_advisor_only column to coaches');
+    }
+    if(!cols.includes('is_handoff_capable')) {
+      db.exec(`ALTER TABLE coaches ADD COLUMN is_handoff_capable INTEGER DEFAULT 0`);
+      console.log('✅ Added is_handoff_capable column to coaches');
+    }
+    
+    // Initialize global handoff mode setting (default OFF)
+    db.prepare(`
+      INSERT INTO settings(key,value,updated)
+      VALUES(?,?,?)
+      ON CONFLICT(key) DO UPDATE SET updated=excluded.updated
+    `).run('handoff_mode_enabled', '0', new Date().toISOString());
+    
+    setMeta('coach_certifications_migrated', new Date().toISOString());
+    console.log('✅ Coach certification levels migration complete');
+  } catch(e) {
+    console.error('⚠️  Coach certifications migration failed:', e.message);
+  }
+}
+
 if(!getMeta('secret')) setMeta('secret', crypto.randomBytes(32).toString('hex'));
 
 /* Auto-migration: rename completed_on to scheduled_week if the old column still exists */
@@ -1898,5 +1943,6 @@ migrateKeapIdentityLink();
 migrateKeapRevenueSync();
 migrateProspectHolds();
 ensureCurrentMonthSnapshot();
+migrateCoachCertifications();
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit };
