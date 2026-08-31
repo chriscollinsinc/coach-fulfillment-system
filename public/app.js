@@ -2948,10 +2948,17 @@ async function loadFormerCoaches(){
   try{
     const rows = await api('GET','/api/coaches/inactive');
     $('#formerCoachesOut').innerHTML = rows.length ?
-      `<table><tr><th>Coach</th><th>Team</th></tr>` +
-      rows.map(c=>`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a></td><td>${esc(c.team)}</td></tr>`).join('') +
+      `<table><tr><th>Coach</th><th>Team</th><th></th></tr>` +
+      rows.map(c=>`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a></td><td>${esc(c.team)}</td><td><button class="btn tiny primary" onclick="reactivateCoach('${c.id}','${esc(c.name).replace(/'/g,"\\'")}')">Reactivate</button></td></tr>`).join('') +
       `</table>` : `<p>None.</p>`;
   }catch(e){ $('#formerCoachesOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function reactivateCoach(coachId, coachName){
+  if(!confirm(`Reactivate ${coachName}? They'll be eligible for new assignments.`)) return;
+  try{
+    const res = await api('POST',`/api/coaches/${coachId}/reactivate`);
+    if(res.ok){ toast('Coach reactivated'); D.coaches = await api('GET','/api/coaches'); loadFormerCoaches(); refresh(); }
+  }catch(e){ toast('Reactivation failed: ' + e.message, 'error'); }
 }
 async function loadCancelledContracts(){
   try{
