@@ -2957,7 +2957,14 @@ async function reactivateCoach(coachId, coachName){
   if(!confirm(`Reactivate ${coachName}? They'll be eligible for new assignments.`)) return;
   try{
     const res = await api('POST',`/api/coaches/${coachId}/reactivate`);
-    if(res.ok){ toast('Coach reactivated'); D.coaches = await api('GET','/api/coaches'); loadFormerCoaches(); refresh(); }
+    if(res && res.ok){
+      toast('Coach reactivated');
+      D.coaches = await api('GET','/api/coaches');
+      loadFormerCoaches();
+      refresh();
+    } else {
+      toast('Reactivation failed: ' + (res?.message || 'Unknown error'), 'error');
+    }
   }catch(e){ toast('Reactivation failed: ' + e.message, 'error'); }
 }
 async function loadCancelledContracts(){
