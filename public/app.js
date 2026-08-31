@@ -7,7 +7,7 @@ const MONTHS = ['January','February','March','April','May','June','July','August
 const MO = MONTHS.map(m=>m.slice(0,3));
 const TODAY = new Date().toISOString().slice(0,10);
 const fmt = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}, ${y}`; };
-const fmtW = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}, ${y}`; };
+const fmtW = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}`; };
 const dayDiff = (a,b)=>(new Date(a)-new Date(b))/864e5;
 const CYCLE_LEN = {'Monthly':12,'Semi-Monthly':6,'Quarterly':4,'Bi-Annual':2,'LID (Purchase)':1,'6 Visits Monthly':6,'Coaching Only':0};
 const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID (Purchase)':0,'6 Visits Monthly':1,'Coaching Only':0};
@@ -103,160 +103,6 @@ function closeVisitModal() {
   if (modal) modal.remove();
 }
 
-/* ========== SCHEDULE PICKER MODAL ========== */
-function openSchedulePickerModal(visitId) {
-  const v = D.visits.find(x => x.id === visitId);
-  if (!v) return;
-  
-  const overlay = document.createElement('div');
-  overlay.id = 'schedulePickerOverlay';
-  overlay.style.cssText = `position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.3); display: flex; align-items: center;
-    justify-content: center; z-index: 10001;`;
-  
-  const startDate = new Date(v.due || new Date().toISOString().slice(0,10));
-  const weeks = [];
-  for(let i = 0; i < 12; i++) {
-    const d = new Date(startDate);
-    d.setDate(d.getDate() + (i * 7));
-    const mon = new Date(d);
-    mon.setDate(d.getDate() - d.getDay() + 1);
-    const weekStr = mon.toISOString().slice(0,10);
-    weeks.push({ label: `Week of ${formatDatePicker(mon)}`, value: weekStr, date: mon });
-  }
-  
-  let html = `<div style="background: #fff; border-radius: 8px; padding: 24px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 90%; max-width: 500px;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-      <h2 style="margin: 0; font-size: 18px; color: #1a1a1a;">Schedule Visit</h2>
-      <button onclick="closeSchedulePickerModal()" style="background: none; border: none;
-        font-size: 24px; cursor: pointer; color: #999;">×</button>
-    </div>
-    <p style="margin: 0 0 16px 0; color: #666; font-size: 13px;">
-      <strong>${esc(v.client)}</strong> — ${esc(v.program)}<br/>
-      Due: ${fmt(v.due || new Date().toISOString().slice(0,10))}<br/>
-      Coach: ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '(not assigned)'}
-    </p>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 20px;">`;
-  
-  weeks.forEach(w => {
-    html += `<button onclick="submitScheduleWeek(${visitId}, '${w.value}')"
-      style="padding: 12px; border: 1px solid #1d4f91; background: #f5f5f5;
-        border-radius: 6px; cursor: pointer; font-size: 12px;
-        color: #333; font-weight: 500; transition: all 0.2s;">${w.label}</button>`;
-  });
-  
-  html += `</div><button onclick="closeSchedulePickerModal()" style="width: 100%; padding: 10px;
-    border: 1px solid #ddd; background: #fff; border-radius: 4px;
-    cursor: pointer; color: #666; font-weight: 500;">Cancel</button></div>`;
-  
-  overlay.innerHTML = html;
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSchedulePickerModal(); });
-}
-
-function closeSchedulePickerModal() {
-  const overlay = document.getElementById('schedulePickerOverlay');
-  if (overlay) overlay.remove();
-}
-
-/* ========== MOVE PICKER MODAL ========== */
-function openMovePickerModal(visitId) {
-  const v = D.visits.find(x => x.id === visitId);
-  if (!v || !v.cal_week || !v.cal_coach) return;
-  
-  const overlay = document.createElement('div');
-  overlay.id = 'movePickerOverlay';
-  overlay.style.cssText = `position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.3); display: flex; align-items: center;
-    justify-content: center; z-index: 10001;`;
-  
-  const startDate = new Date(v.cal_week);
-  const weeks = [];
-  for(let i = -4; i < 8; i++) {
-    const d = new Date(startDate);
-    d.setDate(d.getDate() + (i * 7));
-    const mon = new Date(d);
-    mon.setDate(d.getDate() - d.getDay() + 1);
-    const weekStr = mon.toISOString().slice(0,10);
-    const isCurrent = weekStr === v.cal_week;
-    weeks.push({ label: `Week of ${formatDatePicker(mon)}${isCurrent ? ' (current)' : ''}`, value: weekStr, date: mon, current: isCurrent });
-  }
-  
-  let html = `<div style="background: #fff; border-radius: 8px; padding: 24px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 90%; max-width: 500px;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-      <h2 style="margin: 0; font-size: 18px; color: #1a1a1a;">Move Visit</h2>
-      <button onclick="closeMovePickerModal()" style="background: none; border: none;
-        font-size: 24px; cursor: pointer; color: #999;">×</button>
-    </div>
-    <p style="margin: 0 0 16px 0; color: #666; font-size: 13px;">
-      <strong>${esc(v.client)}</strong> — ${esc(v.program)}<br/>
-      Currently scheduled: ${fmt(v.cal_week)}<br/>
-      Coach: ${esc(coach(v.cal_coach)?.name || '')}
-    </p>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 20px;">`;
-  
-  weeks.forEach(w => {
-    const bgColor = w.current ? '#e3f2fd' : '#f5f5f5';
-    const borderColor = w.current ? '#1d4f91' : '#1d4f91';
-    html += `<button onclick="submitMoveWeek(${visitId}, '${w.value}')"
-      style="padding: 12px; border: 2px solid ${borderColor}; background: ${bgColor};
-        border-radius: 6px; cursor: pointer; font-size: 12px;
-        color: #333; font-weight: 500; transition: all 0.2s;">${w.label}</button>`;
-  });
-  
-  html += `</div><button onclick="closeMovePickerModal()" style="width: 100%; padding: 10px;
-    border: 1px solid #ddd; background: #fff; border-radius: 4px;
-    cursor: pointer; color: #666; font-weight: 500;">Cancel</button></div>`;
-  
-  overlay.innerHTML = html;
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeMovePickerModal(); });
-}
-
-function closeMovePickerModal() {
-  const overlay = document.getElementById('movePickerOverlay');
-  if (overlay) overlay.remove();
-}
-
-async function submitMoveWeek(visitId, week) {
-  try {
-    closeMovePickerModal();
-    const v = D.visits.find(v => v.id === visitId);
-    if(!v || !v.cal_coach) { uiAlert('Visit or coach not found'); return; }
-    const result = await api('POST', `/api/visits/${visitId}/place`, { coach: v.cal_coach, week });
-    if (result && result.ok) {
-      await loadVisitModalData(visitId);
-      toast(`Moved to week of ${formatDatePicker(new Date(week))}`);
-    }
-  } catch (e) {
-    uiAlert('Could not move visit: ' + (e.message || 'unknown error'));
-  }
-}
-
-
-async function submitScheduleWeek(visitId, week) {
-  try {
-    closeSchedulePickerModal();
-    const v = D.visits.find(v => v.id === visitId);
-    if(!v || !v.cal_coach) { uiAlert('Visit or coach not found'); return; }
-    const result = await api('POST', `/api/visits/${visitId}/place`, { coach: v.cal_coach, week });
-    if (result && result.ok) {
-      await loadVisitModalData(visitId);
-      toast(`Scheduled for week of ${formatDatePicker(new Date(week))}`);
-    }
-  } catch (e) {
-    uiAlert('Could not schedule: ' + (e.message || 'unknown error'));
-  }
-}
-
-function formatDatePicker(d) {
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return `${months[d.getMonth()]} ${d.getDate()}`;
-}
-
-
 async function loadVisitModalData(visitId) {
   try {
     // Fetch visit details, cycle visits, and previous visit notes
@@ -285,302 +131,135 @@ function renderVisitsList(visits, currentVisit) {
   const panel = document.getElementById('vmVisitsPanel');
   if (!panel) return;
 
+  // Group by current vs previous cycle
   const current = visits.filter(v => !v.completed);
   const previous = visits.filter(v => v.completed);
-  const completedCount = previous.length;
-  const totalCount = current.length + previous.length;
-  const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
   let html = '';
 
-  // CYCLE PROGRESS
-  html += `
-    <div style="margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <div style="font-size: 12px; font-weight: 600; color: #333;">Cycle Progress</div>
-        <div style="font-size: 12px; color: #666;">${completedCount} of ${totalCount}</div>
-      </div>
-      <div style="width: 100%; height: 8px; background: #e5e5e5; border-radius: 4px; overflow: hidden;">
-        <div style="width: ${progressPercent}%; height: 100%; background: #2e7d32; transition: width 0.3s ease;"></div>
-      </div>
-    </div>
-  `;
-
-  // Batch selection state
-  window.modalBatchSelected = window.modalBatchSelected || new Set();
-
-  // CURRENT CYCLE
+  // Current cycle
   if (current.length) {
-    const showBatchCheckboxes = current.length >= 2;
-    const allSelected = current.every(v => window.modalBatchSelected.has(v.id));
-
-    html += `<div style="margin-bottom: 24px;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-        <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; color: #999; letter-spacing: 1px;">
-          Current Cycle (${current.length})
-        </div>`;
-
-    if (showBatchCheckboxes) {
-      html += `<label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; color: #666;">
-        <input type="checkbox" id="selectAllVisits" onchange="toggleSelectAll(this.checked, [${current.map(v => v.id).join(',')}])" 
-               ${allSelected ? 'checked' : ''} style="cursor: pointer;">
-        Select all
-      </label>`;
-    }
-
-    html += `</div>`;
+    html += `<div style="margin-bottom: 40px;">
+      <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
+                  color: #999; letter-spacing: 1px; margin-bottom: 16px;">
+        Current Cycle (${current.length} visits)
+      </div>`;
 
     current.forEach((v, idx) => {
       const isCurrent = v.id === currentVisit.id;
-      const isSelected = window.modalBatchSelected.has(v.id);
       const statusLabel = v.completed ? 'Completed' :
                          v.cal_week ? 'On calendar' :
                          v.due && v.due < TODAY ? 'Overdue' : 'Needs scheduling';
       const statusColor = v.completed ? '#2e7d32' :
                          v.cal_week ? '#2e7d32' :
                          v.due && v.due < TODAY ? '#c71c1c' : '#b8860b';
-      const isOverdue = v.due && v.due < TODAY && !v.completed;
-      const bgColor = isOverdue ? '#fff5f5' : (isSelected ? '#f0f7ff' : '#fff');
-      const borderColor = isCurrent ? '#1d4f91' : (isOverdue ? '#ffcccc' : '#e5e5e5');
-      const borderWidth = isCurrent ? '2px' : '1px';
+      const bgColor = v.due && v.due < TODAY && !v.completed ? '#fff5f5' : '#fff';
+      const borderColor = v.due && v.due < TODAY && !v.completed ? '#ffcccc' : '#e5e5e5';
 
-      html += `<div onclick="switchVisitInModal(${v.id})" style="background: ${bgColor}; border: ${borderWidth} solid ${borderColor};
-                          border-radius: 8px; padding: 14px; margin-bottom: 12px; cursor: pointer;
-                          transition: all 0.2s; ${isCurrent ? 'box-shadow: 0 0 0 2px #1d4f9133;' : ''}
-                          ${showBatchCheckboxes ? '' : 'user-select: none;'}">
-        <div style="display: flex; gap: 10px; align-items: flex-start;">
-          ${showBatchCheckboxes ? `<input type="checkbox" onclick="event.stopPropagation(); toggleSelectVisit(${v.id})"
-                   ${isSelected ? 'checked' : ''} style="margin-top: 2px; cursor: pointer; flex-shrink: 0;">` : ''}
-          <div style="flex: 1;">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
-              <div style="font-size: 12px; font-weight: 700; color: #1a1a1a;">Visit ${idx + 1} of ${current.length}</div>
-              <div style="font-size: 10px; padding: 3px 8px; background: ${statusColor}20; color: ${statusColor};
-                          border-radius: 3px; font-weight: 600;">${statusLabel}</div>
+      html += `<div style="background: ${bgColor}; border: 1px solid ${borderColor};
+                          border-radius: 8px; padding: 16px; margin-bottom: 12px;
+                          ${isCurrent ? 'box-shadow: 0 0 0 2px #1d4f91;' : ''}">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;
+                    margin-bottom: 12px;">
+          <div style="font-size: 13px; font-weight: 700; color: #1a1a1a;">
+            Visit ${idx + 1} of ${current.length}
+          </div>
+          <div style="font-size: 11px; padding: 4px 10px; background: ${statusColor}20;
+                      color: ${statusColor}; border-radius: 4px; font-weight: 500;">
+            ${statusLabel}
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+                    margin-bottom: 12px; font-size: 12px;">
+          <div>
+            <div style="color: #999; font-size: 10px; font-weight: 600;
+                        text-transform: uppercase; margin-bottom: 4px;">
+              Scheduled week
             </div>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 11px; margin-bottom: 10px;">
-              <div>
-                <div style="color: #999; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 3px;">Due</div>
-                <div style="color: #333; font-weight: 500;">${fmt(v.due || '—')}</div>
-              </div>
-              <div>
-                <div style="color: #999; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 3px;">Scheduled</div>
-                <div style="color: #333; font-weight: 500;">${v.cal_week ? fmtW(v.cal_week) : '—'}</div>
-              </div>
-              <div>
-                <div style="color: #999; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 3px;">Coach</div>
-                <div style="color: #333; font-weight: 500;">${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}</div>
-              </div>
-              <div>
-                <div style="color: #999; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 3px;">Team</div>
-                <div style="color: #333; font-weight: 500;">${esc(v.team || '?')}</div>
-              </div>
+            <div style="color: #333; font-weight: 500;">${v.cal_week ? fmtW(v.cal_week) : '—'}</div>
+          </div>
+          <div>
+            <div style="color: #999; font-size: 10px; font-weight: 600;
+                        text-transform: uppercase; margin-bottom: 4px;">
+              Status
             </div>
-            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-              ${!v.cal_coach ? `<button onclick="event.stopPropagation(); showAssignCoachModal(${v.id})" style="padding: 5px 10px; font-size: 10px; font-weight: 600;
-                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
-              ${v.cal_coach && !v.cal_week ? `<button onclick="event.stopPropagation(); openSchedulePickerModal(${v.id})" style="padding: 5px 10px; font-size: 10px; font-weight: 600;
-                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px; cursor: pointer;">Schedule</button>` : ''}
-              ${v.cal_week ? `<button onclick="event.stopPropagation(); openMovePickerModal(${v.id})" style="padding: 5px 10px; font-size: 10px; font-weight: 600;
-                          border: 1px solid #ddd; background: #fff; border-radius: 4px; cursor: pointer; color: #333;">Move</button>` : ''}
+            <div style="color: #333; font-weight: 500;">${statusLabel}</div>
+          </div>
+          <div>
+            <div style="color: #999; font-size: 10px; font-weight: 600;
+                        text-transform: uppercase; margin-bottom: 4px;">
+              Coach
+            </div>
+            <div style="color: #333; font-weight: 500;">
+              ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}
+            </div>
+          </div>
+          <div>
+            <div style="color: #999; font-size: 10px; font-weight: 600;
+                        text-transform: uppercase; margin-bottom: 4px;">
+              Team
+            </div>
+            <div style="color: #333; font-weight: 500;">${esc(v.team || '?')}</div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button onclick="closeVisitModal(); openVisitModal(${v.id})"
+                  style="padding: 6px 12px; font-size: 11px; font-weight: 500;
+                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
+                          cursor: pointer;">Complete</button>
+          ${!v.cal_coach ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 600;
+                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
+                          border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
+          ${v.cal_week ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 500;
+                          border: 1px solid #ddd; background: #fff; border-radius: 4px;
+                          cursor: pointer; color: #333;">Move</button>` : ''}
+        </div>
+      </div>`;
+    });
+
+    html += '</div>';
+  }
+
+  // Previous cycle
+  if (previous.length) {
+    html += `<div>
+      <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
+                  color: #999; letter-spacing: 1px; margin-bottom: 16px;">
+        Previous Cycle (${previous.length} completed)
+      </div>`;
+
+    previous.forEach((v, idx) => {
+      html += `<div style="background: #f5f5f5; border: 1px solid #e5e5e5;
+                          border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: 0.8;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;
+                    margin-bottom: 12px;">
+          <div style="font-size: 13px; font-weight: 600; color: #666;">
+            Visit ${idx + 1} of ${previous.length}
+          </div>
+          <div style="font-size: 11px; padding: 4px 10px; background: #e8f5e9;
+                      color: #2e7d32; border-radius: 4px; font-weight: 500;">Completed</div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 12px;">
+          <div>
+            <div style="color: #999; font-size: 10px; font-weight: 600;">Completed date</div>
+            <div style="color: #666; font-weight: 500; margin-top: 4px;">
+              ${v.completed_date ? fmt(v.completed_date) : fmt(v.cal_week)}
+            </div>
+          </div>
+          <div>
+            <div style="color: #999; font-size: 10px; font-weight: 600;">Coach</div>
+            <div style="color: #666; font-weight: 500; margin-top: 4px;">
+              ${v.manual_coach_name || (v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—')}
             </div>
           </div>
         </div>
       </div>`;
     });
 
-    html += `</div>`;
-  }
-
-  // BATCH TOOLBAR
-  if (window.modalBatchSelected.size > 0) {
-    html += `<div style="position: sticky; bottom: 0; background: #f5f5f5; border-top: 1px solid #e5e5e5;
-                         padding: 12px; border-radius: 6px; margin-top: 16px;">
-      <div style="font-size: 12px; margin-bottom: 10px; color: #333; font-weight: 600;">
-        ${window.modalBatchSelected.size} selected
-      </div>
-      <div style="display: flex; gap: 8px;">
-        <button onclick="batchAssignCoach()" style="flex: 1; padding: 8px; font-size: 11px; font-weight: 600;
-                border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px; cursor: pointer;">
-          Assign Coach
-        </button>
-        <button onclick="batchMoveVisits()" style="flex: 1; padding: 8px; font-size: 11px; font-weight: 600;
-                border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px; cursor: pointer;">
-          Move All
-        </button>
-        <button onclick="clearBatchSelection()" style="flex: 1; padding: 8px; font-size: 11px; font-weight: 600;
-                border: 1px solid #ddd; background: #fff; color: #333; border-radius: 4px; cursor: pointer;">
-          Clear
-        </button>
-      </div>
-    </div>`;
-  }
-
-  // PREVIOUS CYCLE (completed)
-  if (previous.length) {
-    html += `<div style="margin-top: 24px; opacity: 0.7;">
-      <div style="font-size: 10px; font-weight: 700; text-transform: uppercase; color: #999; letter-spacing: 1px; margin-bottom: 12px;">
-        Completed (${previous.length})
-      </div>`;
-
-    previous.forEach((v, idx) => {
-      html += `<div style="background: #f5f5f5; border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px; margin-bottom: 10px; cursor: pointer;"
-               onclick="switchVisitInModal(${v.id})">
-        <div style="font-size: 11px; font-weight: 600; color: #666; margin-bottom: 6px;">Visit ${idx + 1} of ${previous.length}</div>
-        <div style="font-size: 10px; color: #999;">Completed: ${fmt(v.completed_date || v.cal_week)}</div>
-      </div>`;
-    });
-
-    html += `</div>`;
+    html += '</div>';
   }
 
   panel.innerHTML = html;
-}
-
-function switchVisitInModal(visitId) {
-  const v = D.visits.find(x => x.id === visitId);
-  if (!v) return;
-  // Re-render the entire modal for the new visit
-  loadVisitModalData(visitId);
-}
-
-function toggleSelectVisit(visitId) {
-  if (window.modalBatchSelected.has(visitId)) {
-    window.modalBatchSelected.delete(visitId);
-  } else {
-    window.modalBatchSelected.add(visitId);
-  }
-  const visits = D.visits.find(x => x.id === visitId)?.client ? 
-                 D.visits.filter(v => !v.completed) : [];
-  renderVisitsList(D.visits, D.visits.find(x => x.id === visitId) || D.visits[0]);
-}
-
-function toggleSelectAll(checked, visitIds) {
-  if (checked) {
-    visitIds.forEach(id => window.modalBatchSelected.add(id));
-  } else {
-    visitIds.forEach(id => window.modalBatchSelected.delete(id));
-  }
-  const currentVisit = document.querySelector('[onclick*="switchVisitInModal"]') ? 
-                       D.visits.find(x => x.id === parseInt(document.querySelector('[style*="box-shadow: 0 0 0 2px"]')?.getAttribute('onclick').match(/\d+/)[0])) 
-                       : null;
-  renderVisitsList(D.visits, currentVisit || D.visits[0]);
-}
-
-function clearBatchSelection() {
-  window.modalBatchSelected.clear();
-  const currentVisit = D.visits.find(x => !x.completed) || D.visits[0];
-  renderVisitsList(D.visits, currentVisit);
-}
-
-async function batchAssignCoach() {
-  const selectedIds = Array.from(window.modalBatchSelected);
-  if (selectedIds.length === 0) return;
-  
-  const allCoaches = D.coaches || [];
-  const activeCoaches = allCoaches.filter(c => c.active !== 0);
-  
-  let coachOptions = `<option value="">— Select a coach —</option>`;
-  activeCoaches.forEach(c => {
-    coachOptions += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
-  });
-
-  openDlg(`<h3>Assign Coach to ${selectedIds.length} Visits</h3>
-    <p class="small" style="margin-bottom:12px">Select a coach to assign to all ${selectedIds.length} selected visits.</p>
-    <div style="margin-bottom:12px">
-      <label style="display:block;font-weight:500;margin-bottom:6px">Select Coach</label>
-      <select id="batchCoachSelect" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px">
-        ${coachOptions}
-      </select>
-    </div>
-    <div class="dlgrow">
-      <button class="btn" onclick="closeDlg()">Cancel</button>
-      <button class="btn primary" onclick="confirmBatchCoachAssignment([${selectedIds.join(',')}])">Assign</button>
-    </div>`);
-  setTimeout(() => ($('#batchCoachSelect') || {}).focus?.(), 100);
-}
-
-async function confirmBatchCoachAssignment(visitIds) {
-  const coachId = ($('#batchCoachSelect') || {}).value;
-  if (!coachId) { uiAlert('Please select a coach'); return; }
-  try {
-    let assigned = 0;
-    for (const id of visitIds) {
-      await api('PATCH', `/api/visits/${id}`, { cal_coach: coachId });
-      assigned++;
-    }
-    closeDlg();
-    window.modalBatchSelected.clear();
-    await refresh();
-    toast(`Assigned ${assigned} visit(s) to ${coach(coachId).name}`);
-  } catch (e) {
-    uiAlert('Could not assign coach: ' + (e.message || 'unknown error'));
-  }
-}
-
-async function batchMoveVisits() {
-  const selectedIds = Array.from(window.modalBatchSelected);
-  if (selectedIds.length === 0) return;
-  
-  // Open week picker for batch move
-  const overlay = document.createElement('div');
-  overlay.id = 'batchMoveOverlay';
-  overlay.style.cssText = `position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.3); display: flex; align-items: center;
-    justify-content: center; z-index: 10001;`;
-  
-  const startDate = new Date();
-  const weeks = [];
-  for(let i = 0; i < 12; i++) {
-    const d = new Date(startDate);
-    d.setDate(d.getDate() + (i * 7));
-    const mon = new Date(d);
-    mon.setDate(d.getDate() - d.getDay() + 1);
-    const weekStr = mon.toISOString().slice(0,10);
-    weeks.push({ label: `Week of ${formatDatePicker(mon)}`, value: weekStr });
-  }
-  
-  let html = `<div style="background: #fff; border-radius: 8px; padding: 24px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 90%; max-width: 500px;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-      <h2 style="margin: 0; font-size: 18px; color: #1a1a1a;">Move ${selectedIds.length} Visits</h2>
-      <button onclick="closeBatchMoveOverlay()" style="background: none; border: none; font-size: 24px; cursor: pointer; color: #999;">×</button>
-    </div>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 20px;">`;
-  
-  weeks.forEach(w => {
-    html += `<button onclick="confirmBatchMove([${selectedIds.join(',')}], '${w.value}')"
-      style="padding: 12px; border: 1px solid #1d4f91; background: #f5f5f5; border-radius: 6px; cursor: pointer; font-size: 12px; color: #333; font-weight: 500;">${w.label}</button>`;
-  });
-  
-  html += `</div><button onclick="closeBatchMoveOverlay()" style="width: 100%; padding: 10px; border: 1px solid #ddd; background: #fff; border-radius: 4px; cursor: pointer; color: #666; font-weight: 500;">Cancel</button></div>`;
-  
-  overlay.innerHTML = html;
-  document.body.appendChild(overlay);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeBatchMoveOverlay(); });
-}
-
-function closeBatchMoveOverlay() {
-  const overlay = document.getElementById('batchMoveOverlay');
-  if (overlay) overlay.remove();
-}
-
-async function confirmBatchMove(visitIds, week) {
-  try {
-    closeBatchMoveOverlay();
-    let moved = 0;
-    for (const id of visitIds) {
-      const v = D.visits.find(x => x.id === id);
-      if (v && v.cal_coach) {
-        await api('POST', `/api/visits/${id}/place`, { coach: v.cal_coach, week });
-        moved++;
-      }
-    }
-    window.modalBatchSelected.clear();
-    await refresh();
-    toast(`Moved ${moved} visit(s) to week of ${formatDatePicker(new Date(week))}`);
-  } catch (e) {
-    uiAlert('Could not move visits: ' + (e.message || 'unknown error'));
-  }
 }
 
 function renderNotesPanel(visit, prep) {
@@ -770,13 +449,6 @@ async function refresh(){
   for(const v of D.visits) if(v.cal_coach && v.cal_week)
     occ[v.cal_coach+'|'+v.cal_week] = {type:'visit', v};
   if(!st.boardTeam) st.boardTeam = D.user.team || D.teams[0];
-  // Load all coaches (active and inactive) for assignment dropdowns
-  try {
-    window.allCoachesForAssignment = await api('GET', '/api/coaches/all');
-  } catch(e) {
-    window.allCoachesForAssignment = D.coaches;
-  }
-  // Load former (inactive) coaches for the global calendar view
   render();
 }
 const coach = id => D.coaches.find(c=>c.id===id);
@@ -876,82 +548,6 @@ async function confirmCoachOffboard(coachId){
     uiAlert(e.message || 'Could not offboard coach');
   }
 }
-function scheduleVisitModal(visitId){
-  const v = D.visits.find(x=>x.id===visitId);
-  if(!v) return;
-  closeVisitModal();
-  // Set up board view to schedule this visit
-  st.view = 'board';
-  st.boardTeam = v.team;
-  if(v.due){
-    st.boardY = +v.due.slice(0,4);
-    st.boardM = +v.due.slice(5,7) - 1;
-  }
-  st.placing = visitId;
-  render();
-}
-function moveVisitModal(visitId){
-  const v = D.visits.find(x=>x.id===visitId);
-  if(!v) return;
-  closeVisitModal();
-  // Set up board view to move this visit
-  st.view = 'board';
-  st.boardTeam = v.team;
-  if(v.cal_week){
-    st.boardY = +v.cal_week.slice(0,4);
-    st.boardM = +v.cal_week.slice(5,7) - 1;
-  }
-  st.placing = visitId;
-  render();
-}
-function showAssignCoachModal(visitId){
-  const v = D.visits.find(x=>x.id===visitId);
-  if(!v){ uiAlert('Visit not found'); return; }
-  if(v.cal_coach){ uiAlert('This visit already has a coach assigned'); return; }
-
-  const allCoaches = window.allCoachesForAssignment || D.coaches || [];
-  const activeCoaches = allCoaches.filter(c => c.active !== 0);
-  const inactiveCoaches = allCoaches.filter(c => c.active === 0);
-
-  let coachOptions = `<option value="">— Select a coach —</option>`;
-  activeCoaches.forEach(c => {
-    coachOptions += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
-  });
-  if(inactiveCoaches.length > 0){
-    coachOptions += `<optgroup label="Former coaches">`;
-    inactiveCoaches.forEach(c => {
-      coachOptions += `<option value="${c.id}">${esc(c.name)} (${c.team})</option>`;
-    });
-    coachOptions += `</optgroup>`;
-  }
-
-  openDlg(`<h3>Assign Coach to Visit</h3>
-    <p class="small" style="margin-bottom:12px"><strong>${esc(v.client)}</strong> — ${esc(v.program)} ${esc(v.cycle)}<br/>Due: ${fmt(v.due)}</p>
-    <div style="margin-bottom:12px">
-      <label style="display:block;font-weight:500;margin-bottom:6px">Select Coach</label>
-      <select id="assignCoachSelect" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px">
-        ${coachOptions}
-      </select>
-    </div>
-    <div class="dlgrow">
-      <button class="btn" onclick="closeDlg()">Cancel</button>
-      <button class="btn primary" onclick="confirmCoachAssignment(${visitId})">Assign</button>
-    </div>`);
-  setTimeout(() => $('#assignCoachSelect').focus(), 100);
-}
-async function confirmCoachAssignment(visitId){
-  const coachId = $('#assignCoachSelect').value;
-  if(!coachId){ uiAlert('Please select a coach'); return; }
-  try{
-    await api('PATCH',`/api/visits/${visitId}`, { cal_coach: coachId });
-    closeDlg();
-    await refresh();
-    const c = D.coaches.find(x=>x.id===coachId);
-    toast(`Coach assigned → ${c?.name||'Unknown'}`);
-  }catch(e){
-    uiAlert(e.message || 'Could not assign coach');
-  }
-}
 async function coachDeleteWithModal(coachId){
   try{
     const r = await api('DELETE',`/api/coaches/${coachId}`);
@@ -1030,7 +626,7 @@ function render(){
   if(r==='coach' && D.user.coach_id) views.myprofile='My Profile';
   if(r==='admin') views.admin='Admin';
   views.faq='FAQ';
-  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && st.view!=='formercoaches' && !(st.view==='pending'&&hasPending)){
+  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && !(st.view==='pending'&&hasPending)){
     // First landing: leads live on the Schedule Board day-to-day, not the capacity dashboard
     st.view = r==='lead' ? 'board' : Object.keys(views)[0];
   }
@@ -1069,7 +665,6 @@ function render(){
   if(st.view==='dashboard'){ m.innerHTML=dashboard(); loadToday(); }
   if(st.view==='board') m.innerHTML=board();
   if(st.view==='global') m.innerHTML=board();
-  if(st.view==='formercoaches') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
   if(st.view==='clients'){ m.innerHTML=clientsView(); loadClients(); }
@@ -1283,12 +878,7 @@ async function bulkConfirmCompleted(){
   }catch(e){ uiAlert(e.message||'Bulk confirm failed'); }
 }
 const invJump = f => `st.invFilter='${f}';st.invSel=new Set();go('inventory')`;
-const placeJump = v => {
-  const targetView = st.view === 'formercoaches' ? 'formercoaches' : 'board';
-  const teamCmd = st.view === 'formercoaches' ? '' : `st.boardTeam='${esc(v.team)}';`;
-  const dateCmd = v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:'';
-  return `st.view='${targetView}';${teamCmd}${dateCmd}st.placing=${v.id};render()`;
-};
+const placeJump = v => `st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()`;
 function todayRows(list, maxN, rowFn){
   return list.slice(0,maxN).map(rowFn).join('') +
     (list.length>maxN?`<tr><td colspan="9" class="small">…and ${list.length-maxN} more</td></tr>`:'');
@@ -1435,12 +1025,9 @@ function board(){
   const global = st.view==='global';
   const t=st.boardTeam, y=st.boardY, m=st.boardM;
   const weeks=mondaysInMonth(y,m);
-  const formerCoachesView = st.view === 'formercoaches';
-  const members = formerCoachesView
-    ? D.coaches.filter(c=>!c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
-    : global
-    ? D.coaches.filter(c=>c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
-    : D.coaches.filter(c=>c.active && c.team===t);
+  const members = global
+    ? D.coaches.filter(c=>myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
+    : D.coaches.filter(c=>c.team===t);
   const placing = st.placing ? D.visits.find(v=>v.id===st.placing) : null;
   // Calendar client search: matches a visit's client name (case-insensitive substring).
   // Drives both the cell glow on the grid below and the results rail on the right.
@@ -1456,9 +1043,6 @@ function board(){
   const nextMo=cand.filter(v=>inMonth(v,nextM[0],nextM[1]));
 
   let html='';
-  if(formerCoachesView){
-    html+=`<div class="placebanner" style="background:#f0f0f0;color:#333">📋 Historical record-keeping: You can edit past weeks only. This view is for maintaining accurate coach history.</div>`;
-  }
   if(placing){
     html+=`<div class="placebanner">Placing <b>${clientLink(placing.client, placing.client_id)}</b> — ${esc(placing.cycle)} ${esc(placing.program)}, due ${fmt(placing.due)}.
       Click any open week — <b>including past weeks</b>, to backfill a visit that already happened. <button class="btn tiny" onclick="st.placing=null;render()">Cancel</button></div>`;
@@ -1467,7 +1051,6 @@ function board(){
     ${global?`<span class="btn primary" style="cursor:default" title="All teams shown together">All teams</span>`:''}
     ${myTeams().map(x=>`<button class="btn ${(!global&&x===t)?'primary':''}" onclick="st.view='board';st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
     ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
-    ${canEditWeeks()?`<button class="btn ${st.view==='formercoaches'?'primary':''}" onclick="st.view='formercoaches';st.placing=null;render()">Former Coaches</button>`:""}
     <span style="flex:1"></span>
     <div class="calsearch">
       <input id="calSearchBox" placeholder="🔍 Search a client's visits…" autocomplete="off" value="${esc(st.calSearch||'')}"
@@ -1487,7 +1070,7 @@ function board(){
     html+=`<th class="${now?'wk-now':''}">wk of ${fmtW(w)}${now?' ●':''}</th>`; });
   html+=`</tr>`;
   for(const c of members){
-    html+=`<tr${c.active?'':' class="coach-inactive"'}><td class="cname">${esc(c.name)}${global?`<br><span class="small" style="color:var(--muted)">${esc(c.team)}</span>`:''}</td>`;
+    html+=`<tr><td class="cname">${esc(c.name)}${global?`<br><span class="small" style="color:var(--muted)">${esc(c.team)}</span>`:''}</td>`;
     for(const w of weeks){
       const o=occ[c.id+'|'+w]; const past=w<mondayOf(new Date());
       let cls='slot', inner='', click='';
@@ -1501,7 +1084,7 @@ function board(){
         // and a past open week can be set to a custom card — Home/Truck/Training/Off/etc.
         // — to fill in what a coach was actually doing that week.
         if(placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
-        else if((c.active || (formerCoachesView && past)) && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        else if(canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
         inner=`<b>${v.completed?'':healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
@@ -1514,7 +1097,7 @@ function board(){
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
         inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
-        if((c.active || (formerCoachesView && past)) && canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        if(canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
       }
       html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
     }
@@ -1563,8 +1146,6 @@ function board(){
     html+=section(`Coming up · ${MO[nextM[1]]}`,nextMo);
     if(!overdue.length&&!thisMo.length&&!nextMo.length) html+=`<h2>To schedule</h2><p class="small">Nothing waiting for ${global?'these teams':'Team '+t} in this window. 🎉</p>`;
   }
-
-
   html+=`</div></div>`;
   return html;
 }
@@ -1644,20 +1225,6 @@ function dictate(targetId){
   try{ rec.start(); }catch(e){}
 }
 function cellDlg(cid,w){
-  if(st.view === 'formercoaches'){
-    const o=occ[cid+'|'+w];
-    // If there's already a block/visit placed, offer to delete it
-    if(o){
-      const label = o.type==='visit' ? `${o.v.client} - ${o.v.cycle} ${o.v.program}` : (o.label||BLOCKKINDS[o.kind]||o.kind);
-      openDlg(`<h3>Remove from ${esc(coach(cid).name)} — week of ${fmt(w)}</h3>
-        <p>Delete <b>${esc(label)}</b>?</p>
-        <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-        <button class="btn danger" onclick="deleteBlock('${cid}','${w}')">Delete</button></div>`);
-      return;
-    }
-    // For empty cells, do nothing - placement happens via PLACE ON CALENDAR button
-    return;
-  }
   const o=occ[cid+'|'+w]; const cur=o&&o.type==='block'?o.kind:'open';
   const opts=[['open','Open (available)'],...Object.entries(BLOCKKINDS).filter(([k])=>!['visit','visit_legacy'].includes(k))]
     .map(([k,l])=>`<option value="${k}" ${cur===k?'selected':''}>${l}</option>`).join('');
@@ -1667,13 +1234,8 @@ function cellDlg(cid,w){
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveCell('${cid}','${w}')">Save</button></div>`);
 }
-async function deleteBlock(cid,w){
-  await api('PUT','/api/blocks',{coach:cid,week:w,kind:'open',label:''});
-  closeDlg(); await refresh();
-}
-async function savePastVisitPlacement(cid, w){
-  const visitId = $('#visitToPlace').value;
-  await api('POST', '/api/place-past-visit', {visit_id: visitId, coach_id: cid, week: w});
+async function saveCell(cid,w){
+  await api('PUT','/api/blocks',{coach:cid,week:w,kind:$('#ctKind').value,label:$('#ctLabel').value.trim()});
   closeDlg(); await refresh();
 }
 
@@ -2703,22 +2265,9 @@ function clientProfileView(data, notes){
   if(canEdit()){
     html += `<label>Assigned coach</label>
       <select id="cliCoach" onchange="saveAssignedCoach(${client.id},this.value)">
-        <option value="">— unassigned —</option>`;
-    // Show active coaches first, then former/inactive coaches
-    const allCoaches = window.allCoachesForAssignment || D.coaches || [];
-    const activeCoaches = allCoaches.filter(c => c.active !== 0);
-    const inactiveCoaches = allCoaches.filter(c => c.active === 0);
-    activeCoaches.forEach(c => {
-      html += `<option value="${c.id}" ${assignedCoach&&assignedCoach.id===c.id?'selected':''}>${esc(c.name)} (${c.team})</option>`;
-    });
-    if(inactiveCoaches.length > 0) {
-      html += `<optgroup label="Former coaches">`;
-      inactiveCoaches.forEach(c => {
-        html += `<option value="${c.id}" ${assignedCoach&&assignedCoach.id===c.id?'selected':''}>${esc(c.name)} (${c.team})</option>`;
-      });
-      html += `</optgroup>`;
-    }
-    html += `</select>`;
+        <option value="">— unassigned —</option>
+        ${D.coaches.map(c=>`<option value="${c.id}" ${assignedCoach&&assignedCoach.id===c.id?'selected':''}>${esc(c.name)} (${c.team})</option>`).join('')}
+      </select>`;
   } else {
     html += `<p><b>Assigned coach:</b> ${esc(assignedCoach?assignedCoach.name:'— unassigned —')}</p>`;
   }
@@ -2752,22 +2301,14 @@ function clientProfileView(data, notes){
   </div>`;
 
   html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Generate next cycle</button>`:''}
-    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled on</th><th>Status</th><th>Completed by</th><th></th></tr>` +
+    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
-      const actionButtons = (() => {
-        if (v.completed) return `${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}`;
-        const btns = [];
-        if (!v.cal_week) btns.push(`<button class="btn tiny primary" onclick="scheduleVisitModal(${v.id})">Schedule now</button>`);
-        btns.push(`<button class="btn tiny" onclick="openVisitModal(${v.id})">Complete</button>`);
-        if (canEdit()) btns.push(`<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>`);
-        return `<div style="display:flex;gap:4px">${btns.join('')}</div>`;
-      })();
-      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
-        <td class="mono">${v.cal_week ? fmtW(v.cal_week) : "—"}</td><td>${pill}</td><td>${v.completed_by_coach_id ? esc(coach(v.completed_by_coach_id)?.name||'—') : '—'}</td><td style="white-space: nowrap;">${actionButtons}</td></tr>`;
-    }).join("") +
+      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td>${pill}</td>
+        <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
+    }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
   html += `<div class="panel"><h2>Notes</h2>
@@ -2799,7 +2340,6 @@ function clientProfileView(data, notes){
 function openCoachProfile(id){ st.view='coachprofile'; st.coachId=id; render(); }
 async function loadCoachProfile(id){
   const data = await api('GET', '/api/coaches/'+id+'/profile');
-  st.currentCoach = data.coach;  // Store coach data for editCoachDlg
   $('#main').innerHTML = coachProfileView(data);
 }
 function coachProfileView(data){
@@ -2886,8 +2426,7 @@ function coachDeactivateDlg(id, name){
     <button class="btn primary danger" onclick="doDeactivateCoach('${id}','${esc(name).replace(/'/g,"\\'")}')">Deactivate</button></div>`);
 }
 function editCoachDlg(id){
-  const c = D.coaches.find(x=>x.id===id) || st.currentCoach;
-  if(!c) { uiAlert('Coach not found'); return; }
+  const c = D.coaches.find(x=>x.id===id) || st.coachProfileCoach;
   openDlg(`<h3>Edit profile</h3>
     <label>Name</label><input id="ecName" value="${esc(c.name)}">
     <label>Team</label><select id="ecTeam">${teamOpts(c.team)}</select>
@@ -3160,7 +2699,7 @@ function adminPeopleView(){
     <div class="controls"><button class="btn primary" onclick="coachDlg()">＋ Add coach</button>
     <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
   for(const t of D.teams){
-    const members=D.coaches.filter(c=>c.team===t && c.active);
+    const members=D.coaches.filter(c=>c.team===t);
     html+=`<h3 style="display:flex;align-items:center;gap:8px">Team ${esc(t)} (${members.length})
       <button class="btn tiny" onclick="renameTeamDlg('${esc(t).replace(/'/g,"\\'")}')">Rename</button>
       ${members.length?'':`<button class="btn tiny danger" onclick="deleteTeam('${esc(t).replace(/'/g,"\\'")}')">Delete</button>`}
@@ -3283,20 +2822,10 @@ async function loadFormerCoaches(){
   try{
     const rows = await api('GET','/api/coaches/inactive');
     $('#formerCoachesOut').innerHTML = rows.length ?
-      `<table><tr><th>Coach</th><th>Team</th><th></th></tr>` +
-      rows.map(c=>`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a></td><td>${esc(c.team)}</td><td><button class="btn tiny danger" onclick="deleteCoachPermanently('${c.id}','${esc(c.name)}')">Delete permanently</button></td></tr>`).join('') +
+      `<table><tr><th>Coach</th><th>Team</th></tr>` +
+      rows.map(c=>`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--primary);text-decoration:underline">${esc(c.name)}</a></td><td>${esc(c.team)}</td></tr>`).join('') +
       `</table>` : `<p>None.</p>`;
   }catch(e){ $('#formerCoachesOut').innerHTML = '<p>Could not load.</p>'; }
-}
-async function deleteCoachPermanently(id, name){
-  if(!confirm(`Are you sure you want to permanently delete ${name}? This cannot be undone. All historical data about visits they completed will be preserved, but their profile will be removed from the system.`)) return;
-  try{
-    await api('DELETE','/api/coaches/'+id+'/permanent');
-    uiAlert(`${name} has been permanently deleted.`);
-    loadFormerCoaches();
-  }catch(e){
-    uiAlert('Error: ' + e.message);
-  }
 }
 async function loadCancelledContracts(){
   try{
