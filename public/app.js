@@ -445,7 +445,7 @@ async function refresh(){
   D = await api('GET','/api/state');
   _gsClients = null; // stale after any data change — refetched on next search keystroke
   occ = {};
-  for(const b of D.blocks) if(b.kind !== 'launch_open') occ[b.coach_id+'|'+b.week] = {type:'block', kind:b.kind, label:b.label};
+  for(const b of D.blocks) occ[b.coach_id+'|'+b.week] = {type:'block', kind:b.kind, label:b.label};
   for(const v of D.visits) if(v.cal_coach && v.cal_week)
     occ[v.cal_coach+'|'+v.cal_week] = {type:'visit', v};
   if(!st.boardTeam) st.boardTeam = D.user.team || D.teams[0];
@@ -454,6 +454,7 @@ async function refresh(){
 const coach = id => D.coaches.find(c=>c.id===id);
 const status = v => v.completed?'completed': v.cal_week?'on_calendar': (v.due&&v.due<TODAY?'overdue': v.due?'needs_scheduling':'unknown');
 const isOpen = (cid,w) => !occ[cid+'|'+w];
+const isAvailable = (cid,w) => { const o = occ[cid+'|'+w]; return !o || (o.type==='block' && o.kind==='launch_open'); };
 /* Jumps straight to the Schedule Board cell a visit is sitting on — the calendar
  * link behind every "on calendar" / "Late — on calendar" badge. Switches to the
  * visit's own team and the month its cal_week falls in (which may not be the
@@ -1575,7 +1576,7 @@ function runAvail(){
   if(preferredCoachId && st.handoffMode){
     const prefCoach = getCoach(preferredCoachId);
     if(prefCoach && launchCoachFilter(prefCoach)){
-      const prefOpen = mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(prefCoach.id,w));
+      const prefOpen = mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(prefCoach.id,w));
       for(const start of prefOpen){
         const coachAssignments = {[0]: prefCoach.id}; // Visit 1 = preferred coach
         const used = new Set([start]);
@@ -1596,7 +1597,7 @@ function runAvail(){
             // Preferred coach can't do this visit, find an alternative
             const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
             for(const coach of allFollowupCoaches){
-              const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(coach.id,w));
+              const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
               const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
                 .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
               if(candidate){cand=candidate;candCoach=coach.id;break;}
@@ -1612,7 +1613,7 @@ function runAvail(){
   } else {
     // Standard logic: no preferred coach or handoff mode off
     for(const c of D.coaches.filter(launchCoachFilter)){
-      const open=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(c.id,w));
+      const open=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(c.id,w));
       if(!open.length) continue;
       let plan=null;
       for(const start of open){
@@ -1625,7 +1626,7 @@ function runAvail(){
           if(st.handoffMode && k>0){
             const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
             for(const coach of allFollowupCoaches){
-              const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(coach.id,w));
+              const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
               const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
                 .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
               if(candidate){cand=candidate;break;}
