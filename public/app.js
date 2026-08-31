@@ -425,6 +425,7 @@ let st = {
   invFilter:'attention', invSearch:'',
   calSearch:'',
   due2027:false,
+  handoffMode:0,
 };
 let occ = null; // occupancy map coach|week -> {type:'visit'|'block', ...}
 
@@ -1535,8 +1536,12 @@ function availabilityView(){
     <label>Start no earlier than</label><input type="date" id="aFrom" value="${TODAY}">
     <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
       <input type="checkbox" id="aFar" style="width:auto" ${st.due2027?'checked':''}> include unplanned months (2027+)</label>
-    <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
-      <input type="checkbox" id="aHandoffMode" style="width:auto" ${st.handoffMode?'checked':''}> <b>Handoff Mode</b> — Show alternative arrangements if preferred coach can't fit entire cadence</label>
+    <label>Handoff strategy</label><select id="aHandoffMode">
+      <option value="0" ${st.handoffMode===0?'selected':''}>No handoff — preferred coach for all months</option>
+      <option value="1" ${st.handoffMode===1?'selected':''}>Handoff after month 1 — let other coaches take over</option>
+      <option value="2" ${st.handoffMode===2?'selected':''}>Handoff after month 2 — preferred coach launches, then hands off</option>
+      <option value="3" ${st.handoffMode===3?'selected':''}>Handoff after month 3 — preferred coach does full cadence</option>
+    </select>
     <button class="btn primary" onclick="runAvail()">Check availability</button>
   </div><div id="aOut"></div></div>
   <div class="panel"><h2>Open capacity by month</h2><div id="capOut"></div></div>
@@ -1548,7 +1553,7 @@ function runAvail(){
   const prog=$('#aProg').value,team=$('#aTeam').value,from=$('#aFrom').value||TODAY;
   const preferredCoachId = $('#aCoach').value;
   st.due2027=$('#aFar').checked;
-  st.handoffMode=$('#aHandoffMode').checked;
+  st.handoffMode=parseInt($('#aHandoffMode').value);
   const lastPlanned = D.blocks.reduce((a,b)=>b.week>a?b.week:a,'2026-12-28');
   const horizon = st.due2027 ? addDays(TODAY,420) : lastPlanned;
   const interval=INTERVAL[prog],nVisits=CYCLE_LEN[prog];
@@ -1564,7 +1569,7 @@ function runAvail(){
   const followupCoachFilter = c => {
     if(!c.active) return false;
     if(c.is_advisor_only) return false;
-    if(st.handoffMode) {
+    if(st.handoffMode > 0) {
       // In handoff mode, allow Launch Certified OR Handoff-Capable
       return c.is_launch_certified || c.is_handoff_capable;
     } else {
@@ -1573,7 +1578,7 @@ function runAvail(){
     }
   };
   // If preferred coach is specified with handoff mode, find partial cadence matches
-  if(preferredCoachId && st.handoffMode){
+  if(preferredCoachId && st.handoffMode > 0){
     const prefCoach = getCoach(preferredCoachId);
     if(prefCoach && launchCoachFilter(prefCoach)){
       const prefOpen = mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(prefCoach.id,w));
@@ -1588,13 +1593,16 @@ function runAvail(){
           const tIso=target.toISOString().slice(0,10);
           let cand = null;
           let candCoach = null;
-          // Try preferred coach first, then fallback to other coaches
-          const prefCandidates = prefOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35);
-          if(prefCandidates.length) {
-            cand = prefCandidates.sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
-            candCoach = prefCoach.id;
+          
+          // If k < st.handoffMode, preferred coach MUST handle this visit
+          if(k < st.handoffMode) {
+            const prefCandidates = prefOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35);
+            if(prefCandidates.length) {
+              cand = prefCandidates.sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
+              candCoach = prefCoach.id;
+            }
           } else {
-            // Preferred coach can't do this visit, find an alternative
+            // Visit k >= st.handoffMode: allow any available coach
             const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
             for(const coach of allFollowupCoaches){
               const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
@@ -1623,7 +1631,8 @@ function runAvail(){
           if(target>new Date(horizon+'T12:00:00')) break;
           const tIso=target.toISOString().slice(0,10);
           let cand=null;
-          if(st.handoffMode && k>0){
+          // If handoffMode > 0 and k >= handoffMode, allow any available coach to take over
+          if(st.handoffMode > 0 && k >= st.handoffMode){
             const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
             for(const coach of allFollowupCoaches){
               const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
@@ -1632,6 +1641,7 @@ function runAvail(){
               if(candidate){cand=candidate;break;}
             }
           } else {
+            // Primary coach must handle all visits (or until handoff threshold)
             cand=open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
               .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
           }
