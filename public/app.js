@@ -2509,12 +2509,18 @@ function editCoachDlg(id){
     <label>Start date</label><input type="date" id="ecStart" value="${c.start_date||''}">
     <fieldset style="margin:12px 0; padding:12px; border:1px solid #ddd; border-radius:4px">
       <legend style="padding:0 4px"><b>Certification Levels</b></legend>
-      <label><input type="checkbox" id="ecLaunchCert" ${c.is_launch_certified?'checked':''}>
-      <span>Launch Certified</span></label>
-      <label><input type="checkbox" id="ecAdvisorOnly" ${c.is_advisor_only?'checked':''}>
-      <span>Advisor Only</span></label>
-      <label><input type="checkbox" id="ecHandoffCapable" ${c.is_handoff_capable?'checked':''}>
-      <span>Handoff-Capable</span></label>
+      <label style="display:flex; align-items:center; gap:8px; margin:8px 0">
+        <input type="checkbox" id="ecLaunchCert" ${c.is_launch_certified?'checked':''} style="width:auto">
+        <span>Launch Certified</span>
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; margin:8px 0">
+        <input type="checkbox" id="ecAdvisorOnly" ${c.is_advisor_only?'checked':''} style="width:auto">
+        <span>Advisor Only</span>
+      </label>
+      <label style="display:flex; align-items:center; gap:8px; margin:8px 0">
+        <input type="checkbox" id="ecHandoffCapable" ${c.is_handoff_capable?'checked':''} style="width:auto">
+        <span>Handoff-Capable</span>
+      </label>
     </fieldset>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveCoachEdit('${id}')">Save</button></div>`);
