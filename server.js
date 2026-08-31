@@ -3408,7 +3408,7 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
     if(!stillActive) db.prepare("UPDATE pending_clients SET status='ignored' WHERE keap_subscription_id=?").run(String(subId));
     return { subId, found: false, companyName: pc && pc.company_name || '' };
   }
-  let statusChanged = false, priceChanged = false;
+  let statusChanged = false, priceChanged = false, dateChanged = false;
   const newStatus = stillActive ? 'active' : 'cancelled';
   if(contract.status !== newStatus){
     db.prepare('UPDATE contracts SET status=? WHERE id=?').run(newStatus, contract.id);
@@ -3423,6 +3423,13 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
     log(source, 'contract.price', { contractId: contract.id, subId, oldPrice: contract.price, newPrice: keapAmount });
     priceChanged = true;
   }
+  // Sync start_date from Keap — update contract if subscription date differs
+  const keapStartDate = s.start_date || null;
+  if(keapStartDate && contract.start_date !== keapStartDate){
+    db.prepare('UPDATE contracts SET start_date=? WHERE id=?').run(keapStartDate, contract.id);
+    log(source, 'contract.start_date', { contractId: contract.id, subId, oldDate: contract.start_date, newDate: keapStartDate });
+    dateChanged = true;
+  }
   // Roll client status up from all their contracts.
   const client = db.prepare('SELECT * FROM clients WHERE id=?').get(contract.client_id);
   if(client){
@@ -3436,9 +3443,8 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
   // Note: we deliberately do NOT auto-delete future scheduled visits on churn — a lead
   // reviews the Inventory screen (now flagged via the client's cancelled status) and
   // removes/reassigns them by hand, so nothing gets silently wiped off the board.
-  return { subId, found: true, statusChanged, priceChanged, clientName: client ? client.name : '' };
+  return { subId, found: true, statusChanged, priceChanged, dateChanged, clientName: client ? client.name : '' };
 }
-
 /* ---------- manual "Sync with Keap" pass ----------
    Admin-triggered refresh of every contract we already own via keap_subscription_id.
    Reuses the exact same single-subscription lookup the webhook handler uses — this
