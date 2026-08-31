@@ -1037,6 +1037,7 @@ function board(){
     : global
     ? D.coaches.filter(c=>c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
     : D.coaches.filter(c=>c.active && c.team===t);
+  const placing = st.placing ? D.visits.find(v=>v.id===st.placing) : null;
   // Calendar client search: matches a visit's client name (case-insensitive substring).
   // Drives both the cell glow on the grid below and the results rail on the right.
   const calQ = norm(st.calSearch||'');
