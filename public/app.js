@@ -442,7 +442,6 @@ async function api(method, url, body){
   return j;
 }
 async function refresh(){
-  await loadHandoffModeSetting();
   D = await api('GET','/api/state');
   _gsClients = null; // stale after any data change — refetched on next search keystroke
   occ = {};
@@ -1530,12 +1529,13 @@ function availabilityView(){
   <p class="small" style="margin-bottom:12px">Can we take a new client, and when could they start? Finds coaches with enough open weeks to absorb the full visit cadence, after all existing commitments.</p>
   <div class="controls">
     <label>Program</label><select id="aProg">${PROGRAMS.map(p=>`<option ${p==='Quarterly'?'selected':''}>${p}</option>`).join('')}</select>
+    <label>Preferred Coach</label><select id="aCoach"><option value="">Any coach</option>${D.coaches.filter(c=>c.active).map(c=>`<option value="${c.id}">${esc(c.name)} (${c.team})</option>`).join('')}</select>
     <label>Team</label><select id="aTeam"><option>Any</option>${D.teams.map(t=>`<option>${t}</option>`).join('')}</select>
     <label>Start no earlier than</label><input type="date" id="aFrom" value="${TODAY}">
     <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
       <input type="checkbox" id="aFar" style="width:auto" ${st.due2027?'checked':''}> include unplanned months (2027+)</label>
     <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
-      <input type="checkbox" id="aHandoffMode" style="width:auto" ${st.handoffMode?'checked':''}> <b>Handoff Mode</b> — Allow different coaches for visits 2&3 when visit 1 requires a specific coach</label>
+      <input type="checkbox" id="aHandoffMode" style="width:auto" ${st.handoffMode?'checked':''}> <b>Handoff Mode</b> — Show alternative arrangements if preferred coach can't fit entire cadence</label>
     <button class="btn primary" onclick="runAvail()">Check availability</button>
   </div><div id="aOut"></div></div>
   <div class="panel"><h2>Open capacity by month</h2><div id="capOut"></div></div>
@@ -1545,78 +1545,109 @@ function availabilityView(){
 }
 function runAvail(){
   const prog=$('#aProg').value,team=$('#aTeam').value,from=$('#aFrom').value||TODAY;
+  const preferredCoachId = $('#aCoach').value;
   st.due2027=$('#aFar').checked;
+  st.handoffMode=$('#aHandoffMode').checked;
   const lastPlanned = D.blocks.reduce((a,b)=>b.week>a?b.week:a,'2026-12-28');
   const horizon = st.due2027 ? addDays(TODAY,420) : lastPlanned;
   const interval=INTERVAL[prog],nVisits=CYCLE_LEN[prog];
   const results=[];
-  
-  // Filter coaches by team and certification levels
-  // Only show Launch Certified coaches (they can take new clients)
-  // Exclude deactivated, Advisor Only, and non-Launch Certified coaches
-  const eligibleCoaches = D.coaches.filter(c => {
-    if(!c.active) return false; // Skip deactivated/former coaches
-    if(c.is_advisor_only) return false; // Skip Advisor Only coaches
-    if(!c.is_launch_certified) return false; // Only Launch Certified can take new clients
-    return team==='Any' || c.team===team;
-  });
-  
-  // Separate coaches by certification level for smarter assignment
-  const launchCertified = eligibleCoaches.filter(c => c.is_launch_certified);
-  const handoffCapable = eligibleCoaches.filter(c => c.is_handoff_capable);
-  const handoffModeOn = D.handoffModeEnabled || false;
-  
-  for(const c of eligibleCoaches){
-    const open=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(c.id,w));
-    if(!open.length) continue;
-    let plan=null;
-    for(const start of open){
-      const used=new Set([start]);const seq=[start];let ok=true;
-      
-      // Handoff Mode logic: for multi-visit cadences, try to use different coaches
-      // Visit 1: must be Launch Certified
-      // Visits 2&3: can be Handoff-Capable with same coach, or different Launch Certified
-      if(handoffModeOn && nVisits > 1 && c.is_launch_certified){
-        // This coach can take visit 1; try to find handoff coach for 2&3
-        for(let k=1;k<nVisits;k++){
-          const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
-          if(target>new Date(horizon+'T12:00:00')) break;
-          const tIso=target.toISOString().slice(0,10);
-          
-          // For visit 2&3, prefer same coach but allow Handoff-Capable
-          let cand = null;
-          const sameCoachCandidates = open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35);
-          if(sameCoachCandidates.length){
-            cand = sameCoachCandidates.sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
-          }
-          
-          if(!cand){ok=false;break;}
-          used.add(cand);seq.push(cand);
-        }
-      } else {
-        // Standard mode or single-visit: just find available weeks
-        for(let k=1;k<nVisits;k++){
-          const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
-          if(target>new Date(horizon+'T12:00:00')) break;
-          const tIso=target.toISOString().slice(0,10);
-          const cand=open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
-            .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
-          if(!cand){ok=false;break;}
-          used.add(cand);seq.push(cand);
-        }
-      }
-      
-      if(ok){plan={start,seq};break;}
+  // In handoff mode, allow Handoff-Capable coaches for follow-up visits
+  const launchCoachFilter = c => {
+    if(!c.active) return false;
+    if(c.is_advisor_only) return false;
+    if(!c.is_launch_certified) return false;
+    if(team !== 'Any' && c.team !== team) return false;
+    return true;
+  };
+  const followupCoachFilter = c => {
+    if(!c.active) return false;
+    if(c.is_advisor_only) return false;
+    if(st.handoffMode) {
+      // In handoff mode, allow Launch Certified OR Handoff-Capable
+      return c.is_launch_certified || c.is_handoff_capable;
+    } else {
+      // Normal mode: only Launch Certified
+      return c.is_launch_certified;
     }
-    if(plan) results.push({coach:c,plan,spare:open.length-plan.seq.length});
+  };
+  // If preferred coach is specified with handoff mode, find partial cadence matches
+  if(preferredCoachId && st.handoffMode){
+    const prefCoach = getCoach(preferredCoachId);
+    if(prefCoach && launchCoachFilter(prefCoach)){
+      const prefOpen = mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(prefCoach.id,w));
+      for(const start of prefOpen){
+        const coachAssignments = {[0]: prefCoach.id}; // Visit 1 = preferred coach
+        const used = new Set([start]);
+        const seq = [start];
+        let partialOk = true;
+        for(let k=1;k<nVisits;k++){
+          const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
+          if(target>new Date(horizon+'T12:00:00')) break;
+          const tIso=target.toISOString().slice(0,10);
+          let cand = null;
+          let candCoach = null;
+          // Try preferred coach first, then fallback to other coaches
+          const prefCandidates = prefOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35);
+          if(prefCandidates.length) {
+            cand = prefCandidates.sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
+            candCoach = prefCoach.id;
+          } else {
+            // Preferred coach can't do this visit, find an alternative
+            const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
+            for(const coach of allFollowupCoaches){
+              const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(coach.id,w));
+              const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
+                .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
+              if(candidate){cand=candidate;candCoach=coach.id;break;}
+            }
+          }
+          if(!cand){partialOk=false;break;}
+          coachAssignments[k] = candCoach;
+          used.add(cand);seq.push(cand);
+        }
+        if(partialOk) results.push({coach:prefCoach,plan:{start,seq},spare:prefOpen.length-seq.length,coachAssignments});
+      }
+    }
+  } else {
+    // Standard logic: no preferred coach or handoff mode off
+    for(const c of D.coaches.filter(launchCoachFilter)){
+      const open=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(c.id,w));
+      if(!open.length) continue;
+      let plan=null;
+      for(const start of open){
+        const used=new Set([start]);const seq=[start];let ok=true;
+        for(let k=1;k<nVisits;k++){
+          const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
+          if(target>new Date(horizon+'T12:00:00')) break;
+          const tIso=target.toISOString().slice(0,10);
+          let cand=null;
+          if(st.handoffMode && k>0){
+            const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
+            for(const coach of allFollowupCoaches){
+              const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isOpen(coach.id,w));
+              const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
+                .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
+              if(candidate){cand=candidate;break;}
+            }
+          } else {
+            cand=open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
+              .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
+          }
+          if(!cand){ok=false;break;}
+          used.add(cand);seq.push(cand);
+        }
+        if(ok){plan={start,seq};break;}
+      }
+      if(plan) results.push({coach:c,plan,spare:open.length-plan.seq.length});
+    }
   }
-  
-  // Sort results: Launch Certified first, then by start date
-  results.sort((a,b) => {
-    if(a.coach.is_launch_certified !== b.coach.is_launch_certified) return b.coach.is_launch_certified ? 1 : -1;
+  results.sort((a,b)=>{
+    const aIsLaunch = a.coach.is_launch_certified ? 0 : 1;
+    const bIsLaunch = b.coach.is_launch_certified ? 0 : 1;
+    if(aIsLaunch !== bIsLaunch) return aIsLaunch - bIsLaunch;
     return a.plan.start.localeCompare(b.plan.start);
   });
-  
   st.availResults = results; st.availProg = prog;
   let html='';
   if(!results.length){
@@ -1626,13 +1657,26 @@ function runAvail(){
     Earliest start: <b>week of ${fmt(results[0].plan.start)}</b> with ${esc(results[0].coach.name)} (Team ${results[0].coach.team}).</p>
     <table><tr><th>Primary Coach</th><th>Team</th><th>Earliest start</th><th>Projected visits</th><th class="num">Spare weeks</th><th></th></tr>`;
     results.slice(0,12).forEach((r,i)=>{
-      html+=`<tr><td><b>${esc(r.coach.name)}</b></td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
-      <td>${r.plan.seq.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td><td class="num">${r.spare}</td>
+      let coachInfo = `<b>${esc(r.coach.name)}</b>`;
+      if(r.coachAssignments){
+        const uniqueCoaches = new Set(Object.values(r.coachAssignments));
+        if(uniqueCoaches.size > 1){
+          coachInfo += ` <span class="pill" style="font-size:0.85em">handoff to ${uniqueCoaches.size} coaches</span>`;
+        }
+      }
+      html+=`<tr><td>${coachInfo}</td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
+      <td>${r.plan.seq.map((w,vidx)=>{
+        const assignedCoach = r.coachAssignments ? getCoach(r.coachAssignments[vidx]) : r.coach;
+        const label = assignedCoach && assignedCoach.id !== r.coach.id ? `${fmtW(w)}*` : fmtW(w);
+        return `<span class="result-week" title="${assignedCoach?.name || 'unknown'}">${label}</span>`;
+      }).join('')}</td><td class="num">${r.spare}</td>
       <td><button class="btn tiny" onclick="previewAvailCoach(${i})">Preview calendar</button></td></tr>`;
     });
     html+=`</table>`;
   }
-  html+=`<p class="small" style="margin-top:8px">Planning horizon: through ${fmt(horizon)}. ${st.due2027?'Months past the current plan read as fully open — treat those as estimates.':'Check the box above to look into 2027 (not yet planned).'}</p>`;
+  let note = `Planning horizon: through ${fmt(horizon)}. ${st.due2027?'Months past the current plan read as fully open — treat those as estimates.':'Check the box above to look into 2027 (not yet planned).'}`;
+  if(st.handoffMode && results.some(r=>r.coachAssignments)) note += ` Visits marked with * are assigned to different coaches.`;
+  html+=`<p class="small" style="margin-top:8px">${note}</p>`;
   $('#aOut').innerHTML=html;
   closePreviewOverlay();
   loadSoftHolds();
@@ -2512,35 +2556,12 @@ function editCoachDlg(id){
     <label>Team</label><select id="ecTeam">${teamOpts(c.team)}</select>
     <label>Phone</label><input id="ecPhone" value="${esc(c.phone||'')}" placeholder="(555) 555-5555">
     <label>Start date</label><input type="date" id="ecStart" value="${c.start_date||''}">
-    <fieldset style="margin:12px 0; padding:12px; border:1px solid #ddd; border-radius:4px">
-      <legend style="padding:0 4px"><b>Certification Levels</b></legend>
-      <label style="display:flex; align-items:center; gap:8px; margin:8px 0">
-        <input type="checkbox" id="ecLaunchCert" ${c.is_launch_certified?'checked':''} style="width:auto">
-        <span>Launch Certified</span>
-      </label>
-      <label style="display:flex; align-items:center; gap:8px; margin:8px 0">
-        <input type="checkbox" id="ecAdvisorOnly" ${c.is_advisor_only?'checked':''} style="width:auto">
-        <span>Advisor Only</span>
-      </label>
-      <label style="display:flex; align-items:center; gap:8px; margin:8px 0">
-        <input type="checkbox" id="ecHandoffCapable" ${c.is_handoff_capable?'checked':''} style="width:auto">
-        <span>Handoff-Capable</span>
-      </label>
-    </fieldset>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveCoachEdit('${id}')">Save</button></div>`);
 }
 async function saveCoachEdit(id){
   const name = $('#ecName').value.trim(); if(!name){ uiAlert('Name required'); return; }
-  await api('PATCH','/api/coaches/'+id, { 
-    name, 
-    team: $('#ecTeam').value, 
-    phone: $('#ecPhone').value.trim(), 
-    start_date: $('#ecStart').value || null,
-    is_launch_certified: $('#ecLaunchCert').checked,
-    is_advisor_only: $('#ecAdvisorOnly').checked,
-    is_handoff_capable: $('#ecHandoffCapable').checked
-  });
+  await api('PATCH','/api/coaches/'+id, { name, team: $('#ecTeam').value, phone: $('#ecPhone').value.trim(), start_date: $('#ecStart').value || null });
   closeDlg(); await refresh(); toast('Profile updated');
   if(st.view==='coachprofile') await loadCoachProfile(st.coachId);
 }
@@ -2789,28 +2810,6 @@ function faqView(){
    full scroll of roster history, which non-technical admins simply never found. */
 const ADMIN_TABS = [['people','Team & Users'],['data','Data & Backups'],['history','History & Audit']];
 function setAdminTab(t){ st.adminTab=t; render(); }
-
-async function loadHandoffModeSetting(){
-  try {
-    const r = await api('GET', '/api/settings/handoff-mode');
-    D.handoffModeEnabled = r.handoff_mode_enabled;
-    render();
-  } catch(e) {
-    console.error('Failed to load handoff mode setting:', e);
-  }
-}
-
-async function toggleHandoffMode(enabled){
-  try {
-    await api('PUT', '/api/settings/handoff-mode', { enabled });
-    D.handoffModeEnabled = enabled;
-    toast(enabled ? 'Handoff Mode enabled' : 'Handoff Mode disabled');
-    render();
-  } catch(e) {
-    uiAlert('Failed to update handoff mode: ' + e.message);
-  }
-}
-
 function adminView(){
   const tab = st.adminTab || 'people';
   let html = `<div class="controls" style="margin-bottom:14px">` +
@@ -2820,10 +2819,7 @@ function adminView(){
   return html + adminHistoryView();
 }
 function adminPeopleView(){
-  let html=`<div class="panel"><h2>Global settings</h2>
-    <label><input type="checkbox" ${D.handoffModeEnabled?'checked':''} onchange="toggleHandoffMode(this.checked)">
-    <span><b>Handoff Mode</b> — Allow the availability calculator to assign different coaches to visits 2&amp;3 when visit 1 requires a specific coach</span></label>
-  </div><div class="panel"><h2>Teams &amp; coaches</h2>
+  let html=`<div class="panel"><h2>Teams &amp; coaches</h2>
     <div class="controls"><button class="btn primary" onclick="coachDlg()">＋ Add coach</button>
     <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
   for(const t of D.teams){
