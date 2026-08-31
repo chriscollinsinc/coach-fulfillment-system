@@ -442,6 +442,7 @@ async function api(method, url, body){
   return j;
 }
 async function refresh(){
+  await loadHandoffModeSetting();
   D = await api('GET','/api/state');
   _gsClients = null; // stale after any data change — refetched on next search keystroke
   occ = {};
@@ -2462,12 +2463,29 @@ function editCoachDlg(id){
     <label>Team</label><select id="ecTeam">${teamOpts(c.team)}</select>
     <label>Phone</label><input id="ecPhone" value="${esc(c.phone||'')}" placeholder="(555) 555-5555">
     <label>Start date</label><input type="date" id="ecStart" value="${c.start_date||''}">
+    <fieldset style="margin:12px 0; padding:12px; border:1px solid #ddd; border-radius:4px">
+      <legend style="padding:0 4px"><b>Certification Levels</b></legend>
+      <label><input type="checkbox" id="ecLaunchCert" ${c.is_launch_certified?'checked':''}>
+      <span>Launch Certified</span></label>
+      <label><input type="checkbox" id="ecAdvisorOnly" ${c.is_advisor_only?'checked':''}>
+      <span>Advisor Only</span></label>
+      <label><input type="checkbox" id="ecHandoffCapable" ${c.is_handoff_capable?'checked':''}>
+      <span>Handoff-Capable</span></label>
+    </fieldset>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveCoachEdit('${id}')">Save</button></div>`);
 }
 async function saveCoachEdit(id){
   const name = $('#ecName').value.trim(); if(!name){ uiAlert('Name required'); return; }
-  await api('PATCH','/api/coaches/'+id, { name, team: $('#ecTeam').value, phone: $('#ecPhone').value.trim(), start_date: $('#ecStart').value || null });
+  await api('PATCH','/api/coaches/'+id, { 
+    name, 
+    team: $('#ecTeam').value, 
+    phone: $('#ecPhone').value.trim(), 
+    start_date: $('#ecStart').value || null,
+    is_launch_certified: $('#ecLaunchCert').checked,
+    is_advisor_only: $('#ecAdvisorOnly').checked,
+    is_handoff_capable: $('#ecHandoffCapable').checked
+  });
   closeDlg(); await refresh(); toast('Profile updated');
   if(st.view==='coachprofile') await loadCoachProfile(st.coachId);
 }
@@ -2716,6 +2734,28 @@ function faqView(){
    full scroll of roster history, which non-technical admins simply never found. */
 const ADMIN_TABS = [['people','Team & Users'],['data','Data & Backups'],['history','History & Audit']];
 function setAdminTab(t){ st.adminTab=t; render(); }
+
+async function loadHandoffModeSetting(){
+  try {
+    const r = await api('GET', '/api/settings/handoff-mode');
+    D.handoffModeEnabled = r.handoff_mode_enabled;
+    render();
+  } catch(e) {
+    console.error('Failed to load handoff mode setting:', e);
+  }
+}
+
+async function toggleHandoffMode(enabled){
+  try {
+    await api('PUT', '/api/settings/handoff-mode', { enabled });
+    D.handoffModeEnabled = enabled;
+    toast(enabled ? 'Handoff Mode enabled' : 'Handoff Mode disabled');
+    render();
+  } catch(e) {
+    uiAlert('Failed to update handoff mode: ' + e.message);
+  }
+}
+
 function adminView(){
   const tab = st.adminTab || 'people';
   let html = `<div class="controls" style="margin-bottom:14px">` +
@@ -2725,7 +2765,10 @@ function adminView(){
   return html + adminHistoryView();
 }
 function adminPeopleView(){
-  let html=`<div class="panel"><h2>Teams &amp; coaches</h2>
+  let html=`<div class="panel"><h2>Global settings</h2>
+    <label><input type="checkbox" ${D.handoffModeEnabled?'checked':''} onchange="toggleHandoffMode(this.checked)">
+    <span><b>Handoff Mode</b> — Allow the availability calculator to assign different coaches to visits 2&amp;3 when visit 1 requires a specific coach</span></label>
+  </div><div class="panel"><h2>Teams &amp; coaches</h2>
     <div class="controls"><button class="btn primary" onclick="coachDlg()">＋ Add coach</button>
     <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
   for(const t of D.teams){
