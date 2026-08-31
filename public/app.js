@@ -1550,10 +1550,12 @@ function runAvail(){
   const results=[];
   
   // Filter coaches by team and certification levels
-  // Exclude Advisor Only coaches and deactivated coaches (they cannot take new clients)
+  // Only show Launch Certified coaches (they can take new clients)
+  // Exclude deactivated, Advisor Only, and non-Launch Certified coaches
   const eligibleCoaches = D.coaches.filter(c => {
     if(!c.active) return false; // Skip deactivated/former coaches
     if(c.is_advisor_only) return false; // Skip Advisor Only coaches
+    if(!c.is_launch_certified) return false; // Only Launch Certified can take new clients
     return team==='Any' || c.team===team;
   });
   
