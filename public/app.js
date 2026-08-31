@@ -1535,7 +1535,7 @@ function availabilityView(){
     <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
       <input type="checkbox" id="aFar" style="width:auto" ${st.due2027?'checked':''}> include unplanned months (2027+)</label>
     <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
-      <input type="checkbox" id="aHandoff" style="width:auto" ${st.includeHandoff?'checked':''}> include handoff capable</label>
+      <input type="checkbox" id="aHandoffMode" style="width:auto" ${st.handoffMode?'checked':''}> <b>Handoff Mode</b> — Allow different coaches for visits 2&3 when visit 1 requires a specific coach</label>
     <button class="btn primary" onclick="runAvail()">Check availability</button>
   </div><div id="aOut"></div></div>
   <div class="panel"><h2>Open capacity by month</h2><div id="capOut"></div></div>
@@ -1624,10 +1624,9 @@ function runAvail(){
   }else{
     html=`<p style="margin:8px 0"><b style="color:var(--ok)">Yes — ${results.length} coach${results.length>1?'es':''} can take a new ${prog} client.</b>
     Earliest start: <b>week of ${fmt(results[0].plan.start)}</b> with ${esc(results[0].coach.name)} (Team ${results[0].coach.team}).</p>
-    <table><tr><th>Coach</th><th>Certification</th><th>Team</th><th>Earliest start</th><th>Projected visit weeks</th><th class="num">Spare open weeks</th><th></th></tr>`;
+    <table><tr><th>Primary Coach</th><th>Team</th><th>Earliest start</th><th>Projected visits</th><th class="num">Spare weeks</th><th></th></tr>`;
     results.slice(0,12).forEach((r,i)=>{
-      const certBadge = r.coach.is_launch_certified ? '<span class="pill p-done">Launch Certified</span>' : '<span class="pill">Handoff-Capable</span>';
-      html+=`<tr><td><b>${esc(r.coach.name)}</b></td><td>${certBadge}</td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
+      html+=`<tr><td><b>${esc(r.coach.name)}</b></td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
       <td>${r.plan.seq.map(w=>`<span class="result-week">${fmtW(w)}</span>`).join('')}</td><td class="num">${r.spare}</td>
       <td><button class="btn tiny" onclick="previewAvailCoach(${i})">Preview calendar</button></td></tr>`;
     });
