@@ -1529,7 +1529,7 @@ function availabilityView(){
   <p class="small" style="margin-bottom:12px">Can we take a new client, and when could they start? Finds coaches with enough open weeks to absorb the full visit cadence, after all existing commitments.</p>
   <div class="controls">
     <label>Program</label><select id="aProg">${PROGRAMS.map(p=>`<option ${p==='Quarterly'?'selected':''}>${p}</option>`).join('')}</select>
-    <label>Preferred Coach</label><select id="aCoach"><option value="">Any coach</option>${D.coaches.filter(c=>c.active).map(c=>`<option value="${c.id}">${esc(c.name)} (${c.team})</option>`).join('')}</select>
+    <label>Preferred Coach</label><select id="aCoach"><option value="">Any coach</option>${D.coaches.filter(c=>c.active && c.is_launch_certified).map(c=>`<option value="${c.id}">${esc(c.name)} (${c.team})</option>`).join('')}</select>
     <label>Team</label><select id="aTeam"><option>Any</option>${D.teams.map(t=>`<option>${t}</option>`).join('')}</select>
     <label>Start no earlier than</label><input type="date" id="aFrom" value="${TODAY}">
     <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
