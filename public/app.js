@@ -626,7 +626,7 @@ function render(){
   if(r==='coach' && D.user.coach_id) views.myprofile='My Profile';
   if(r==='admin') views.admin='Admin';
   views.faq='FAQ';
-  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && !(st.view==='pending'&&hasPending)){
+  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && st.view!=='formercoaches' && !(st.view==='pending'&&hasPending)){
     // First landing: leads live on the Schedule Board day-to-day, not the capacity dashboard
     st.view = r==='lead' ? 'board' : Object.keys(views)[0];
   }
@@ -665,6 +665,7 @@ function render(){
   if(st.view==='dashboard'){ m.innerHTML=dashboard(); loadToday(); }
   if(st.view==='board') m.innerHTML=board();
   if(st.view==='global') m.innerHTML=board();
+  if(st.view==='formercoaches') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
   if(st.view==='clients'){ m.innerHTML=clientsView(); loadClients(); }
@@ -878,7 +879,12 @@ async function bulkConfirmCompleted(){
   }catch(e){ uiAlert(e.message||'Bulk confirm failed'); }
 }
 const invJump = f => `st.invFilter='${f}';st.invSel=new Set();go('inventory')`;
-const placeJump = v => `st.view='board';st.boardTeam='${esc(v.team)}';${v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:''}st.placing=${v.id};render()`;
+const placeJump = v => {
+  const targetView = st.view === 'formercoaches' ? 'formercoaches' : 'board';
+  const teamCmd = st.view === 'formercoaches' ? '' : `st.boardTeam='${esc(v.team)}';`;
+  const dateCmd = v.due?`st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};`:'';
+  return `st.view='${targetView}';${teamCmd}${dateCmd}st.placing=${v.id};render()`;
+};
 function todayRows(list, maxN, rowFn){
   return list.slice(0,maxN).map(rowFn).join('') +
     (list.length>maxN?`<tr><td colspan="9" class="small">…and ${list.length-maxN} more</td></tr>`:'');
@@ -1025,10 +1031,12 @@ function board(){
   const global = st.view==='global';
   const t=st.boardTeam, y=st.boardY, m=st.boardM;
   const weeks=mondaysInMonth(y,m);
-  const members = global
-    ? D.coaches.filter(c=>myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
-    : D.coaches.filter(c=>c.team===t);
-  const placing = st.placing ? D.visits.find(v=>v.id===st.placing) : null;
+  const formerCoachesView = st.view === 'formercoaches';
+  const members = formerCoachesView
+    ? D.coaches.filter(c=>!c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
+    : global
+    ? D.coaches.filter(c=>c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
+    : D.coaches.filter(c=>c.active && c.team===t);
   // Calendar client search: matches a visit's client name (case-insensitive substring).
   // Drives both the cell glow on the grid below and the results rail on the right.
   const calQ = norm(st.calSearch||'');
@@ -1051,6 +1059,7 @@ function board(){
     ${global?`<span class="btn primary" style="cursor:default" title="All teams shown together">All teams</span>`:''}
     ${myTeams().map(x=>`<button class="btn ${(!global&&x===t)?'primary':''}" onclick="st.view='board';st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
     ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
+    ${canEditWeeks()?`<button class="btn ${st.view==='formercoaches'?'primary':''}" onclick="st.view='formercoaches';st.placing=null;render()">Former Coaches</button>`:""}
     <span style="flex:1"></span>
     <div class="calsearch">
       <input id="calSearchBox" placeholder="🔍 Search a client's visits…" autocomplete="off" value="${esc(st.calSearch||'')}"
@@ -1225,6 +1234,18 @@ function dictate(targetId){
   try{ rec.start(); }catch(e){}
 }
 function cellDlg(cid,w){
+  if(st.view === 'formercoaches'){
+    const o=occ[cid+'|'+w];
+    if(o){
+      const label = o.type==='visit' ? `${o.v.client} - ${o.v.cycle} ${o.v.program}` : (o.label||BLOCKKINDS[o.kind]||o.kind);
+      openDlg(`<h3>Remove from ${esc(coach(cid).name)} — week of ${fmt(w)}</h3>
+        <p>Delete <b>${esc(label)}</b>?</p>
+        <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+        <button class="btn danger" onclick="deleteBlock('${cid}','${w}')">Delete</button></div>`);
+      return;
+    }
+    return;
+  }
   const o=occ[cid+'|'+w]; const cur=o&&o.type==='block'?o.kind:'open';
   const opts=[['open','Open (available)'],...Object.entries(BLOCKKINDS).filter(([k])=>!['visit','visit_legacy'].includes(k))]
     .map(([k,l])=>`<option value="${k}" ${cur===k?'selected':''}>${l}</option>`).join('');
@@ -1236,6 +1257,10 @@ function cellDlg(cid,w){
 }
 async function saveCell(cid,w){
   await api('PUT','/api/blocks',{coach:cid,week:w,kind:$('#ctKind').value,label:$('#ctLabel').value.trim()});
+  closeDlg(); await refresh();
+}
+async function deleteBlock(cid,w){
+  await api('PUT','/api/blocks',{coach:cid,week:w,kind:'open',label:''});
   closeDlg(); await refresh();
 }
 
