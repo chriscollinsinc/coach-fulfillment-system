@@ -37,7 +37,7 @@ function googleRedirectUri(req){
 async function handleGoogleStart(req, res){
   const state = crypto.randomBytes(16).toString('hex');
   const redirectUri = googleRedirectUri(req);
-  console.log("[OAuth Start]", { "x-forwarded-host": req.headers["x-forwarded-host"], "host": req.headers.host, "redirect_uri": redirectUri });
+  console.log("[OAuth Start]", { "PUBLIC_DOMAIN": process.env.PUBLIC_DOMAIN, "x-forwarded-host": req.headers["x-forwarded-host"], "host": req.headers.host, "redirect_uri": redirectUri });
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
     redirect_uri: redirectUri,
