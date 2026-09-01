@@ -42,7 +42,7 @@ async function handleGoogleStart(req, res){
   console.log("[OAuth Start]", { "PUBLIC_DOMAIN": process.env.PUBLIC_DOMAIN, "x-forwarded-host": req.headers["x-forwarded-host"], "host": req.headers.host, "redirect_uri": redirectUri });
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
-    redirect_uri: redirectUri,
+    redirect_uri: googleRedirectUri(req),
     response_type: 'code',
     scope: 'openid email profile',
     state,
@@ -68,7 +68,7 @@ async function handleGoogleCallback(req, res, url){
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: redirectUri, grant_type: 'authorization_code',
+        redirect_uri: googleRedirectUri(req), grant_type: 'authorization_code',
       }),
     });
     const tokenJson = await tokenRes.json();
