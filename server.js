@@ -30,9 +30,11 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_ALLOWED_DOMAIN = (process.env.GOOGLE_ALLOWED_DOMAIN || '').toLowerCase();
 function googleRedirectUri(req){
   const publicDomain = process.env.PUBLIC_DOMAIN || '';
-  if(publicDomain) return `https://${publicDomain}/auth/google/callback`;
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  return `https://${host}/auth/google/callback`;
+  let domain = publicDomain || (req.headers['x-forwarded-host'] || req.headers.host);
+  // Google OAuth only accepts base domains (ccicoach.com), not subdomains (www.ccicoach.com)
+  // Strip www. prefix if present so Google's domain validation passes
+  if(domain.startsWith('www.')) domain = domain.slice(4);
+  return `https://${domain}/auth/google/callback`;
 }
 async function handleGoogleStart(req, res){
   const state = crypto.randomBytes(16).toString('hex');
