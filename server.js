@@ -29,7 +29,8 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_ALLOWED_DOMAIN = (process.env.GOOGLE_ALLOWED_DOMAIN || '').toLowerCase();
 function googleRedirectUri(req){
-  return `https://${req.headers.host}/auth/google/callback`;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `https://${host}/auth/google/callback`;
 }
 async function handleGoogleStart(req, res){
   const state = crypto.randomBytes(16).toString('hex');
