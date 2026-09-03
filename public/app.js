@@ -2320,9 +2320,13 @@ async function attachCompanyId(clientId){
   const companyId = $('#cliCompanyId').value.trim();
   if(!companyId){ uiAlert('Enter a company ID'); return; }
   try{
-    await api('PATCH','/api/clients/'+clientId,{company_id:companyId});
+    const res = await api('PATCH','/api/clients/'+clientId,{company_id:companyId});
     await refresh();
-    toast('Company ID attached — name synced');
+    if(res.syncedName){
+      toast(`Company ID attached — name synced to "${res.syncedName}"`);
+    } else {
+      toast('Company ID attached');
+    }
   }catch(e){ uiAlert(e.message||'Could not attach company ID'); }
 }
 async function detachCompanyId(clientId){

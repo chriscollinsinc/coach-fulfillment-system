@@ -2843,7 +2843,7 @@ function clientHealth(cl, contracts, visits, assignedCoach){
   const label = level === 'at_risk' ? 'At risk' : level === 'behind' ? 'Behind — recoverable' : 'On track';
   return { level, label, reasons, warnings };
 }
-route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
+route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], async (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
   const result = { ok: true };
@@ -2893,7 +2893,25 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
   if(body.company_id !== undefined){
     const cid = String(body.company_id || '').trim();
     db.prepare('UPDATE clients SET company_id=? WHERE id=?').run(cid || null, cl.id);
-    log(user.email, 'client.company_id_attach', { clientId: cl.id, name: cl.name, company_id: cid });
+    result.syncedName = null;
+    // If setting a new company_id (not clearing), fetch company name from Keap and sync it
+    if(cid && KEAP_TOKEN){
+      try {
+        const companyRes = await keapGet(`/v1/companies/${encodeURIComponent(cid)}`);
+        if(companyRes.ok && companyRes.json && companyRes.json.company_name){
+          const syncedName = companyRes.json.company_name;
+          db.prepare('UPDATE clients SET name=? WHERE id=?').run(syncedName, cl.id);
+          result.syncedName = syncedName;
+          log(user.email, 'client.company_id_attach_synced', { clientId: cl.id, company_id: cid, syncedName });
+        } else {
+          log(user.email, 'client.company_id_attach', { clientId: cl.id, name: cl.name, company_id: cid, keapFetchFailed: true });
+        }
+      } catch(e) {
+        log(user.email, 'client.company_id_attach', { clientId: cl.id, name: cl.name, company_id: cid, keapError: e.message });
+      }
+    } else {
+      log(user.email, 'client.company_id_attach', { clientId: cl.id, name: cl.name, company_id: cid });
+    }
   }
   send(res, 200, result);
 });
