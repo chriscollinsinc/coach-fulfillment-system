@@ -229,6 +229,7 @@ ensureColumn('visits', 'completed_date', 'TEXT');
    shown on their profile page, editable by admins/leads. */
 ensureColumn('coaches', 'phone', 'TEXT');
 ensureColumn('coaches', 'start_date', 'TEXT');
+ensureColumn('coaches', 'is_lead', 'INTEGER DEFAULT 0');
 /* Resolved company/client name for a webhook event, filled in when we successfully
    look it up from Keap (or from our own records for edit/delete) — so the Admin
    "Keap webhook activity" diagnostic table can show a human name instead of forcing

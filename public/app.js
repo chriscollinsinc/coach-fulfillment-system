@@ -1370,6 +1370,7 @@ function inventory(){
       <b>${sel.size} selected</b>
       <button class="btn tiny" style="margin-left:10px" onclick="bulkCompleteVisits()">Mark completed</button>
       <button class="btn tiny" onclick="bulkAssignCoachDlg()">Assign to coach</button>
+      <button class="btn tiny" onclick="bulkAssignLeadDlg()">Assign to lead</button>
       <button class="btn tiny danger" onclick="bulkDeleteVisits()">Delete</button>
       <button class="btn tiny" onclick="st.invSel=new Set();render()">Clear selection</button></div>`;
   }
@@ -1468,6 +1469,25 @@ async function bulkAssignCoach(){
     try{ const c = coach(coachId); await api('PATCH', `/api/visits/${id}`, {team: c.team}); ok++; }catch(e){ console.error(e); }
   }
   closeDlg(); st.invSel = new Set(); await refresh(); toast(`${ok} of ${ids.length} assigned`);
+}
+function bulkAssignLeadDlg(){
+  const ids=[...st.invSel];
+  const assignable = D.coaches.filter(c => c.active && c.is_lead).sort((a,b) => (a.team+"|"+a.name).localeCompare(b.team+"|"+b.name));
+  const opts = assignable.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  openDlg(`<h3>Assign ${ids.length} visit(s) to lead</h3>
+    <label>Select lead</label><select id="bulkLeadId">${opts}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="bulkAssignLead()">Assign</button></div>`);
+}
+async function bulkAssignLead(){
+  const leadId = parseInt($("#bulkLeadId").value);
+  const ids = [...st.invSel];
+  if(!leadId || !ids.length) return;
+  let ok = 0;
+  for(const id of ids){
+    try{ const c = coach(leadId); await api("PATCH", `/api/visits/${id}`, {team: c.team}); ok++; }catch(e){ console.error(e); }
+  }
+  closeDlg(); st.invSel = new Set(); await refresh(); toast(`${ok} of ${ids.length} assigned to lead`);
 }
 /* First pay date, not first visit due date — new clients' first visit isn't due
  * until 90 days after they were actually first charged, so this collects the real
