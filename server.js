@@ -56,7 +56,7 @@ async function handleGoogleStart(req, res){
   res.end();
 }
 async function handleGoogleCallback(req, res, url){
-  const fail = (reason) => { res.writeHead(302, { Location: `https://ccicoach.com/?ssoerror=${encodeURIComponent(reason)}` }); res.end(); };
+  const fail = (reason) => { res.writeHead(302, { Location: `?ssoerror=${encodeURIComponent(reason)}` }); res.end(); };
   try{
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
@@ -88,7 +88,7 @@ async function handleGoogleCallback(req, res, url){
 
     log(u.email, 'login.google_sso', '');
     res.writeHead(302, {
-      Location: 'https://ccicoach.com/',
+      Location: '',
       'Set-Cookie': [
         sessionCookie(String(u.id)),
         'ssostate=; Path=/; Max-Age=0',
