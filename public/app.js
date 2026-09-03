@@ -1284,6 +1284,8 @@ async function deleteBlock(cid,w){
   await api('PUT','/api/blocks',{coach:cid,week:w,kind:'open',label:''});
   closeDlg(); await refresh();
 }
+/* Inventory column definitions */
+const hint = t => `<span title="${esc(t)}" style="cursor:help;color:var(--muted);border-bottom:1px dotted var(--muted)">?</span>`;
 const INV_COLS = [
   { key:'client', label:'Client', get:v=>v.client||'' },
   { key:'team', label:'Team', get:v=>v.team||'' },
