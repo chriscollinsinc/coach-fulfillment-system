@@ -3177,6 +3177,14 @@ async function queueSubscriptionAsPending(s, opts = {}){
       companyName = cj.company?.company_name || '';
       contactName = [cj.given_name, cj.family_name].filter(Boolean).join(' ');
     }
+    // If we didn't get a company name from the person lookup, try the same id as a company
+    // (Keap subscriptions on company records have contact_id = company id)
+    if(!companyName){
+      const co = await keapGet(`/v1/companies/${s.contact_id}`);
+      if(co.ok && co.json && co.json.company_name){
+        companyName = co.json.company_name;
+      }
+    }
   }
   const resolvedCompanyId = await keapResolveCompanyId(s.contact_id);
   db.prepare(`INSERT INTO pending_clients
