@@ -1369,6 +1369,7 @@ function inventory(){
     html+=`<div class="panel" style="border-left:4px solid var(--primary);padding:10px 14px;margin-bottom:12px">
       <b>${sel.size} selected</b>
       <button class="btn tiny" style="margin-left:10px" onclick="bulkCompleteVisits()">Mark completed</button>
+      <button class="btn tiny" onclick="bulkAssignCoachDlg()">Assign to coach</button>
       <button class="btn tiny danger" onclick="bulkDeleteVisits()">Delete</button>
       <button class="btn tiny" onclick="st.invSel=new Set();render()">Clear selection</button></div>`;
   }
@@ -1448,6 +1449,26 @@ async function bulkDeleteVisits(){
 const clientNames=()=>[...new Set(D.visits.map(v=>v.client))].sort();
 const teamOpts=sel=>myTeams().map(t=>`<option ${t===sel?'selected':''}>${t}</option>`).join('');
 const progOpts=sel=>PROGRAMS.map(p=>`<option ${p===sel?'selected':''}>${p}</option>`).join('');
+function bulkAssignCoachDlg(){
+  const ids=[...st.invSel];
+  const assignable = D.coaches.filter(c => c.active && (c.role==='coach' || c.role==='lead'));
+  const opts = assignable.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  openDlg(`<h3>Assign ${ids.length} visit(s) to team lead</h3>
+    <label>Select coach or team lead</label>
+    <select id="bulkCoachId">${opts}</select>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="bulkAssignCoach()">Assign</button></div>`);
+}
+async function bulkAssignCoach(){
+  const coachId = parseInt($('#bulkCoachId').value);
+  const ids = [...st.invSel];
+  if(!coachId || !ids.length) return;
+  let ok = 0;
+  for(const id of ids){
+    try{ const c = coach(coachId); await api('PATCH', `/api/visits/${id}`, {team: c.team}); ok++; }catch(e){ console.error(e); }
+  }
+  closeDlg(); st.invSel = new Set(); await refresh(); toast(`${ok} of ${ids.length} assigned`);
+}
 /* First pay date, not first visit due date — new clients' first visit isn't due
  * until 90 days after they were actually first charged, so this collects the real
  * charge date and shows the computed due date as a preview; the server (not this
