@@ -1247,6 +1247,18 @@ function cellDlg(cid,w){
         <button class="btn danger" onclick="deleteBlock('${cid}','${w}')">Delete</button></div>`);
       return;
     }
+    const completedVisits = D.visits.filter(v => v.completed && v.cal_coach === cid).sort((a,b) => (b.completed || '').localeCompare(a.completed || ''));
+    if(!completedVisits.length){
+      openDlg(`<h3>${esc(coach(cid).name)} — week of ${fmt(w)}</h3>
+        <p>No completed visits to place.</p>
+        <div class="dlgrow"><button class="btn" onclick="closeDlg()">Close</button></div>`);
+      return;
+    }
+    const opts = completedVisits.map(v => `<option value="${v.id}">${esc(v.client)} (${esc(v.program)}) - ${esc(v.cycle)}</option>`).join('');
+    openDlg(`<h3>Place past visit for ${esc(coach(cid).name)} — week of ${fmt(w)}</h3>
+      <label>Select completed visit</label><select id="pastVisitId">${opts}</select>
+      <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+      <button class="btn primary" onclick="savePastVisitPlacement('${cid}','${w}')">Place visit</button></div>`);
     return;
   }
   const o=occ[cid+'|'+w]; const cur=o&&o.type==='block'?o.kind:'open';
@@ -1258,6 +1270,12 @@ function cellDlg(cid,w){
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveCell('${cid}','${w}')">Save</button></div>`);
 }
+async function savePastVisitPlacement(cid,w){
+  const visitId = $('#pastVisitId').value;
+  if(!visitId) return;
+  await api('POST','/api/place-past-visit',{visit_id:parseInt(visitId),coach_id:cid,week:w});
+  closeDlg(); await refresh();
+}
 async function saveCell(cid,w){
   await api('PUT','/api/blocks',{coach:cid,week:w,kind:$('#ctKind').value,label:$('#ctLabel').value.trim()});
   closeDlg(); await refresh();
@@ -1266,13 +1284,6 @@ async function deleteBlock(cid,w){
   await api('PUT','/api/blocks',{coach:cid,week:w,kind:'open',label:''});
   closeDlg(); await refresh();
 }
-async function saveCell(cid,w){
-  await api('PUT','/api/blocks',{coach:cid,week:w,kind:$('#ctKind').value,label:$('#ctLabel').value.trim()});
-  closeDlg(); await refresh();
-}
-
-/* ---------- inventory ---------- */
-const hint = t => `<span title="${esc(t)}" style="cursor:help;color:var(--muted);border-bottom:1px dotted var(--muted)">?</span>`;
 const INV_COLS = [
   { key:'client', label:'Client', get:v=>v.client||'' },
   { key:'team', label:'Team', get:v=>v.team||'' },
