@@ -756,9 +756,9 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
     db.prepare('UPDATE coaches SET start_date=? WHERE id=?').run(body.start_date || null, c.id);
   }
   // Handle coach certification levels
-  if(body.is_launch_certified !== undefined) db.prepare('UPDATE coaches SET is_launch_certified=? WHERE id=?').run(body.is_launch_certified ? 1 : 0, c.id);
-  if(body.is_advisor_only !== undefined) db.prepare('UPDATE coaches SET is_advisor_only=? WHERE id=?').run(body.is_advisor_only ? 1 : 0, c.id);
   if(body.is_handoff_capable !== undefined) db.prepare('UPDATE coaches SET is_handoff_capable=? WHERE id=?').run(body.is_handoff_capable ? 1 : 0, c.id);
+  if(body.is_lead !== undefined) db.prepare('UPDATE coaches SET is_lead=? WHERE id=?').run(body.is_lead ? 1 : 0, c.id);
+  if(body.is_advisor_only !== undefined) db.prepare('UPDATE coaches SET is_advisor_only=? WHERE id=?').run(body.is_advisor_only ? 1 : 0, c.id);
   log(user.email, 'coach.edit', { id: c.id, ...body });
   send(res, 200, { ok: true });
 });

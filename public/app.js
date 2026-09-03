@@ -2898,12 +2898,13 @@ function adminPeopleView(){
     html+=`<h3 style="display:flex;align-items:center;gap:8px">Team ${esc(t)} (${members.length})
       <button class="btn tiny" onclick="renameTeamDlg('${esc(t).replace(/'/g,"\\'")}')">Rename</button>
       ${members.length?'':`<button class="btn tiny danger" onclick="deleteTeam('${esc(t).replace(/'/g,"\\'")}')">Delete</button>`}
-    </h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th></th></tr>`;
+    </h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th>Team lead</th><th></th></tr>`;
     members.forEach(c=>{
       const fv=D.visits.filter(v=>!v.completed&&v.cal_coach===c.id&&v.cal_week>=TODAY).length;
       html+=`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--ink);text-decoration:none;display:flex;align-items:center;gap:8px">${avatarHtml(c.name,c.team,26)}<b style="text-decoration:underline;color:var(--primary)">${esc(c.name)}</b></a></td><td class="num">${fv}</td>
         <td><select onchange="moveCoach('${c.id}',this.value)"><option></option>${D.teams.filter(x=>x!==t).map(x=>`<option>${x}</option>`).join('')}</select></td>
-        <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')">Deactivate</button></td></tr>`;
+        <td><input type="checkbox" ${c.is_lead?'checked':''} onchange="toggleTeamLead('${c.id}',this.checked)"></td>
+        <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')" >Deactivate</button></td></tr>`;
     });
     html+=`</table>`;
   }
@@ -3386,6 +3387,7 @@ function coachDlg(){
 async function saveCoach(){ const n=$('#kName').value.trim(); if(!n){uiAlert('Name required');return;}
   await api('POST','/api/coaches',{name:n,team:$('#kTeam').value}); closeDlg(); await refresh(); toast(n+' added — their weeks are open capacity'); }
 async function moveCoach(id,team){ if(!team) return; await api('PATCH','/api/coaches/'+id,{team}); await refresh(); toast('Moved'); }
+async function toggleTeamLead(id,isLead){ await api("PATCH","/api/coaches/"+id,{is_lead:isLead?1:0}); await refresh(); toast(isLead?"Marked as team lead":"Removed from team leads"); }
 function removeCoach(id,name){ coachDeleteWithModal(id); }
 function renameTeamDlg(from){
   openDlg(`<h3>Rename Team ${esc(from)}</h3>
