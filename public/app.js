@@ -2446,7 +2446,7 @@ function clientProfileView(data, notes){
       const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
-      const completedByCoach = v.cal_coach ? getCoach(v.cal_coach) : null;
+      const completedByCoach = v.cal_coach ? coach(v.cal_coach) : null;
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${completedByCoach ? esc(completedByCoach.name) : '—'}</td><td>${pill}</td>
         <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
     }).join('') +
