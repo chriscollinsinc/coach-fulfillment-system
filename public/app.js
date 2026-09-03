@@ -1451,7 +1451,7 @@ const teamOpts=sel=>myTeams().map(t=>`<option ${t===sel?'selected':''}>${t}</opt
 const progOpts=sel=>PROGRAMS.map(p=>`<option ${p===sel?'selected':''}>${p}</option>`).join('');
 function bulkAssignCoachDlg(){
   const ids=[...st.invSel];
-  const assignable = D.coaches.filter(c => c.active && (c.role==='coach' || c.role==='lead'));
+  const assignable = D.coaches.filter(c => c.active).sort((a,b) => (a.team+'|'+a.name).localeCompare(b.team+'|'+b.name));
   const opts = assignable.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
   openDlg(`<h3>Assign ${ids.length} visit(s) to team lead</h3>
     <label>Select coach or team lead</label>
