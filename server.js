@@ -88,7 +88,7 @@ async function handleGoogleCallback(req, res, url){
 
     log(u.email, 'login.google_sso', '');
     res.writeHead(302, {
-      Location: '',
+      Location: '/',
       'Set-Cookie': [
         sessionCookie(String(u.id)),
         'ssostate=; Path=/; Max-Age=0',
