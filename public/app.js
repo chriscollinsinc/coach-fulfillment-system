@@ -1461,7 +1461,7 @@ function bulkAssignCoachDlg(){
     <button class="btn primary" onclick="bulkAssignCoach()">Assign</button></div>`);
 }
 async function bulkAssignCoach(){
-  const coachId = parseInt($('#bulkCoachId').val());
+  const coachId = $('#bulkCoachId').value;
   const ids = [...st.invSel];
   if(!coachId || !ids.length) return;
   let ok = 0;
@@ -1480,7 +1480,7 @@ function bulkAssignLeadDlg(){
     <button class="btn primary" onclick="bulkAssignLead()">Assign</button></div>`);
 }
 async function bulkAssignLead(){
-  const leadId = parseInt($("#bulkLeadId").val());
+  const leadId = $("#bulkLeadId").value;
   const ids = [...st.invSel];
   if(!leadId || !ids.length) return;
   let ok = 0;
