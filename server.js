@@ -2298,7 +2298,7 @@ route('GET', /^\/api\/revenue-history$/, ['admin','lead'], (req, res) => {
 });
 
 /* ----- backups + nightly maintenance (admin can also trigger by hand) ----- */
-const ADMIN_EMAILS = () => db.prepare("SELECT email FROM users WHERE role='admin' AND active=1").all().map(r => r.email);
+const ADMIN_EMAILS = () => ['mike@chriscollinsinc.com'];
 
 /* Consistent, WAL-safe snapshot of the live database.
    The old approach read coach.db straight off disk — but in WAL mode every committed
