@@ -64,7 +64,7 @@ async function openVisitModal(id) {
         <div>
           <div style="font-size: 20px; font-weight: 700; color: #1a1a1a;">${esc(v.client)}</div>
           <div style="font-size: 13px; color: #666; margin-top: 6px;">
-            ${esc(v.program)} · Team ${esc(v.team || '?')} · ${getStatusLabel(v)}
+            ${esc(v.program)} · Team ${esc(v.team || '?')} · ${getStatusLabel(v)}${v.cal_week ? ` · Scheduled ${fmtFull(v.cal_week)}` : ''}
           </div>
         </div>
         <button onclick="closeVisitModal()" style="background: none; border: none; font-size: 28px;
