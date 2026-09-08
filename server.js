@@ -2300,20 +2300,52 @@ route('GET', /^\/api\/revenue-history$/, ['admin','lead'], (req, res) => {
 /* ----- backups + nightly maintenance (admin can also trigger by hand) ----- */
 const ADMIN_EMAILS = () => db.prepare("SELECT email FROM users WHERE role='admin' AND active=1").all().map(r => r.email);
 
+/* Consistent, WAL-safe snapshot of the live database.
+   The old approach read coach.db straight off disk — but in WAL mode every committed
+   write sits in coach.db-wal until SQLite checkpoints (~4 MB of WAL by default), so
+   on a low-traffic app that raw copy could lag the real data by days. VACUUM INTO
+   writes a complete standalone copy that includes everything in the WAL, and we open
+   that copy read-only and run integrity_check before trusting it. Returns the gzipped
+   bytes plus the check result; throws on any failure so callers report it instead of
+   shipping a bad file. */
+function snapshotDatabase(){
+  const { DatabaseSync } = require('node:sqlite');
+  const tmp = path.join(path.dirname(DB_PATH), `.backup-${process.pid}-${Date.now()}.db`);
+  try{
+    db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`);
+    const check = new DatabaseSync(tmp, { readOnly: true });
+    let integrity, rows;
+    try{
+      integrity = check.prepare('PRAGMA integrity_check').get();
+      rows = {
+        visits: check.prepare('SELECT COUNT(*) c FROM visits').get().c,
+        clients: check.prepare('SELECT COUNT(*) c FROM clients').get().c,
+        audit_latest: (check.prepare('SELECT MAX(ts) t FROM audit').get() || {}).t || null,
+      };
+    } finally { check.close(); }
+    const verdict = integrity && (integrity.integrity_check || Object.values(integrity)[0]);
+    if(verdict !== 'ok') throw new Error('integrity_check failed on snapshot: ' + verdict);
+    const raw = fs.readFileSync(tmp);
+    return { gz: zlib.gzipSync(raw), rawBytes: raw.length, integrity: 'ok', rows };
+  } finally {
+    try{ fs.unlinkSync(tmp); }catch(_){}
+  }
+}
+
 async function takeBackupAndEmail(actorEmail){
   const admins = ADMIN_EMAILS();
   if(!admins.length) return { ok: false, error: 'No active admin users to send the backup to.' };
-  let raw;
-  try{ raw = fs.readFileSync(DB_PATH); }
-  catch(e){ return { ok: false, error: 'Could not read database file: ' + e.message }; }
-  const gz = zlib.gzipSync(raw);
+  let snap;
+  try{ snap = snapshotDatabase(); }
+  catch(e){ log(actorEmail, 'backup.failed', { error: e.message }); return { ok: false, error: 'Could not snapshot database: ' + e.message }; }
+  const gz = snap.gz;
   const dateStr = new Date().toISOString().slice(0, 10);
   const results = [];
   for(const to of admins){
     try{
       await sendMail({
         to, subject: `Coach Fulfillment System — DB backup (${dateStr})`,
-        text: `Attached is a full backup of the Coach Fulfillment System database as of ${new Date().toISOString()}.\n\nTo restore: gunzip the attachment and replace the running server's database file (see README for the exact path), then restart the app.\n\nTriggered by: ${actorEmail}`,
+        text: `Attached is a full, verified backup of the Coach Fulfillment System database as of ${new Date().toISOString()}.\n\nIntegrity check: ok · ${snap.rows.clients} clients · ${snap.rows.visits} visits · latest audit entry ${snap.rows.audit_latest || 'n/a'}\n\nTo restore: gunzip the attachment, replace the running server's database file (see README for the exact path), delete any leftover .db-wal / .db-shm files beside it, then restart the app.\n\nTriggered by: ${actorEmail}`,
         attachments: [{ filename: `coach-fulfillment-backup-${dateStr}.db.gz`, content: gz, contentType: 'application/gzip' }],
       });
       results.push({ to, ok: true });
@@ -2321,8 +2353,8 @@ async function takeBackupAndEmail(actorEmail){
   }
   const anyOk = results.some(r => r.ok);
   if(anyOk) setMeta('last_backup_at', new Date().toISOString());
-  log(actorEmail, 'backup.sent', { sizeBytes: gz.length, results });
-  return { ok: anyOk, sizeBytes: gz.length, results };
+  log(actorEmail, 'backup.sent', { sizeBytes: gz.length, rawBytes: snap.rawBytes, integrity: snap.integrity, rows: snap.rows, results });
+  return { ok: anyOk, sizeBytes: gz.length, integrity: snap.integrity, rows: snap.rows, results };
 }
 route('POST', /^\/api\/admin\/backup-now$/, ['admin'], (req, res, m, body, user) => {
   takeBackupAndEmail(user.email)
@@ -2331,14 +2363,14 @@ route('POST', /^\/api\/admin\/backup-now$/, ['admin'], (req, res, m, body, user)
 });
 /* Direct download — a second, independent recovery path that doesn't depend on
    email deliverability (spam filters, a wrong/missing GMAIL_APP_PASSWORD, etc).
-   Same raw file the emailed backup contains, gzipped, streamed straight down. */
+   Same verified VACUUM INTO snapshot the emailed backup uses, gzipped, streamed straight down. */
 route('GET', /^\/api\/admin\/backup-download$/, ['admin'], (req, res, m, body, user) => {
-  let raw;
-  try{ raw = fs.readFileSync(DB_PATH); }
-  catch(e){ return err(res, 500, 'Could not read database file: ' + e.message); }
-  const gz = zlib.gzipSync(raw);
+  let snap;
+  try{ snap = snapshotDatabase(); }
+  catch(e){ log(user.email, 'backup.failed', { error: e.message, via: 'download' }); return err(res, 500, 'Could not snapshot database: ' + e.message); }
+  const gz = snap.gz;
   const dateStr = new Date().toISOString().slice(0, 10);
-  log(user.email, 'backup.downloaded', { sizeBytes: gz.length });
+  log(user.email, 'backup.downloaded', { sizeBytes: gz.length, rawBytes: snap.rawBytes, integrity: snap.integrity, rows: snap.rows });
   res.writeHead(200, {
     'Content-Type': 'application/gzip',
     'Content-Disposition': `attachment; filename="coach-fulfillment-backup-${dateStr}.db.gz"`,
