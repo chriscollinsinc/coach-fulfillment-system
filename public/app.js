@@ -380,7 +380,7 @@ function renderNotesPanel(visit, prep) {
               font-weight: 600; color: #333;">Cancel</button>
       <button onclick="submitVisitNotes(${visit.id})" style="flex: 1; padding: 12px;
               background: #1d4f91; color: #fff; border: none; border-radius: 6px;
-              font-size: 13px; cursor: pointer; font-weight: 600;">Mark complete</button>
+              font-size: 13px; cursor: pointer; font-weight: 600;">${visit.completed ? 'Edit notes' : 'Mark complete'}</button>
     </div>
   `;
 
@@ -1136,7 +1136,7 @@ function board(){
         ? `<select onchange="setVisitStore(${v.id}, this.value)"><option value="">— none —</option>${dStores.map(s=>`<option value="${esc(s)}" ${v.store===s?'selected':''}>${esc(s)}</option>`).join('')}</select>`
         : `<b>${v.store?esc(v.store):'—'}</b>`}</div>` : (v.store?`<div class="small" style="margin-top:6px">Store: <b>${esc(v.store)}</b></div>`:'')}
       <div class="btnrow">
-        ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete</button>` : ''}
+        ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.completed?'Edit notes':'Complete'}</button>` : ''}
         ${canEdit() ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>` : ''}
         ${canEdit() ? `<button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
         <button class="btn tiny" onclick="st.detail=null;render()">Close</button>
