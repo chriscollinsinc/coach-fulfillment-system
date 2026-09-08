@@ -8,6 +8,7 @@ const MO = MONTHS.map(m=>m.slice(0,3));
 const TODAY = new Date().toISOString().slice(0,10);
 const fmt = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}, ${y}`; };
 const fmtW = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}`; };
+const fmtFull = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MONTHS[+m-1]} ${+d}, ${y}`; };
 const dayDiff = (a,b)=>(new Date(a)-new Date(b))/864e5;
 const CYCLE_LEN = {'Monthly':12,'Semi-Monthly':6,'Quarterly':4,'Bi-Annual':2,'LID (Purchase)':1,'6 Visits Monthly':6,'Coaching Only':0};
 const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID (Purchase)':0,'6 Visits Monthly':1,'Coaching Only':0};
@@ -176,12 +177,12 @@ function renderVisitsList(visits, currentVisit) {
                         text-transform: uppercase; margin-bottom: 4px;">
               Scheduled week
             </div>
-            <div style="color: #333; font-weight: 500;">${v.cal_week ? fmtW(v.cal_week) : '—'}</div>
+            <div style="color: #333; font-weight: 500;">${v.cal_week ? fmtFull(v.cal_week) : '—'}</div>
           </div>
           <div>
             <div style="color: #999; font-size: 10px; font-weight: 600;
                         text-transform: uppercase; margin-bottom: 4px;">
-              Status
+              Scheduled On
             </div>
             <div style="color: #333; font-weight: 500;">${statusLabel}</div>
           </div>
@@ -229,8 +230,10 @@ function renderVisitsList(visits, currentVisit) {
       </div>`;
 
     previous.forEach((v, idx) => {
+      const isCurrent = v.id === currentVisit.id;
       html += `<div style="background: #f5f5f5; border: 1px solid #e5e5e5;
-                          border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: 0.8;">
+                          border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: ${isCurrent ? '1' : '0.8'};
+                          ${isCurrent ? 'box-shadow: 0 0 0 2px #1d4f91;' : ''}">
         <div style="display: flex; justify-content: space-between; align-items: flex-start;
                     margin-bottom: 12px;">
           <div style="font-size: 13px; font-weight: 600; color: #666;">
