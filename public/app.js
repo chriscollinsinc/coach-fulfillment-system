@@ -1637,7 +1637,7 @@ function runAvail(){
   };
   // If preferred coach is specified with handoff mode, find partial cadence matches
   if(preferredCoachId && st.handoffMode > 0){
-    const prefCoach = getCoach(preferredCoachId);
+    const prefCoach = coach(preferredCoachId);
     if(prefCoach && launchCoachFilter(prefCoach)){
       const prefOpen = mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(prefCoach.id,w));
       for(const start of prefOpen){
@@ -1691,9 +1691,10 @@ function runAvail(){
       const open=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(c.id,w));
       if(!open.length) continue;
       let plan=null;
+      let coachAssignments={};  // Declare outside loop so it persists
       for(const start of open){
         const used=new Set([start]);const seq=[start];let ok=true;
-        const coachAssignments={};  // Track which coach handles each visit
+        coachAssignments={};  // Reset for each candidate start date
         coachAssignments[0]=c.id;   // Visit 0 is primary coach
         for(let k=1;k<nVisits;k++){
           const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
@@ -1756,7 +1757,7 @@ function runAvail(){
       }
       html+=`<tr><td>${coachInfo}</td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
       <td>${r.plan.seq.map((w,vidx)=>{
-        const assignedCoach = r.coachAssignments ? getCoach(r.coachAssignments[vidx]) : r.coach;
+        const assignedCoach = r.coachAssignments ? coach(r.coachAssignments[vidx]) : r.coach;
         const isHandoff = assignedCoach && assignedCoach.id !== r.coach.id;
         const label = isHandoff ? `${fmtW(w)}<br/><small>${assignedCoach?.name || 'unknown'}</small>` : fmtW(w);
         return `<span class="result-week" style="display:inline-block;text-align:center">${label}</span>`;
