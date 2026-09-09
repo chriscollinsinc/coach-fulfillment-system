@@ -1673,10 +1673,14 @@ function runAvail(){
           coachAssignments[k] = candCoach;
           used.add(cand);seq.push(cand);
         }
-        if(partialOk) {
+        if(partialOk && seq.length === nVisits) {
+          // Validate we got ALL visits, not a partial cadence cut off by horizon
           // Count spare weeks only in the 12-month window around the plan, not entire horizon
+          // In handoff mode, only count spare weeks for the primary coach's visits
+          const prefCoachVisitCount = Object.values(coachAssignments)
+            .filter(cid => cid === prefCoach.id).length;
           const windowEnd = addDays(start, 365);
-          const spareInWindow = prefOpen.filter(w => w >= start && w <= windowEnd).length - seq.length;
+          const spareInWindow = prefOpen.filter(w => w >= start && w <= windowEnd).length - prefCoachVisitCount;
           results.push({coach:prefCoach,plan:{start,seq},spare:spareInWindow,coachAssignments});
         }
       }
@@ -1713,7 +1717,8 @@ function runAvail(){
         }
         if(ok){plan={start,seq};break;}
       }
-      if(plan) {
+      if(plan && plan.seq.length === nVisits) {
+        // Validate we got ALL visits, not a partial cadence cut off by horizon
         // Count spare weeks only in the 12-month window around the plan, not entire horizon
         const windowEnd = addDays(plan.start, 365);
         const spareInWindow = open.filter(w => w >= plan.start && w <= windowEnd).length - plan.seq.length;
