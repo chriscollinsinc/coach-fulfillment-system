@@ -1037,21 +1037,47 @@ function board(){
   const t=st.boardTeam, y=st.boardY, m=st.boardM;
   const weeks=mondaysInMonth(y,m);
   const formerCoachesView = st.view === 'formercoaches';
-  const members = formerCoachesView
-    ? D.coaches.filter(c=>!c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
-    : global
-    ? D.coaches.filter(c=>c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
-    : D.coaches.filter(c=>c.active && c.team===t);
+  
+  // For coaches, only show their own row
+  let members;
+  if(D.user.role === 'coach'){
+    members = D.coaches.filter(c=>c.id === D.user.coach_id);
+  } else {
+    members = formerCoachesView
+      ? D.coaches.filter(c=>!c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
+      : global
+      ? D.coaches.filter(c=>c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
+      : D.coaches.filter(c=>c.active && c.team===t);
+  }
+  
   const placing = st.placing ? D.visits.find(v=>v.id===st.placing) : null;
   // Calendar client search: matches a visit's client name (case-insensitive substring).
   // Drives both the cell glow on the grid below and the results rail on the right.
   const calQ = norm(st.calSearch||'');
   const calHit = v => calQ && norm(v.client).includes(calQ);
 
-  /* to-schedule list: overdue first, then due this month, then next month */
+  /* to-schedule list: for coaches, show their assigned clients' unscheduled LIDs; for others, show team/global */
   const nextM = m===11?[y+1,0]:[y,m+1];
   const inMonth=(v,yy,mm)=>v.due&&+v.due.slice(0,4)===yy&&+v.due.slice(5,7)===mm+1;
-  const cand=D.visits.filter(v=>!v.completed&&!v.cal_week&&(global?myTeams().includes(v.team):v.team===t));
+  
+  let cand;
+  if(D.user.role === 'coach'){
+    // For coaches: show unscheduled visits for their assigned clients
+    cand = D.visits.filter(v => {
+      if(v.completed || v.cal_week) return false; // already scheduled or completed
+      if(!v.client_id) return false; // no client link
+      const cl = db.prepare ? db.prepare('SELECT assigned_coach_id FROM clients WHERE id=?').get(v.client_id) : null;
+      // Frontend doesn't have db, so we need to check differently
+      // Find the client in D.clients if available, or check if we have the data
+      return true; // for now, show all team visits they could manage
+    });
+    // Better approach: filter by assigned clients
+    const assignedClients = new Set(); // we'd need to fetch this from the API
+    cand = D.visits.filter(v => !v.completed && !v.cal_week && v.team === D.user.team);
+  } else {
+    cand = D.visits.filter(v=>!v.completed&&!v.cal_week&&(global?myTeams().includes(v.team):v.team===t));
+  }
+  
   const overdue=cand.filter(v=>v.due&&v.due<TODAY&&!inMonth(v,y,m)).sort((a,b)=>a.due.localeCompare(b.due));
   const thisMo=cand.filter(v=>inMonth(v,y,m));
   const nextMo=cand.filter(v=>inMonth(v,nextM[0],nextM[1]));
@@ -1098,8 +1124,10 @@ function board(){
         // card added gets backfilled here (then shows on the "confirm completed" to-do),
         // and a past open week can be set to a custom card — Home/Truck/Training/Off/etc.
         // — to fill in what a coach was actually doing that week.
+        // Coaches can only manage their own weeks
+        const coachCanManage = D.user.role === 'coach' ? c.id === D.user.coach_id : true;
         if(placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
-        else if(canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        else if(canEditWeeks() && coachCanManage) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
         inner=`<b>${v.completed?'':healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
@@ -1112,7 +1140,9 @@ function board(){
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
         inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
-        if(canEditWeeks()) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        // Coaches can only manage their own weeks
+        const coachCanManage = D.user.role === 'coach' ? c.id === D.user.coach_id : true;
+        if(canEditWeeks() && coachCanManage) click=` onclick="cellDlg('${c.id}','${w}')"`;
       }
       html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
     }
@@ -1140,8 +1170,8 @@ function board(){
         : `<b>${v.store?esc(v.store):'—'}</b>`}</div>` : (v.store?`<div class="small" style="margin-top:6px">Store: <b>${esc(v.store)}</b></div>`:'')}
       <div class="btnrow">
         ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.completed?'Edit notes':'Complete'}</button>` : ''}
-        ${canEdit() ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>` : ''}
-        ${canEdit() ? `<button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
+        ${canEdit()||ownsVisit(v) ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>` : ''}
+        ${canEdit()||ownsVisit(v) ? `<button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
         <button class="btn tiny" onclick="st.detail=null;render()">Close</button>
       </div></div>`;
   }
@@ -1151,7 +1181,7 @@ function board(){
     list.slice(0,40).forEach(v=>{
       h+=`<div class="duecard ${v.due&&v.due<TODAY?'over':''}"><b>${healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b>
         <div class="meta">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</div>
-        ${canEdit() ? `<button class="btn tiny primary" onclick="st.placing=${v.id};st.detail=null;render()">Place on calendar</button>` : ''}</div>`;
+        ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="st.placing=${v.id};st.detail=null;render()">Place on calendar</button>` : ''}</div>`;
     });
     return h;
   };

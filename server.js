@@ -414,10 +414,21 @@ route('DELETE', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
   log(user.email, 'visit.delete', { id: v.id, client: v.client, cycle: v.cycle });
   send(res, 200, { ok: true });
 });
-route('POST', /^\/api\/visits\/(\d+)\/place$/, ['admin','lead'], (req, res, m, body, user) => {
+route('POST', /^\/api\/visits\/(\d+)\/place$/, ['admin','lead','coach'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   const c = getCoach(body.coach); if(!c) return err(res, 400, 'unknown coach');
-  if(!canEditTeam(user, v.team) || !canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  
+  // Permission check
+  if(user.role === 'coach'){
+    // Coaches can only place on their own calendar
+    if(body.coach !== user.coach_id) return err(res, 403, 'Can only place on your own calendar');
+    // Coaches can only place visits for their assigned clients
+    if(!canManageVisit(user, v)) return err(res, 403, 'You are not assigned to this client');
+  } else {
+    // Admin/lead team check
+    if(!canEditTeam(user, v.team) || !canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  }
+  
   if(!/^\d{4}-\d{2}-\d{2}$/.test(body.week || '')) return err(res, 400, 'bad week');
   body.week = snapMonday(body.week);
   if(!cellFree(body.coach, body.week, v.id)) return err(res, 409, 'That week is no longer open');
@@ -425,9 +436,18 @@ route('POST', /^\/api\/visits\/(\d+)\/place$/, ['admin','lead'], (req, res, m, b
   log(user.email, 'visit.place', { id: v.id, client: v.client, coach: body.coach, week: body.week });
   send(res, 200, { ok: true });
 });
-route('POST', /^\/api\/visits\/(\d+)\/unschedule$/, ['admin','lead'], (req, res, m, body, user) => {
+route('POST', /^\/api\/visits\/(\d+)\/unschedule$/, ['admin','lead','coach'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
-  if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
+  
+  // Permission check
+  if(user.role === 'coach'){
+    // Coaches can only unschedule visits for their assigned clients
+    if(!canManageVisit(user, v)) return err(res, 403, 'You are not assigned to this client');
+  } else {
+    // Admin/lead team check
+    if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
+  }
+  
   db.prepare('UPDATE visits SET cal_coach=NULL, cal_week=NULL WHERE id=?').run(v.id);
   log(user.email, 'visit.unschedule', { id: v.id, client: v.client });
   send(res, 200, { ok: true });
@@ -442,6 +462,20 @@ function canCompleteVisit(user, v){
   if(user.role === 'lead') return canEditTeam(user, v.team);
   if(user.role === 'coach'){
     if(v.cal_coach && v.cal_coach === user.coach_id) return true;
+    if(v.client_id){
+      const cl = db.prepare('SELECT assigned_coach_id FROM clients WHERE id=?').get(v.client_id);
+      if(cl && cl.assigned_coach_id && cl.assigned_coach_id === user.coach_id) return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+/* A coach can place/unschedule/manage a visit only if they're assigned to that client */
+function canManageVisit(user, v){
+  if(user.role === 'admin') return true;
+  if(user.role === 'lead') return canEditTeam(user, v.team);
+  if(user.role === 'coach'){
     if(v.client_id){
       const cl = db.prepare('SELECT assigned_coach_id FROM clients WHERE id=?').get(v.client_id);
       if(cl && cl.assigned_coach_id && cl.assigned_coach_id === user.coach_id) return true;
@@ -573,7 +607,16 @@ route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin','lead'], (req, res, m, 
  * since occupied cells don't carry a blocks row in the first place). */
 route('PUT', /^\/api\/blocks$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const c = getCoach(body.coach); if(!c) return err(res, 400, 'unknown coach');
-  if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  
+  // Permission check
+  if(user.role === 'coach'){
+    // Coaches can only manage their own blocks
+    if(body.coach !== user.coach_id) return err(res, 403, 'Can only manage your own blocks');
+  } else {
+    // Admin/lead/sales team check
+    if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  }
+  
   if(!/^\d{4}-\d{2}-\d{2}$/.test(body.week || '')) return err(res, 400, 'bad week');
   body.week = snapMonday(body.week);
   const occupied = db.prepare('SELECT id FROM visits WHERE cal_coach=? AND cal_week=? AND completed=0').get(body.coach, body.week);
