@@ -1589,6 +1589,7 @@ function availabilityView(){
   <div class="controls">
     <label>Program</label><select id="aProg">${PROGRAMS.map(p=>`<option ${p==='Quarterly'?'selected':''}>${p}</option>`).join('')}</select>
     <label>Preferred Coach</label><select id="aCoach"><option value="">Any coach</option>${D.coaches.filter(c=>c.active && c.is_launch_certified).map(c=>`<option value="${c.id}">${esc(c.name)} (${c.team})</option>`).join('')}</select>
+    <label>Preferred Handoff Coach</label><select id="aHandoffCoach"><option value="">Any coach</option>${D.coaches.filter(c=>c.active && (c.is_launch_certified || c.is_handoff_capable)).map(c=>`<option value="${c.id}">${esc(c.name)} (${c.team})</option>`).join('')}</select>
     <label>Team</label><select id="aTeam"><option>Any</option>${D.teams.map(t=>`<option>${t}</option>`).join('')}</select>
     <label>Start no earlier than</label><input type="date" id="aFrom" value="${TODAY}">
     <label class="small" style="display:flex;align-items:center;gap:5px;text-transform:none;letter-spacing:0">
@@ -1610,6 +1611,7 @@ function runAvail(){
   $('#aOut').innerHTML=''; // Clear stale results before computing
   const prog=$('#aProg').value,team=$('#aTeam').value,from=$('#aFrom').value||TODAY;
   const preferredCoachId = $('#aCoach').value;
+  const preferredHandoffCoachId = $('#aHandoffCoach').value;
   st.due2027=$('#aFar').checked;
   st.handoffMode=parseInt($('#aHandoffMode').value);
   const lastPlanned = D.blocks.reduce((a,b)=>b.week>a?b.week:a,'2026-12-28');
@@ -1661,7 +1663,11 @@ function runAvail(){
             }
           } else {
             // Visit k >= st.handoffMode: allow any available coach (respecting team filter)
-            const allFollowupCoaches = D.coaches.filter(c => followupCoachFilter(c) && (team === 'Any' || c.team === team));
+            let allFollowupCoaches = D.coaches.filter(c => followupCoachFilter(c) && (team === 'Any' || c.team === team));
+            // If a specific handoff coach is preferred, only use that one
+            if(preferredHandoffCoachId){
+              allFollowupCoaches = allFollowupCoaches.filter(c => c.id === preferredHandoffCoachId);
+            }
             for(const coach of allFollowupCoaches){
               const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
               const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=14)
@@ -1704,7 +1710,11 @@ function runAvail(){
           let coachId=c.id;  // Default to primary coach
           // If handoffMode > 0 and k >= handoffMode, allow any available coach to take over
           if(st.handoffMode > 0 && k >= st.handoffMode){
-            const allFollowupCoaches = D.coaches.filter(c => followupCoachFilter(c) && (team === 'Any' || c.team === team));
+            let allFollowupCoaches = D.coaches.filter(c => followupCoachFilter(c) && (team === 'Any' || c.team === team));
+            // If a specific handoff coach is preferred, only use that one
+            if(preferredHandoffCoachId){
+              allFollowupCoaches = allFollowupCoaches.filter(c => c.id === preferredHandoffCoachId);
+            }
             for(const coach of allFollowupCoaches){
               const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
               const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=14)
@@ -1752,7 +1762,10 @@ function runAvail(){
       if(r.coachAssignments){
         const uniqueCoaches = new Set(Object.values(r.coachAssignments));
         if(uniqueCoaches.size > 1){
-          coachInfo += ` <span class="pill" style="font-size:0.85em">handoff to ${uniqueCoaches.size} coaches</span>`;
+          // Find the handoff coach (not the primary)
+          const handoffCoachId = Array.from(uniqueCoaches).find(cid => cid !== r.coach.id);
+          const handoffCoachName = handoffCoachId ? coach(handoffCoachId)?.name : 'unknown';
+          coachInfo += `<div class="small" style="margin-top:4px;color:#666">→ hands off to ${esc(handoffCoachName)}</div>`;
         }
       }
       html+=`<tr><td>${coachInfo}</td><td>${r.coach.team}</td><td class="mono">${fmt(r.plan.start)}</td>
@@ -1769,7 +1782,10 @@ function runAvail(){
   let note = `Planning horizon: through ${fmt(horizon)}. ${st.due2027?'Months past the current plan read as fully open — treat those as estimates.':'Check the box above to look into 2027 (not yet planned).'}`;
   note += ` Visits are spaced within ±14 days of their target dates to keep cadences tight.`;
   if(team !== 'Any') note += ` All coaches shown are on Team ${team}.`;
-  if(st.handoffMode > 0 && results.some(r=>r.coachAssignments)) note += ` Visits marked with coach names are assigned to different coaches.`;
+  if(st.handoffMode > 0){
+    note += ` Use "Preferred Handoff Coach" to filter to a specific follow-up coach, or leave blank to see all options.`;
+    if(results.some(r=>r.coachAssignments)) note += ` Visits marked with coach names are assigned to different coaches.`;
+  }
   note += ` "Spare weeks" counts open weeks within 12 months of the plan start.`;
   html+=`<p class="small" style="margin-top:8px">${note}</p>`;
   $('#aOut').innerHTML=html;
