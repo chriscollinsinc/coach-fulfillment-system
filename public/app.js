@@ -1660,8 +1660,8 @@ function runAvail(){
               candCoach = prefCoach.id;
             }
           } else {
-            // Visit k >= st.handoffMode: allow any available coach
-            const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
+            // Visit k >= st.handoffMode: allow any available coach (respecting team filter)
+            const allFollowupCoaches = D.coaches.filter(c => followupCoachFilter(c) && (team === 'Any' || c.team === team));
             for(const coach of allFollowupCoaches){
               const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
               const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=14)
@@ -1693,19 +1693,22 @@ function runAvail(){
       let plan=null;
       for(const start of open){
         const used=new Set([start]);const seq=[start];let ok=true;
+        const coachAssignments={};  // Track which coach handles each visit
+        coachAssignments[0]=c.id;   // Visit 0 is primary coach
         for(let k=1;k<nVisits;k++){
           const target=new Date(start+'T12:00:00');target.setMonth(target.getMonth()+k*interval);
           if(target>new Date(horizon+'T12:00:00')) break;
           const tIso=target.toISOString().slice(0,10);
           let cand=null;
+          let coachId=c.id;  // Default to primary coach
           // If handoffMode > 0 and k >= handoffMode, allow any available coach to take over
           if(st.handoffMode > 0 && k >= st.handoffMode){
-            const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
+            const allFollowupCoaches = D.coaches.filter(c => followupCoachFilter(c) && (team === 'Any' || c.team === team));
             for(const coach of allFollowupCoaches){
               const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
               const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=14)
                 .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
-              if(candidate){cand=candidate;break;}
+              if(candidate){cand=candidate;coachId=coach.id;break;}
             }
           } else {
             // Primary coach must handle all visits (or until handoff threshold)
@@ -1713,6 +1716,7 @@ function runAvail(){
               .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
           }
           if(!cand){ok=false;break;}
+          coachAssignments[k]=coachId;  // Record which coach handles this visit
           used.add(cand);seq.push(cand);
         }
         if(ok){plan={start,seq};break;}
@@ -1722,7 +1726,9 @@ function runAvail(){
         // Count spare weeks only in the 12-month window around the plan, not entire horizon
         const windowEnd = addDays(plan.start, 365);
         const spareInWindow = open.filter(w => w >= plan.start && w <= windowEnd).length - plan.seq.length;
-        results.push({coach:c,plan,spare:spareInWindow});
+        // In standard mode, check if there are multiple coaches (handoff occurred)
+        const uniqueCoaches = new Set(Object.values(coachAssignments));
+        results.push({coach:c,plan,spare:spareInWindow,coachAssignments:uniqueCoaches.size > 1 ? coachAssignments : undefined});
       }
     }
   }
