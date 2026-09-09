@@ -458,7 +458,7 @@ async function refresh(){
 const coach = id => D.coaches.find(c=>c.id===id);
 const status = v => v.completed?'completed': v.cal_week?'on_calendar': (v.due&&v.due<TODAY?'overdue': v.due?'needs_scheduling':'unknown');
 const isOpen = (cid,w) => !occ[cid+'|'+w];
-const isAvailable = (cid,w) => { const o = occ[cid+'|'+w]; return !o || (o.type==='block' && o.kind==='launch_open'); };
+const isAvailable = (cid,w) => { const o = occ[cid+'|'+w]; return !o; };
 /* Jumps straight to the Schedule Board cell a visit is sitting on — the calendar
  * link behind every "on calendar" / "Late — on calendar" badge. Switches to the
  * visit's own team and the month its cal_week falls in (which may not be the
