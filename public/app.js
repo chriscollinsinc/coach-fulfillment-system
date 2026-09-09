@@ -10,8 +10,8 @@ const fmt = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return
 const fmtW = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MO[+m-1]} ${+d}`; };
 const fmtFull = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${MONTHS[+m-1]} ${+d}, ${y}`; };
 const dayDiff = (a,b)=>(new Date(a)-new Date(b))/864e5;
-const CYCLE_LEN = {'Monthly':12,'Semi-Monthly':6,'Quarterly':4,'Bi-Annual':2,'LID (Purchase)':1,'6 Visits Monthly':6,'Coaching Only':0};
-const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID (Purchase)':0,'6 Visits Monthly':1,'Coaching Only':0};
+const CYCLE_LEN = {'Monthly':12,'Semi-Monthly':6,'Quarterly':4,'Bi-Annual':2,'LID (Purchase)':1,'Coaching Only':0};
+const INTERVAL  = {'Monthly':1,'Semi-Monthly':2,'Quarterly':3,'Bi-Annual':6,'LID (Purchase)':0,'Coaching Only':0};
 const PROGRAMS = Object.keys(CYCLE_LEN);
 const BLOCKKINDS = {home:'Home',off:'Off / Vacation',training:'Training',bootcamp:'Bootcamp',event:'Event (Top Dog / Virtual)',truck:'TRUCK',travel:'Travel',mag:'Mills (M.A.G.)',launch_open:'Launch slot held',soft_pencil:'Soft pencil hold (tentative launch)',not_hired:'Not hired yet',shadow:'Shadow',meeting:'Meeting',blocked:'Blocked',visit:'Legacy visit (from sheet)',visit_legacy:'Legacy visit (from sheet)'};
 
@@ -1607,6 +1607,7 @@ function availabilityView(){
   <div id="softHoldsOut"></div></div>`;
 }
 function runAvail(){
+  $('#aOut').innerHTML=''; // Clear stale results before computing
   const prog=$('#aProg').value,team=$('#aTeam').value,from=$('#aFrom').value||TODAY;
   const preferredCoachId = $('#aCoach').value;
   st.due2027=$('#aFar').checked;
@@ -1653,7 +1654,7 @@ function runAvail(){
           
           // If k < st.handoffMode, preferred coach MUST handle this visit
           if(k < st.handoffMode) {
-            const prefCandidates = prefOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35);
+            const prefCandidates = prefOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=14);
             if(prefCandidates.length) {
               cand = prefCandidates.sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
               candCoach = prefCoach.id;
@@ -1663,7 +1664,7 @@ function runAvail(){
             const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
             for(const coach of allFollowupCoaches){
               const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
-              const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
+              const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=14)
                 .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
               if(candidate){cand=candidate;candCoach=coach.id;break;}
             }
@@ -1672,7 +1673,12 @@ function runAvail(){
           coachAssignments[k] = candCoach;
           used.add(cand);seq.push(cand);
         }
-        if(partialOk) results.push({coach:prefCoach,plan:{start,seq},spare:prefOpen.length-seq.length,coachAssignments});
+        if(partialOk) {
+          // Count spare weeks only in the 12-month window around the plan, not entire horizon
+          const windowEnd = addDays(start, 365);
+          const spareInWindow = prefOpen.filter(w => w >= start && w <= windowEnd).length - seq.length;
+          results.push({coach:prefCoach,plan:{start,seq},spare:spareInWindow,coachAssignments});
+        }
       }
     }
   } else {
@@ -1693,13 +1699,13 @@ function runAvail(){
             const allFollowupCoaches = D.coaches.filter(followupCoachFilter);
             for(const coach of allFollowupCoaches){
               const coachOpen=mondaysRange(from<TODAY?TODAY:from,horizon).filter(w=>isAvailable(coach.id,w));
-              const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
+              const candidate=coachOpen.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=14)
                 .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
               if(candidate){cand=candidate;break;}
             }
           } else {
             // Primary coach must handle all visits (or until handoff threshold)
-            cand=open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=35)
+            cand=open.filter(w=>!used.has(w)&&Math.abs(dayDiff(w,tIso))<=14)
               .sort((a,b)=>Math.abs(dayDiff(a,tIso))-Math.abs(dayDiff(b,tIso)))[0];
           }
           if(!cand){ok=false;break;}
@@ -1707,7 +1713,12 @@ function runAvail(){
         }
         if(ok){plan={start,seq};break;}
       }
-      if(plan) results.push({coach:c,plan,spare:open.length-plan.seq.length});
+      if(plan) {
+        // Count spare weeks only in the 12-month window around the plan, not entire horizon
+        const windowEnd = addDays(plan.start, 365);
+        const spareInWindow = open.filter(w => w >= plan.start && w <= windowEnd).length - plan.seq.length;
+        results.push({coach:c,plan,spare:spareInWindow});
+      }
     }
   }
   results.sort((a,b)=>{
@@ -1744,7 +1755,10 @@ function runAvail(){
     html+=`</table>`;
   }
   let note = `Planning horizon: through ${fmt(horizon)}. ${st.due2027?'Months past the current plan read as fully open — treat those as estimates.':'Check the box above to look into 2027 (not yet planned).'}`;
-  if(st.handoffMode > 0 && results.some(r=>r.coachAssignments)) note += ` Visits marked with * are assigned to different coaches.`;
+  note += ` Visits are spaced within ±14 days of their target dates to keep cadences tight.`;
+  if(team !== 'Any') note += ` All coaches shown are on Team ${team}.`;
+  if(st.handoffMode > 0 && results.some(r=>r.coachAssignments)) note += ` Visits marked with coach names are assigned to different coaches.`;
+  note += ` "Spare weeks" counts open weeks within 12 months of the plan start.`;
   html+=`<p class="small" style="margin-top:8px">${note}</p>`;
   $('#aOut').innerHTML=html;
   closePreviewOverlay();
