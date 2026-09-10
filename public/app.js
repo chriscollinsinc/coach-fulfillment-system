@@ -118,7 +118,7 @@ async function loadVisitModalData(visitId) {
     const prep = prevNotes || {};
 
     // Render visits panel
-    renderVisitsList(visits, v, v.client_id);
+    renderVisitsList(visits, v);
 
     // Render notes panel
     renderNotesPanel(v, prep);
@@ -128,7 +128,7 @@ async function loadVisitModalData(visitId) {
   }
 }
 
-function renderVisitsList(visits, currentVisit, clientId) {
+function renderVisitsList(visits, currentVisit) {
   const panel = document.getElementById('vmVisitsPanel');
   if (!panel) return;
 
@@ -208,7 +208,7 @@ function renderVisitsList(visits, currentVisit, clientId) {
                   style="padding: 6px 12px; font-size: 11px; font-weight: 500;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
                           cursor: pointer;">Complete</button>
-          ${!v.cal_coach ? `<button onclick="assignClientCoachDlg(${clientId})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
+          ${!v.cal_coach ? `<button onclick="assignClientCoachDlg(${v.client_id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
                           border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
                           border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
           ${v.cal_week ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 500;
@@ -2760,20 +2760,27 @@ async function saveAssignedCoach(clientId, coachId){
 }
 
 function assignClientCoachDlg(clientId){
+  console.log('assignClientCoachDlg called with clientId:', clientId);
+  if(!clientId) { console.error('No clientId provided'); return; }
+  
   const client = D.clients.find(c => c.id === clientId);
-  if(!client) return;
+  console.log('Found client:', client);
+  if(!client) { console.error('Client not found:', clientId); return; }
   
   const coaches = D.coaches.filter(c => c.active).sort((a,b) => (a.team+'|'+a.name).localeCompare(b.team+'|'+b.name));
   const opts = coaches.map(c => `<option value="${c.id}">${esc(c.name)} (${esc(c.team)})</option>`).join('');
   
-  openDlg(`<h3>Assign coach to ${esc(client.name)}</h3>
+  const dialogHtml = `<h3>Assign coach to ${esc(client.name)}</h3>
     <p class="small">This assigns the client to a coach, making them responsible for scheduling and completing visits.</p>
     <label>Coach</label>
     <select id="assignCoach" onchange="saveAssignedCoach(${clientId},this.value)">
       <option value="">— unassigned —</option>
       ${opts}
     </select>
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button></div>`);
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button></div>`;
+  
+  console.log('Opening dialog with HTML:', dialogHtml);
+  openDlg(dialogHtml);
 }
 function deleteClientDlg(clientId, clientName){
   openDlg(`<h3>Delete ${esc(clientName)}?</h3>
