@@ -2759,14 +2759,30 @@ async function saveAssignedCoach(clientId, coachId){
   await loadClientProfile(clientId);
 }
 
-function assignClientCoachDlg(clientName){
+async function assignClientCoachDlg(clientName){
   console.log('assignClientCoachDlg called with clientName:', clientName);
   if(!clientName) { console.error('No clientName provided'); return; }
   
-  // Find client by name from D.clients
-  const client = D.clients.find(c => c.name === clientName);
+  // Try to find client from D.clients if available
+  let client = D.clients ? D.clients.find(c => c.name === clientName) : null;
+  
+  if(!client) {
+    console.log('D.clients not available or client not found, fetching all clients...');
+    try {
+      const allClients = await api('GET', '/api/clients?limit=999');
+      console.log('Fetched clients:', allClients);
+      if(allClients && allClients.length) {
+        client = allClients.find(c => c.name === clientName);
+      }
+    } catch(e) {
+      console.error('Failed to fetch clients:', e);
+      uiAlert('Could not load client data. Please try again.');
+      return;
+    }
+  }
+  
   console.log('Found client:', client);
-  if(!client) { console.error('Client not found by name:', clientName); return; }
+  if(!client) { console.error('Client not found by name:', clientName); uiAlert('Could not find client: ' + clientName); return; }
   
   const clientId = client.id;
   console.log('Using clientId:', clientId);
@@ -2783,7 +2799,7 @@ function assignClientCoachDlg(clientName){
     </select>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button></div>`;
   
-  console.log('Opening dialog with HTML:', dialogHtml);
+  console.log('Opening dialog');
   openDlg(dialogHtml);
 }
 function deleteClientDlg(clientId, clientName){
