@@ -147,6 +147,18 @@ function closeVisitModal() {
   if (modal) modal.remove();
 }
 
+function togglePrevCycle() {
+  const list = document.getElementById('prevCycleList');
+  const arrow = document.getElementById('prevCycleArrow');
+  if (list.style.display === 'none') {
+    list.style.display = 'block';
+    arrow.style.transform = 'rotate(90deg)';
+  } else {
+    list.style.display = 'none';
+    arrow.style.transform = 'rotate(0deg)';
+  }
+}
+
 async function completeVisit(id) {
   const r = await api('POST', `/api/visits/${id}/complete`, {});
   if(r && r.ok) {
@@ -207,14 +219,14 @@ function renderVisitsList(visits, currentVisit) {
   // Previous cycle (collapsed by default)
   if (previous.length) {
     html += `<div>
-      <button onclick="this.parentElement.querySelector('[data-prev-list]').style.display = 
-              this.parentElement.querySelector('[data-prev-list]').style.display === 'none' ? 'block' : 'none'"
+      <button id="prevCycleBtn" onclick="togglePrevCycle()" 
               style="width: 100%; padding: 10px; font-size: 11px; font-weight: 700; 
                       text-transform: uppercase; color: #999; text-align: left; background: none;
-                      border: none; cursor: pointer; letter-spacing: 1px;">
-        ▸ Previous Cycle (${previous.length} completed)
+                      border: none; cursor: pointer; letter-spacing: 1px; display: flex; align-items: center; gap: 8px;">
+        <span id="prevCycleArrow" style="display: inline-block; transition: transform 0.2s;">▸</span>
+        Previous Cycle (${previous.length} completed)
       </button>
-      <div data-prev-list style="display: none; padding-top: 8px;">`;
+      <div id="prevCycleList" style="display: none; padding-top: 8px;">`;
 
     previous.forEach((v, idx) => {
       html += `<div style="background: #fff; border: 1px solid #e5e5e5; border-radius: 6px;
@@ -260,10 +272,12 @@ function renderNotesPanel(visit, prep) {
                     color: #1d4f91; letter-spacing: 0.5px; margin-bottom: 10px;">
           ✓ What went well
         </div>
-        <textarea id="visit_wins" style="width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd;
+        <textarea id="visit_wins" style="width: 100%; height: 120px; padding: 10px; border: 2px solid #cfe9ff;
                                          border-radius: 4px; font-size: 13px; font-family: -apple-system;
-                                         resize: none;"
-                  placeholder="Momentum, breakthroughs, quick wins...">${esc(visit.notes_wins || '')}</textarea>
+                                         resize: none; box-sizing: border-box;"
+                  placeholder="Momentum, breakthroughs, quick wins..."
+                  onfocus="this.style.borderColor='#1d4f91'; this.style.boxShadow='0 0 0 3px rgba(29, 79, 145, 0.1)'"
+                  onblur="this.style.borderColor='#cfe9ff'; this.style.boxShadow='none'">${esc(visit.notes_wins || '')}</textarea>
       </div>
 
       <!-- ISSUES / ROADBLOCKS -->
@@ -272,10 +286,12 @@ function renderNotesPanel(visit, prep) {
                     color: #c71c1c; letter-spacing: 0.5px; margin-bottom: 10px;">
           ⚠️ Issues & blockers
         </div>
-        <textarea id="visit_issues" style="width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd;
+        <textarea id="visit_issues" style="width: 100%; height: 120px; padding: 10px; border: 2px solid #ffcccc;
                                           border-radius: 4px; font-size: 13px; font-family: -apple-system;
-                                          resize: none;"
-                  placeholder="What's stuck or needs attention...">${esc(visit.notes_issues || '')}</textarea>
+                                          resize: none; box-sizing: border-box;"
+                  placeholder="What's stuck or needs attention..."
+                  onfocus="this.style.borderColor='#c71c1c'; this.style.boxShadow='0 0 0 3px rgba(199, 28, 28, 0.1)'"
+                  onblur="this.style.borderColor='#ffcccc'; this.style.boxShadow='none'">${esc(visit.notes_issues || '')}</textarea>
       </div>
     </div>
 
@@ -286,10 +302,12 @@ function renderNotesPanel(visit, prep) {
                     color: #b8860b; letter-spacing: 0.5px; margin-bottom: 10px;">
           🎯 Focus for next visit
         </div>
-        <textarea id="visit_focus" style="width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd;
+        <textarea id="visit_focus" style="width: 100%; height: 120px; padding: 10px; border: 2px solid #ffe5b4;
                                          border-radius: 4px; font-size: 13px; font-family: -apple-system;
-                                         resize: none;"
-                  placeholder="Where you'll pick up next time...">${esc(visit.notes_focus || '')}</textarea>
+                                         resize: none; box-sizing: border-box;"
+                  placeholder="Where you'll pick up next time..."
+                  onfocus="this.style.borderColor='#b8860b'; this.style.boxShadow='0 0 0 3px rgba(184, 134, 11, 0.1)'"
+                  onblur="this.style.borderColor='#ffe5b4'; this.style.boxShadow='none'">${esc(visit.notes_focus || '')}</textarea>
       </div>
 
       <!-- NEW COMMITMENTS -->
@@ -298,10 +316,12 @@ function renderNotesPanel(visit, prep) {
                     color: #2e7d32; letter-spacing: 0.5px; margin-bottom: 10px;">
           📋 New commitments
         </div>
-        <textarea id="visit_commitments" style="width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd;
+        <textarea id="visit_commitments" style="width: 100%; height: 120px; padding: 10px; border: 2px solid #d4e5d4;
                                                border-radius: 4px; font-size: 13px; font-family: -apple-system;
-                                               resize: none;"
-                  placeholder="e.g. Post walkaround videos daily, Run Saturday cave session...">${esc(visit.notes_commitments || '')}</textarea>
+                                               resize: none; box-sizing: border-box;"
+                  placeholder="e.g. Post walkaround videos daily, Run Saturday cave session..."
+                  onfocus="this.style.borderColor='#2e7d32'; this.style.boxShadow='0 0 0 3px rgba(46, 125, 50, 0.1)'"
+                  onblur="this.style.borderColor='#d4e5d4'; this.style.boxShadow='none'">${esc(visit.notes_commitments || '')}</textarea>
       </div>
     </div>`;
 
@@ -341,36 +361,14 @@ function renderNotesPanel(visit, prep) {
                 display: flex; gap: 10px;">
       <button onclick="closeVisitModal()" style="flex: 1; padding: 12px; background: none;
               border: 1px solid #ddd; border-radius: 6px; font-size: 13px; cursor: pointer;
-              font-weight: 600; color: #333;">Cancel</button>
-      <button onclick="submitVisitNotes(${visit.id})" style="flex: 1; padding: 12px;
+              font-weight: 600; color: #333;">Close</button>
+      <button onclick="saveVisitNotes(${visit.id})" style="flex: 1; padding: 12px;
               background: #1d4f91; color: #fff; border: none; border-radius: 6px;
-              font-size: 13px; cursor: pointer; font-weight: 600;">${visit.completed ? 'Edit notes' : 'Mark complete'}</button>
+              font-size: 13px; cursor: pointer; font-weight: 600;">Save notes</button>
     </div>
   `;
 
   panel.innerHTML = html;
-}
-
-async function submitVisitNotes(visitId) {
-  const val = (id) => (($('#' + id) || {}).value || '').trim();
-
-  const payload = {
-    wins: val('vmWins'),
-    issues: val('vmIssues'),
-    focus: val('vmFocus'),
-  };
-
-  const commits = val('vmCommit').split('\n').map(s => s.trim()).filter(Boolean);
-  if (commits.length) payload.commitments = commits;
-
-  try {
-    await api('POST', `/api/visits/${visitId}/complete`, payload);
-    closeVisitModal();
-    await refresh();
-    toast('Visit marked complete');
-  } catch (e) {
-    uiAlert(e.message || 'Could not complete visit');
-  }
 }
 
 function getStatusLabel(v) {
