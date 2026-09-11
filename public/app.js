@@ -968,8 +968,8 @@ function todayCoachView(t){
   html+=`</div>`;
   const sec=(title,list,empty)=>{
     let h=`<div class="panel"><h2>${title} (${list.length})</h2>`;
-    h+= list.length ? `<table><tr><th>Visit</th><th>Due</th><th>Scheduled On</th><th></th></tr>`+
-      todayRows(list, 10, v=>`<tr><td><b>${esc(v.cycle||'')} ${esc(v.program||'')}</b></td>
+    h+= list.length ? `<table><tr><th>Client</th><th>Visit</th><th>Due</th><th>Scheduled On</th><th></th></tr>`+
+      todayRows(list, 10, v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td>${esc(v.cycle||'')} ${esc(v.program||'')}</td>
         <td class="mono">${fmt(v.due||v.scheduled_week)}</td>
         <td>${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
         <td>${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open client</button>`:''}
@@ -982,8 +982,8 @@ function todayCoachView(t){
   if(t.missingNotes.length){
     html+=`<div class="panel"><h2>You owe a note (${t.missingNotes.length})</h2>
     <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up.</p>
-    <table><tr><th>Visit</th><th>Due</th><th>Scheduled On</th><th></th></tr>`+
-    t.missingNotes.map(v=>`<tr><td><b>${esc(v.cycle||'')} ${esc(v.program||'')}</b></td>
+    <table><tr><th>Client</th><th>Visit</th><th>Due</th><th>Scheduled On</th><th></th></tr>`+
+    t.missingNotes.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td>${esc(v.cycle||'')} ${esc(v.program||'')}</td>
       <td class="mono">${fmt(v.due||v.scheduled_week)}</td>
       <td>${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
       <td>${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
