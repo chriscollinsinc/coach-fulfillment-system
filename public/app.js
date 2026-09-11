@@ -1271,6 +1271,7 @@ const hint = t => `<span title="${esc(t)}" style="cursor:help;color:var(--muted)
 const INV_COLS = [
   { key:'client', label:'Client', get:v=>v.client||'' },
   { key:'team', label:'Team', get:v=>v.team||'' },
+  { key:'coach', label:'Assigned Coach', get:v=>v.cal_coach ? (coach(v.cal_coach)?.name || '') : '' },
   { key:'program', label:'Program '+hint('How often this client gets visited — Quarterly means 4 visits per year, Semi-Monthly means 6, etc.'), get:v=>v.program||'' },
   { key:'cycle', label:'Cycle '+hint('Which visit this is within the contract — "3 of 4" means the 3rd of 4 contracted visits.'), get:v=>v.cycle||'' },
   { key:'store', label:'Store '+hint('For a shared / multi-store contract, which store this visit covered. Blank for ordinary single-store visits.'), get:v=>v.store||'' },
