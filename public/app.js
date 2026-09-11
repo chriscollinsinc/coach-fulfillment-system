@@ -2450,6 +2450,82 @@ function healthBanner(h){
     ${h.warnings.map(w=>`<div style="font-size:12.5px;margin-top:4px;color:var(--muted)">⚠ ${esc(w)}</div>`).join('')}
   </div>`;
 }
+/* Builds a unified timeline of visit notes + coaching notes */
+function buildUnifiedNotesHistory(visits, coachingNotes){
+  // Collect all note-worthy items
+  const items = [];
+  
+  // Add visit notes (wins/issues/focus from completed visits)
+  visits.forEach(v => {
+    if(v.completed && (v.notes_wins || v.notes_issues || v.notes_focus)){
+      items.push({
+        date: v.completed_date || v.cal_week || v.due,
+        type: 'Visit Note',
+        visitId: v.id,
+        program: v.program,
+        cycle: v.cycle,
+        coach: v.cal_coach,
+        wins: v.notes_wins,
+        issues: v.notes_issues,
+        focus: v.notes_focus,
+        sortKey: new Date(v.completed_date || v.cal_week || v.due).getTime()
+      });
+    }
+  });
+  
+  // Add coaching notes
+  coachingNotes.forEach(n => {
+    if(n.note_type === 'Coaching Call'){
+      items.push({
+        date: n.note_date,
+        type: 'Coaching Call',
+        author: n.author_name || n.author_email,
+        body: n.body,
+        wins: n.wins,
+        issues: n.issues,
+        focus: n.focus,
+        sortKey: new Date(n.note_date).getTime()
+      });
+    }
+  });
+  
+  // Sort by date descending (newest first)
+  items.sort((a, b) => b.sortKey - a.sortKey);
+  
+  if(items.length === 0) return '<p class="small">No visit notes or coaching calls recorded yet.</p>';
+  
+  let html = '<div style="margin-top:12px">';
+  items.forEach((item, i) => {
+    const isVisitNote = item.type === 'Visit Note';
+    const bgColor = isVisitNote ? '#f0f8ff' : '#fff8e1';
+    const borderColor = isVisitNote ? '#4a90e2' : '#ffb800';
+    
+    html += `<div style="background:${bgColor};border-left:4px solid ${borderColor};padding:10px 12px;margin-bottom:8px;border-radius:2px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span style="font-weight:600;font-size:13px">${isVisitNote ? '📋 Visit Note' : '🎧 Coaching Call'}</span>
+        <span style="font-size:12px;color:var(--muted)">${fmt(item.date)}</span>
+      </div>`;
+    
+    if(isVisitNote){
+      html += `<p style="font-size:12px;color:var(--muted);margin:4px 0">${esc(item.program)} — Cycle ${esc(item.cycle)}</p>`;
+      if(item.wins) html += `<p style="font-size:12px;margin:4px 0"><b>✓ Wins:</b> ${esc(item.wins)}</p>`;
+      if(item.issues) html += `<p style="font-size:12px;margin:4px 0"><b>⚠ Issues:</b> ${esc(item.issues)}</p>`;
+      if(item.focus) html += `<p style="font-size:12px;margin:4px 0"><b>→ Focus:</b> ${esc(item.focus)}</p>`;
+    } else {
+      html += `<p style="font-size:12px;color:var(--muted);margin:4px 0">by ${esc(item.author)}</p>`;
+      if(item.wins) html += `<p style="font-size:12px;margin:4px 0"><b>✓ Wins:</b> ${esc(item.wins)}</p>`;
+      if(item.issues) html += `<p style="font-size:12px;margin:4px 0"><b>⚠ Issues:</b> ${esc(item.issues)}</p>`;
+      if(item.focus) html += `<p style="font-size:12px;margin:4px 0"><b>→ Focus:</b> ${esc(item.focus)}</p>`;
+      if(item.body) html += `<p style="font-size:12px;margin:4px 0;font-style:italic">${esc(item.body)}</p>`;
+    }
+    
+    html += `</div>`;
+  });
+  html += '</div>';
+  
+  return html;
+}
+
 function clientProfileView(data, notes){
   const { client, assignedCoach, contracts, visits, visitProgress, health } = data;
   const pct = visitProgress.total ? Math.round(visitProgress.completed/visitProgress.total*100) : 0;
@@ -2537,6 +2613,12 @@ function clientProfileView(data, notes){
         <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
     }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
+
+
+  html += `<div class="panel"><h2>📋 Notes History</h2>
+    <p class="small" style="margin-bottom:10px">Unified timeline of visit notes and coaching calls — chronologically sorted, newest first.</p>
+    ${buildUnifiedNotesHistory(visits, notes)}
+  </div>`;
 
   html += `<div class="panel"><h2>Notes</h2>
     <p class="small" style="margin-bottom:10px">Any coach, lead, or admin can add a note here — this is meant to replace jotting notes in Keap going forward. Only admins can edit or delete a note.</p>
