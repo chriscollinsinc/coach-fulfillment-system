@@ -66,7 +66,6 @@ async function openVisitModal(id) {
               ${esc(v.client)}
             </div>
             <div style="font-size: 13px; color: #666;">
-              Visit ${visits.filter(x=>!x.completed).indexOf(v) + 1} of ${visits.filter(x=>!x.completed).length + 1} · 
               ${esc(v.program)} · Team ${esc(v.team || '?')} · 
               ${getStatusLabel(v)}${v.cal_week ? ` · Scheduled ${fmtFull(v.cal_week)}` : ''}
             </div>
