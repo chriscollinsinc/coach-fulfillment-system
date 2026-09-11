@@ -53,39 +53,83 @@ async function openVisitModal(id) {
   `;
 
   modal.innerHTML = `
-    <div style="width: 1350px; height: 820px; background: #fff; border-radius: 12px;
+    <div style="width: 1400px; height: 840px; background: #fff; border-radius: 12px;
                 box-shadow: 0 20px 60px rgba(0,0,0,0.3); display: flex; flex-direction: column;
                 overflow: hidden;">
 
       <!-- HEADER -->
-      <div style="padding: 28px 32px; border-bottom: 1px solid #e5e5e5; display: flex;
-                  align-items: center; justify-content: space-between; background: #fff;
+      <div style="padding: 24px 32px; border-bottom: 2px solid #f0f0f0; background: #fafafa;
                   flex-shrink: 0;">
-        <div>
-          <div style="font-size: 20px; font-weight: 700; color: #1a1a1a;">${esc(v.client)}</div>
-          <div style="font-size: 13px; color: #666; margin-top: 6px;">
-            ${esc(v.program)} · Team ${esc(v.team || '?')} · ${getStatusLabel(v)}${v.cal_week ? ` · Scheduled ${fmtFull(v.cal_week)}` : ''}
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <div>
+            <div style="font-size: 22px; font-weight: 700; color: #1a1a1a; margin-bottom: 8px;">
+              ${esc(v.client)}
+            </div>
+            <div style="font-size: 13px; color: #666;">
+              Visit ${visits.filter(x=>!x.completed).indexOf(v) + 1} of ${visits.filter(x=>!x.completed).length + 1} · 
+              ${esc(v.program)} · Team ${esc(v.team || '?')} · 
+              ${getStatusLabel(v)}${v.cal_week ? ` · Scheduled ${fmtFull(v.cal_week)}` : ''}
+            </div>
           </div>
+          <button onclick="closeVisitModal()" style="background: none; border: none; font-size: 28px;
+                  cursor: pointer; color: #999; padding: 0; width: 40px; height: 40px;
+                  display: flex; align-items: center; justify-content: center; hover: color: #333;">×</button>
         </div>
-        <button onclick="closeVisitModal()" style="background: none; border: none; font-size: 28px;
-                cursor: pointer; color: #999; padding: 0; width: 40px; height: 40px;
-                display: flex; align-items: center; justify-content: center;">×</button>
       </div>
 
       <div style="display: flex; flex: 1; overflow: hidden;">
 
-        <!-- LEFT PANEL: VISITS -->
-        <div id="vmVisitsPanel" style="width: 48%; border-right: 1px solid #e5e5e5;
-                    overflow-y: auto; padding: 28px 24px; background: #fafafa;">
-          <!-- filled by loadVisitData -->
+        <!-- LEFT SIDEBAR: FIXED INFO & CURRENT VISIT -->
+        <div style="width: 320px; border-right: 1px solid #e5e5e5; background: #f9f9f9;
+                    display: flex; flex-direction: column; overflow: hidden;">
+          
+          <!-- Current Visit Quick Info (Fixed) -->
+          <div style="padding: 20px; border-bottom: 1px solid #e5e5e5; flex-shrink: 0;">
+            <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
+                        color: #999; margin-bottom: 12px;">Current Visit</div>
+            <div style="font-size: 13px; font-weight: 600; color: #1a1a1a; margin-bottom: 8px;">
+              ${v.cal_week ? fmtFull(v.cal_week) : 'Needs scheduling'}
+            </div>
+            <div style="font-size: 12px; color: #666; margin-bottom: 12px;">
+              Coach: ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}
+            </div>
+            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+              ${v.completed ? 
+                `<div style="padding: 6px 12px; font-size: 11px; font-weight: 600;
+                        background: #2e7d32; color: #fff; border-radius: 4px;">
+                  ✓ Completed</div>` :
+                `<button onclick="completeVisit(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
+                        border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
+                        cursor: pointer;">Complete</button>`}
+              ${!v.cal_coach && !v.completed ? `<button onclick="assignClientCoachDlg('${esc(v.client).replace(/'/g, "\\'")}')" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
+                        border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
+                        cursor: pointer;">Assign</button>` : ''}
+            </div>
+          </div>
+
+          <!-- Visits List (Scrollable) -->
+          <div id="vmVisitsPanel" style="flex: 1; overflow-y: auto; padding: 16px; font-size: 12px;">
+            <!-- filled by renderVisitsList -->
+          </div>
         </div>
 
-        <!-- RIGHT PANEL: NOTES -->
-        <div id="vmNotesPanel" style="flex: 1; overflow-y: auto; padding: 28px 28px;
+        <!-- RIGHT PANEL: NOTES (Scrollable) -->
+        <div id="vmNotesPanel" style="flex: 1; overflow-y: auto; padding: 32px 36px;
                   background: #fff; display: flex; flex-direction: column;">
-          <!-- filled by loadVisitData -->
+          <!-- filled by renderNotesPanel -->
         </div>
 
+      </div>
+
+      <!-- FOOTER -->
+      <div style="padding: 20px 32px; border-top: 1px solid #e5e5e5; background: #fafafa;
+                  display: flex; justify-content: flex-end; gap: 12px; flex-shrink: 0;">
+        <button onclick="closeVisitModal()" style="padding: 10px 24px; font-size: 13px; font-weight: 600;
+                border: 1px solid #ddd; background: #fff; color: #333; border-radius: 4px;
+                cursor: pointer;">Cancel</button>
+        <button onclick="saveVisitNotes(${v.id})" style="padding: 10px 24px; font-size: 13px; font-weight: 600;
+                border: none; background: #1d4f91; color: #fff; border-radius: 4px;
+                cursor: pointer;">Save notes</button>
       </div>
     </div>
   `;
@@ -102,6 +146,31 @@ async function openVisitModal(id) {
 function closeVisitModal() {
   const modal = document.getElementById('visitModal');
   if (modal) modal.remove();
+}
+
+async function completeVisit(id) {
+  const r = await api('POST', `/api/visits/${id}/complete`, {});
+  if(r && r.ok) {
+    toast('Visit marked complete');
+    await refresh();
+    closeVisitModal();
+  }
+}
+
+async function saveVisitNotes(id) {
+  const notes = {
+    notes_wins: document.getElementById('visit_wins')?.value || '',
+    notes_issues: document.getElementById('visit_issues')?.value || '',
+    notes_focus: document.getElementById('visit_focus')?.value || '',
+    notes_commitments: document.getElementById('visit_commitments')?.value || ''
+  };
+  
+  const r = await api('PATCH', `/api/visits/${id}`, notes);
+  if(r) {
+    toast('Notes saved');
+    await refresh();
+    closeVisitModal();
+  }
 }
 
 async function loadVisitModalData(visitId) {
@@ -132,134 +201,42 @@ function renderVisitsList(visits, currentVisit) {
   const panel = document.getElementById('vmVisitsPanel');
   if (!panel) return;
 
-  // Group by current vs previous cycle
-  const current = visits.filter(v => !v.completed);
   const previous = visits.filter(v => v.completed);
-
+  
   let html = '';
 
-  // Current cycle
-  if (current.length) {
-    html += `<div style="margin-bottom: 40px;">
-      <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
-                  color: #999; letter-spacing: 1px; margin-bottom: 16px;">
-        Current Cycle (${current.length} visits)
-      </div>`;
-
-    current.forEach((v, idx) => {
-      const isCurrent = v.id === currentVisit.id;
-      const statusLabel = v.completed ? 'Completed' :
-                         v.cal_week ? 'On calendar' :
-                         v.due && v.due < TODAY ? 'Overdue' : 'Needs scheduling';
-      const statusColor = v.completed ? '#2e7d32' :
-                         v.cal_week ? '#2e7d32' :
-                         v.due && v.due < TODAY ? '#c71c1c' : '#b8860b';
-      const bgColor = v.due && v.due < TODAY && !v.completed ? '#fff5f5' : '#fff';
-      const borderColor = v.due && v.due < TODAY && !v.completed ? '#ffcccc' : '#e5e5e5';
-
-      html += `<div style="background: ${bgColor}; border: 1px solid ${borderColor};
-                          border-radius: 8px; padding: 16px; margin-bottom: 12px;
-                          ${isCurrent ? 'box-shadow: 0 0 0 2px #1d4f91;' : ''}">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start;
-                    margin-bottom: 12px;">
-          <div style="font-size: 13px; font-weight: 700; color: #1a1a1a;">
-            Visit ${idx + 1} of ${current.length}
-          </div>
-          <div style="font-size: 11px; padding: 4px 10px; background: ${statusColor}20;
-                      color: ${statusColor}; border-radius: 4px; font-weight: 500;">
-            ${statusLabel}
-          </div>
-        </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
-                    margin-bottom: 12px; font-size: 12px;">
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;
-                        text-transform: uppercase; margin-bottom: 4px;">
-              Scheduled week
-            </div>
-            <div style="color: #333; font-weight: 500;">${v.cal_week ? fmtFull(v.cal_week) : '—'}</div>
-          </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;
-                        text-transform: uppercase; margin-bottom: 4px;">
-              Scheduled On
-            </div>
-            <div style="color: #333; font-weight: 500;">${statusLabel}</div>
-          </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;
-                        text-transform: uppercase; margin-bottom: 4px;">
-              Coach
-            </div>
-            <div style="color: #333; font-weight: 500;">
-              ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}
-            </div>
-          </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;
-                        text-transform: uppercase; margin-bottom: 4px;">
-              Team
-            </div>
-            <div style="color: #333; font-weight: 500;">${esc(v.team || '?')}</div>
-          </div>
-        </div>
-        <div style="display: flex; gap: 8px;">
-          <button onclick="closeVisitModal(); openVisitModal(${v.id})"
-                  style="padding: 6px 12px; font-size: 11px; font-weight: 500;
-                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
-                          cursor: pointer;">Complete</button>
-          ${!v.cal_coach ? `<button onclick="assignClientCoachDlg('${esc(v.client).replace(/'/g, "\\'")}')" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
-                          border: 1px solid #1d4f91; background: #1d4f91; color: #fff;
-                          border-radius: 4px; cursor: pointer;">Assign coach</button>` : ''}
-          ${v.cal_week ? `<button style="padding: 6px 12px; font-size: 11px; font-weight: 500;
-                          border: 1px solid #ddd; background: #fff; border-radius: 4px;
-                          cursor: pointer; color: #333;">Move</button>` : ''}
-        </div>
-      </div>`;
-    });
-
-    html += '</div>';
-  }
-
-  // Previous cycle
+  // Previous cycle (collapsed by default)
   if (previous.length) {
     html += `<div>
-      <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
-                  color: #999; letter-spacing: 1px; margin-bottom: 16px;">
-        Previous Cycle (${previous.length} completed)
-      </div>`;
+      <button onclick="this.parentElement.querySelector('[data-prev-list]').style.display = 
+              this.parentElement.querySelector('[data-prev-list]').style.display === 'none' ? 'block' : 'none'"
+              style="width: 100%; padding: 10px; font-size: 11px; font-weight: 700; 
+                      text-transform: uppercase; color: #999; text-align: left; background: none;
+                      border: none; cursor: pointer; letter-spacing: 1px;">
+        ▸ Previous Cycle (${previous.length} completed)
+      </button>
+      <div data-prev-list style="display: none; padding-top: 8px;">`;
 
     previous.forEach((v, idx) => {
-      const isCurrent = v.id === currentVisit.id;
-      html += `<div style="background: #f5f5f5; border: 1px solid #e5e5e5;
-                          border-radius: 8px; padding: 16px; margin-bottom: 12px; opacity: ${isCurrent ? '1' : '0.8'};
-                          ${isCurrent ? 'box-shadow: 0 0 0 2px #1d4f91;' : ''}">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start;
-                    margin-bottom: 12px;">
-          <div style="font-size: 13px; font-weight: 600; color: #666;">
-            Visit ${idx + 1} of ${previous.length}
-          </div>
-          <div style="font-size: 11px; padding: 4px 10px; background: #e8f5e9;
-                      color: #2e7d32; border-radius: 4px; font-weight: 500;">Completed</div>
+      html += `<div style="background: #fff; border: 1px solid #e5e5e5; border-radius: 6px;
+                          padding: 10px; margin-bottom: 8px; cursor: pointer; font-size: 12px;
+                          transition: background 0.2s;" 
+                    onmouseover="this.style.background='#f5f5f5'" 
+                    onmouseout="this.style.background='#fff'"
+                    onclick="closeVisitModal(); openVisitModal(${v.id})">
+        <div style="font-weight: 600; color: #333; margin-bottom: 4px;">
+          Visit ${idx + 1} of ${previous.length}
         </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 12px;">
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;">Completed date</div>
-            <div style="color: #666; font-weight: 500; margin-top: 4px;">
-              ${v.completed_date ? fmt(v.completed_date) : fmt(v.cal_week)}
-            </div>
-          </div>
-          <div>
-            <div style="color: #999; font-size: 10px; font-weight: 600;">Coach</div>
-            <div style="color: #666; font-weight: 500; margin-top: 4px;">
-              ${v.manual_coach_name || (v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—')}
-            </div>
-          </div>
+        <div style="font-size: 11px; color: #666;">
+          Completed: ${v.completed_date ? fmtFull(v.completed_date) : '—'}
+        </div>
+        <div style="font-size: 11px; color: #666;">
+          Coach: ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}
         </div>
       </div>`;
     });
 
-    html += '</div>';
+    html += '</div></div>';
   }
 
   panel.innerHTML = html;
@@ -272,77 +249,62 @@ function renderNotesPanel(visit, prep) {
   const lastNotes = (prep.lastNotes || [])[0];
 
   let html = `
-    <div style="display: flex; justify-content: space-between; align-items: center;
-                margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e5e5e5;">
-      <div style="font-size: 14px; font-weight: 700; color: #1a1a1a;">Visit Notes</div>
-      <button onclick="openClientProfile(${visit.client_id})"
-              style="padding: 6px 12px; background: none; border: 1px solid #ddd;
-                      border-radius: 4px; font-size: 12px; cursor: pointer;
-                      color: #1d4f91; font-weight: 600;">See full profile →</button>
+    <div style="margin-bottom: 28px;">
+      <div style="font-size: 16px; font-weight: 700; color: #1a1a1a; margin-bottom: 4px;">Visit Notes</div>
+      <div style="font-size: 12px; color: #999;">Document what happened, what to focus on next, and any new commitments.</div>
     </div>
 
-    <div style="margin-bottom: 24px;">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
       <!-- WINS -->
-      <div style="margin-bottom: 20px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;
-                    margin-bottom: 8px;">
-          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">Wins</div>
-          <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
-                          padding: 2px; font-size: 13px;">✎</button>
+      <div style="background: #f0f7ff; border: 1px solid #cfe9ff; border-radius: 8px; padding: 16px;">
+        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
+                    color: #1d4f91; letter-spacing: 0.5px; margin-bottom: 10px;">
+          ✓ What went well
         </div>
-        <textarea id="vmWins" style="width: 100%; height: 70px; padding: 10px 12px;
-                  border: 1px solid #e5e5e5; border-radius: 6px; font-size: 12px;
-                  line-height: 1.5; font-family: inherit; color: #333; resize: none;"
-                  placeholder="What went well — momentum, breakthroughs, quick wins..."></textarea>
+        <textarea id="visit_wins" style="width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd;
+                                         border-radius: 4px; font-size: 13px; font-family: -apple-system;
+                                         resize: none;"
+                  placeholder="Momentum, breakthroughs, quick wins...">${esc(visit.notes_wins || '')}</textarea>
       </div>
 
       <!-- ISSUES / ROADBLOCKS -->
-      <div style="margin-bottom: 20px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;
-                    margin-bottom: 8px;">
-          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">Issues / Roadblocks</div>
-          <button style="background: none; border: none; color: #c71c1c; cursor: pointer;
-                          padding: 2px; font-size: 13px;">✎</button>
+      <div style="background: #fff5f5; border: 1px solid #ffcccc; border-radius: 8px; padding: 16px;">
+        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
+                    color: #c71c1c; letter-spacing: 0.5px; margin-bottom: 10px;">
+          ⚠️ Issues & blockers
         </div>
-        <textarea id="vmIssues" style="width: 100%; height: 70px; padding: 10px 12px;
-                  border: 1px solid #e5e5e5; border-radius: 6px; font-size: 12px;
-                  line-height: 1.5; font-family: inherit; color: #333; resize: none;"
-                  placeholder="What's stuck or needs attention..."></textarea>
+        <textarea id="visit_issues" style="width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd;
+                                          border-radius: 4px; font-size: 13px; font-family: -apple-system;
+                                          resize: none;"
+                  placeholder="What's stuck or needs attention...">${esc(visit.notes_issues || '')}</textarea>
       </div>
+    </div>
 
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
       <!-- FOCUS FOR NEXT VISIT -->
-      <div style="margin-bottom: 20px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;
-                    margin-bottom: 8px;">
-          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">Focus for Next Visit</div>
-          <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
-                          padding: 2px; font-size: 13px;">✎</button>
+      <div style="background: #fffaf0; border: 1px solid #ffe5b4; border-radius: 8px; padding: 16px;">
+        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
+                    color: #b8860b; letter-spacing: 0.5px; margin-bottom: 10px;">
+          🎯 Focus for next visit
         </div>
-        <textarea id="vmFocus" style="width: 100%; height: 70px; padding: 10px 12px;
-                  border: 1px solid #e5e5e5; border-radius: 6px; font-size: 12px;
-                  line-height: 1.5; font-family: inherit; color: #333; resize: none;"
-                  placeholder="Where you'll pick up next time..."></textarea>
+        <textarea id="visit_focus" style="width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd;
+                                         border-radius: 4px; font-size: 13px; font-family: -apple-system;
+                                         resize: none;"
+                  placeholder="Where you'll pick up next time...">${esc(visit.notes_focus || '')}</textarea>
       </div>
 
       <!-- NEW COMMITMENTS -->
-      <div style="margin-bottom: 20px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;
-                    margin-bottom: 8px;">
-          <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                      color: #1a1a1a; letter-spacing: 0.5px;">New Commitments</div>
-          <button style="background: none; border: none; color: #1d4f91; cursor: pointer;
-                          padding: 2px; font-size: 13px;">✎</button>
+      <div style="background: #f5faf5; border: 1px solid #d4e5d4; border-radius: 8px; padding: 16px;">
+        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
+                    color: #2e7d32; letter-spacing: 0.5px; margin-bottom: 10px;">
+          📋 New commitments
         </div>
-        <textarea id="vmCommit" style="width: 100%; height: 80px; padding: 10px 12px;
-                  border: 1px solid #e5e5e5; border-radius: 6px; font-size: 12px;
-                  line-height: 1.5; font-family: inherit; color: #333; resize: none;"
-                  placeholder="e.g. Post walkaround videos daily&#10;Run Saturday cave session..."></textarea>
+        <textarea id="visit_commitments" style="width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd;
+                                               border-radius: 4px; font-size: 13px; font-family: -apple-system;
+                                               resize: none;"
+                  placeholder="e.g. Post walkaround videos daily, Run Saturday cave session...">${esc(visit.notes_commitments || '')}</textarea>
       </div>
-    </div>
-  `;
+    </div>`;
 
   // Previous visit reference
   if (lastNotes) {
