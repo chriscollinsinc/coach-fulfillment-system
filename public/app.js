@@ -1377,11 +1377,18 @@ function inventory(){
     }
     html+=`<tr style="cursor:pointer${rowBg?';'+rowBg:''}" onclick="openVisitModal(${v.id})">
       ${showChecks?`<td onclick="event.stopPropagation()"><input type="checkbox" ${sel.has(v.id)?'checked':''} onclick="toggleInvSel(${v.id},this.checked)"></td>`:''}
-      <td><b>${clientLink(v.client, v.client_id)}</b></td><td>${esc(v.team||'?')}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td>
-      <td class="mono">${fmt(v.due)}</td><td class="small">${sched}</td><td>${pill}</td>
+      ${INV_COLS.map(c=>{
+        let cellData = '';
+        if(c.key === 'client') cellData = '<b>'+clientLink(v.client, v.client_id)+'</b>';
+        else if(c.key === 'scheduled') cellData = `<small>${sched}</small>`;
+        else if(c.key === 'status') cellData = pill;
+        else cellData = esc(c.get(v)||'');
+        const cellClass = (c.key==='due'||c.key==='cycle')?'mono':'';
+        return `<td class="${cellClass}">${cellData}</td>`;
+      }).join('')}
       <td class="small" style="color:var(--muted)">Open ›</td></tr>`;
   });
-  if(rows.length>400) html+=`<tr><td colspan="10" class="small">…first 400 of ${rows.length}</td></tr>`;
+  if(rows.length>400) html+=`<tr><td colspan="${INV_COLS.length + 1 + (showChecks?1:0)}" class="small">…first 400 of ${rows.length}</td></tr>`;
   html+=`</table></div>`;
   return html;
 }
