@@ -367,30 +367,52 @@ route('POST', /^\/api\/visits$/, ['admin','lead'], (req, res, m, body, user) => 
   log(user.email, 'visit.create', body);
   send(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
 });
-route('PATCH', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
+route('PATCH', /^\/api\/visits\/(\d+)$/, ['admin','lead','coach'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
-  if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
-  const f = {};
-  for(const k of ['client','program','cycle','due','team','cal_coach']) if(body[k] !== undefined) f[k] = body[k];
-  // Store tag (multi-store contracts): '' clears it; otherwise must be one of the
-  // parent contract's stores when that contract defines a list (keeps labels clean).
-  if(body.store !== undefined){
-    const s = String(body.store || '').trim();
-    if(s){
-      const c = v.contract_id ? db.prepare('SELECT stores FROM contracts WHERE id=?').get(v.contract_id) : null;
-      const allowed = parseStores(c && c.stores);
-      if(allowed.length && !allowed.some(x => x.toLowerCase() === s.toLowerCase()))
-        return err(res, 400, `"${s}" isn't one of this contract's stores (${allowed.join(', ')})`);
-      f.store = allowed.find(x => x.toLowerCase() === s.toLowerCase()) || s;
-    } else {
-      f.store = null;
+  
+  // Permission check
+  if(user.role === 'coach'){
+    // Coaches can only edit visits if they're assigned to the client
+    if(!canManageVisit(user, v)) return err(res, 403, 'You are not assigned to this client');
+    // Coaches can ONLY save notes, not edit other visit fields
+    const allowedFields = ['notes_wins', 'notes_issues', 'notes_focus', 'notes_commitments'];
+    for(const k of Object.keys(body)){
+      if(!allowedFields.includes(k)) return err(res, 403, 'Coaches can only save notes');
     }
+  } else {
+    // Admin/lead team check
+    if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
   }
-  // Validate coach exists (if setting cal_coach) — allows both active and inactive coaches
-  if(body.cal_coach !== undefined && body.cal_coach){
-    const coach = getCoach(body.cal_coach);
-    if(!coach) return err(res, 400, 'Coach not found');
-    if(!canEditTeam(user, coach.team)) return err(res, 403, 'Coach is not on your team');
+  
+  const f = {};
+  const editableFields = user.role === 'coach' 
+    ? ['notes_wins', 'notes_issues', 'notes_focus', 'notes_commitments']
+    : ['client','program','cycle','due','team','cal_coach','notes_wins', 'notes_issues', 'notes_focus', 'notes_commitments'];
+  
+  for(const k of editableFields) if(body[k] !== undefined) f[k] = body[k];
+  
+  // Only admin/lead can edit these fields
+  if(user.role !== 'coach'){
+    // Store tag (multi-store contracts): '' clears it; otherwise must be one of the
+    // parent contract's stores when that contract defines a list (keeps labels clean).
+    if(body.store !== undefined){
+      const s = String(body.store || '').trim();
+      if(s){
+        const c = v.contract_id ? db.prepare('SELECT stores FROM contracts WHERE id=?').get(v.contract_id) : null;
+        const allowed = parseStores(c && c.stores);
+        if(allowed.length && !allowed.some(x => x.toLowerCase() === s.toLowerCase()))
+          return err(res, 400, `"${s}" isn't one of this contract's stores (${allowed.join(', ')})`);
+        f.store = allowed.find(x => x.toLowerCase() === s.toLowerCase()) || s;
+      } else {
+        f.store = null;
+      }
+    }
+    // Validate coach exists (if setting cal_coach) — allows both active and inactive coaches
+    if(body.cal_coach !== undefined && body.cal_coach){
+      const coach = getCoach(body.cal_coach);
+      if(!coach) return err(res, 400, 'Coach not found');
+      if(!canEditTeam(user, coach.team)) return err(res, 403, 'Coach is not on your team');
+    }
   }
   // Moving an open visit to another team can't leave it sitting on the old team's
   // board: if it's scheduled under a coach who isn't on the new team, unschedule it

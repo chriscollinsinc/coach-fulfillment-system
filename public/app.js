@@ -355,18 +355,6 @@ function renderNotesPanel(visit, prep) {
     `;
   }
 
-  // Action buttons
-  html += `
-    <div style="margin-top: auto; padding-top: 16px; border-top: 1px solid #e5e5e5;
-                display: flex; gap: 10px;">
-      <button onclick="closeVisitModal()" style="flex: 1; padding: 12px; background: none;
-              border: 1px solid #ddd; border-radius: 6px; font-size: 13px; cursor: pointer;
-              font-weight: 600; color: #333;">Close</button>
-      <button onclick="saveVisitNotes(${visit.id})" style="flex: 1; padding: 12px;
-              background: #1d4f91; color: #fff; border: none; border-radius: 6px;
-              font-size: 13px; cursor: pointer; font-weight: 600;">Save notes</button>
-    </div>
-  `;
 
   panel.innerHTML = html;
 }
