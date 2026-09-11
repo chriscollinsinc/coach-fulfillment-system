@@ -623,7 +623,10 @@ function render(){
   const hasPending = (r==='admin'||r==='lead');
   views.dashboard='Today';
   if(canEditWeeks()) views.board='Schedule Board'; // admin/lead/sales/coach — see canEditWeeks()
-  if(canEditWeeks() && myTeams().length>1) views.global='Global Calendar'; // all teams' calendars in one grid
+  // Coaches see global view of their team; admin/lead/sales see views of multiple teams
+  if(canEditWeeks()){
+    if(D.user.role === 'coach' || myTeams().length > 1) views.global='Global Calendar';
+  }
   views.inventory = r==='coach' ? 'My Visits' : 'LID Inventory';
   views.clients='Clients'; // dropdown for admin/lead (Active Clients + Unassigned Clients); plain link otherwise
   views.availability='Availability';
@@ -1038,11 +1041,18 @@ function board(){
   const weeks=mondaysInMonth(y,m);
   const formerCoachesView = st.view === 'formercoaches';
   
-  // For coaches, only show their own row
+  // For coaches, only show their own row in board view, but show all team coaches in global view
   let members;
   if(D.user.role === 'coach'){
-    members = D.coaches.filter(c=>c.id === D.user.coach_id);
+    if(global){
+      // Global view: show all coaches on this coach's team
+      members = D.coaches.filter(c=>c.active && c.team === D.user.team).sort((a,b)=>a.name.localeCompare(b.name));
+    } else {
+      // Board view: show only their own row
+      members = D.coaches.filter(c=>c.id === D.user.coach_id);
+    }
   } else {
+    // Admin/lead/sales: existing logic
     members = formerCoachesView
       ? D.coaches.filter(c=>!c.active && myTeams().includes(c.team)).slice().sort((a,b)=>(a.team+'|'+a.name).localeCompare(b.team+'|'+b.name))
       : global
@@ -1079,6 +1089,7 @@ function board(){
     ${global?`<span class="btn primary" style="cursor:default" title="All teams shown together">All teams</span>`:''}
     ${myTeams().map(x=>`<button class="btn ${(!global&&x===t)?'primary':''}" onclick="st.view='board';st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
     ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
+    ${(D.user.role === 'coach' && myTeams().length === 1)?`<button class="btn ${global?'primary':''}" onclick="st.view='${global?'board':'global'}';st.placing=null;render()">${global?'My Calendar':'Team Overview'}</button>`:''}
     ${canEditWeeks()?`<button class="btn ${st.view==='formercoaches'?'primary':''}" onclick="st.view='formercoaches';st.placing=null;render()">Former Coaches</button>`:""}
     <span style="flex:1"></span>
     <div class="calsearch">
@@ -1115,7 +1126,7 @@ function board(){
         // Coaches can only manage their own weeks
         const coachCanManage = D.user.role === 'coach' ? c.id === D.user.coach_id : true;
         if(placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
-        else if(canEditWeeks() && coachCanManage) click=` onclick="cellDlg('${c.id}','${w}')"`;
+        else if(canEditWeeks() && coachCanManage && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
         inner=`<b>${v.completed?'':healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
