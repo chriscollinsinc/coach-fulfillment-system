@@ -1056,27 +1056,15 @@ function board(){
   const calQ = norm(st.calSearch||'');
   const calHit = v => calQ && norm(v.client).includes(calQ);
 
-  /* to-schedule list: for coaches, show their assigned clients' unscheduled LIDs; for others, show team/global */
+  /* to-schedule list: for coaches, show their team's unscheduled LIDs; for others, show team/global */
   const nextM = m===11?[y+1,0]:[y,m+1];
   const inMonth=(v,yy,mm)=>v.due&&+v.due.slice(0,4)===yy&&+v.due.slice(5,7)===mm+1;
   
-  let cand;
-  if(D.user.role === 'coach'){
-    // For coaches: show unscheduled visits for their assigned clients
-    cand = D.visits.filter(v => {
-      if(v.completed || v.cal_week) return false; // already scheduled or completed
-      if(!v.client_id) return false; // no client link
-      const cl = db.prepare ? db.prepare('SELECT assigned_coach_id FROM clients WHERE id=?').get(v.client_id) : null;
-      // Frontend doesn't have db, so we need to check differently
-      // Find the client in D.clients if available, or check if we have the data
-      return true; // for now, show all team visits they could manage
-    });
-    // Better approach: filter by assigned clients
-    const assignedClients = new Set(); // we'd need to fetch this from the API
-    cand = D.visits.filter(v => !v.completed && !v.cal_week && v.team === D.user.team);
-  } else {
-    cand = D.visits.filter(v=>!v.completed&&!v.cal_week&&(global?myTeams().includes(v.team):v.team===t));
-  }
+  // For coaches, show their team's unscheduled visits
+  // For admin/lead, show team or global unscheduled visits
+  const cand = D.user.role === 'coach'
+    ? D.visits.filter(v => !v.completed && !v.cal_week && v.team === D.user.team)
+    : D.visits.filter(v=>!v.completed&&!v.cal_week&&(global?myTeams().includes(v.team):v.team===t));
   
   const overdue=cand.filter(v=>v.due&&v.due<TODAY&&!inMonth(v,y,m)).sort((a,b)=>a.due.localeCompare(b.due));
   const thisMo=cand.filter(v=>inMonth(v,y,m));
