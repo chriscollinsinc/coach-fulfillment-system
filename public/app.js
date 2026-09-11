@@ -1090,7 +1090,7 @@ function board(){
     ${myTeams().map(x=>`<button class="btn ${(!global&&x===t)?'primary':''}" onclick="st.view='board';st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
     ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
     ${(D.user.role === 'coach' && myTeams().length === 1)?`<button class="btn ${global?'primary':''}" onclick="st.view='${global?'board':'global'}';st.placing=null;render()">${global?'My Calendar':'Team Overview'}</button>`:''}
-    ${canEditWeeks()?`<button class="btn ${st.view==='formercoaches'?'primary':''}" onclick="st.view='formercoaches';st.placing=null;render()">Former Coaches</button>`:""}
+    ${(canEditWeeks() && D.user.role !== 'coach')?`<button class="btn ${st.view==='formercoaches'?'primary':''}" onclick="st.view='formercoaches';st.placing=null;render()">Former Coaches</button>`:""}
     <span style="flex:1"></span>
     <div class="calsearch">
       <input id="calSearchBox" placeholder="🔍 Search a client's visits…" autocomplete="off" value="${esc(st.calSearch||'')}"
