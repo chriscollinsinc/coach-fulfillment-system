@@ -968,11 +968,11 @@ function todayCoachView(t){
   html+=`</div>`;
   const sec=(title,list,empty)=>{
     let h=`<div class="panel"><h2>${title} (${list.length})</h2>`;
-    h+= list.length ? `<table><tr><th>Client</th><th>Visit</th><th>Due</th><th>Scheduled On</th><th></th></tr>`+
-      todayRows(list, 10, v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td>${esc(v.cycle||'')} ${esc(v.program||'')}</td>
-        <td class="mono">${fmt(v.due||v.scheduled_week)}</td>
-        <td>${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
-        <td>${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open client</button>`:''}
+    h+= list.length ? `<table style="table-layout: fixed; width: 100%;"><tr><th style="width: 20%;">Client</th><th style="width: 25%;">Visit</th><th style="width: 20%;">Due</th><th style="width: 20%;">Scheduled On</th><th style="width: 15%;"></th></tr>`+
+      todayRows(list, 10, v=>`<tr><td style="width: 20%;"><b>${clientLink(v.client, v.client_id)}</b></td><td style="width: 25%;">${esc(v.cycle||'')} ${esc(v.program||'')}</td>
+        <td style="width: 20%;" class="mono">${fmt(v.due||v.scheduled_week)}</td>
+        <td style="width: 20%;">${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
+        <td style="width: 15%;">${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open client</button>`:''}
         ${!v.scheduled_week?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete</button>`:''}</td></tr>`)+`</table>`
       : `<p class="small">${empty}</p>`;
     return h+`</div>`;
@@ -982,11 +982,11 @@ function todayCoachView(t){
   if(t.missingNotes.length){
     html+=`<div class="panel"><h2>You owe a note (${t.missingNotes.length})</h2>
     <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up.</p>
-    <table><tr><th>Client</th><th>Visit</th><th>Due</th><th>Scheduled On</th><th></th></tr>`+
-    t.missingNotes.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td>${esc(v.cycle||'')} ${esc(v.program||'')}</td>
-      <td class="mono">${fmt(v.due||v.scheduled_week)}</td>
-      <td>${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
-      <td>${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
+    <table style="table-layout: fixed; width: 100%;"><tr><th style="width: 20%;">Client</th><th style="width: 25%;">Visit</th><th style="width: 20%;">Due</th><th style="width: 20%;">Scheduled On</th><th style="width: 15%;"></th></tr>`+
+    t.missingNotes.map(v=>`<tr><td style="width: 20%;"><b>${clientLink(v.client, v.client_id)}</b></td><td style="width: 25%;">${esc(v.cycle||v.program||'Completed visit')}</td>
+      <td style="width: 20%;" class="mono">${fmt(v.due||v.scheduled_week)}</td>
+      <td style="width: 20%;">${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
+      <td style="width: 15%;">${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
   }
   return html;
 }
