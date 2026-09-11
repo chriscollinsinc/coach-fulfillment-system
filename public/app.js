@@ -1024,7 +1024,7 @@ function todayCoachView(t){
     <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up.</p>
     <table><tr><th>Client</th><th>Scheduled On</th><th></th></tr>`+
     t.missingNotes.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="mono">${fmt(v.scheduled_week)}</td>
-      <td>${v.client_id?`<button class="btn tiny primary" onclick="openClientProfile(${v.client_id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
+      <td>${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
   }
   return html;
 }
