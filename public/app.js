@@ -607,6 +607,7 @@ function renderCarouselOnly() {
   if (carouselDiv && st.clientProfile?.client?.id) {
     carouselDiv.innerHTML = renderNotesCarousel(st.clientProfile.client.id);
   }
+  setupCarouselListeners();
 }
 // 
 function setupCarouselListeners() {
@@ -2626,6 +2627,7 @@ async function loadClientProfile(id){
     st.clientNotes = notes;
     await loadNotesCarousel(id);
     $('#main').innerHTML = clientProfileView(data, notes);
+    setupCarouselListeners();
   }catch(e){
     console.error('Failed to load client:', id, e);
     $('#main').innerHTML = '<div class="panel"><p class="small">Could not load this client: ' + esc(e.message || e) + '</p></div>';
