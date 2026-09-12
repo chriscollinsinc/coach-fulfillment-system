@@ -757,6 +757,7 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
     const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week
       FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id=? AND COALESCE(v.scheduled_week, v.due)>=?
       AND COALESCE(v.notes_wins,'') = '' AND COALESCE(v.notes_issues,'') = '' AND COALESCE(v.notes_focus,'') = '' AND COALESCE(v.notes_commitments,'') = '' ORDER BY v.scheduled_week DESC LIMIT 20`).all(user.coach_id, cut30);
+    return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes });
   }
 
   const teamFilter = user.role === 'lead' ? user.team : null;
