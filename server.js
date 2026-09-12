@@ -756,8 +756,7 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
       FROM visits v WHERE v.completed=0 AND v.due>=? AND v.due<=? AND ${mine} ORDER BY v.due LIMIT 20`).all(today, plus30, user.coach_id, user.coach_id);
     const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week
       FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id=? AND COALESCE(v.scheduled_week, v.due)>=?
-      AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL) ORDER BY v.scheduled_week DESC LIMIT 20`).all(user.coach_id, cut30);
-    return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes });
+      AND COALESCE(v.notes_wins,'') = '' AND COALESCE(v.notes_issues,'') = '' AND COALESCE(v.notes_focus,'') = '' AND COALESCE(v.notes_commitments,'') = '' ORDER BY v.scheduled_week DESC LIMIT 20`).all(user.coach_id, cut30);
   }
 
   const teamFilter = user.role === 'lead' ? user.team : null;
@@ -788,7 +787,7 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
   }
   const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week, v.completed_by_coach_id
     FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id IS NOT NULL AND COALESCE(v.scheduled_week, v.due)>=?${tf}
-    AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL) ORDER BY v.scheduled_week DESC LIMIT 50`).all(cut30, ...tArgs);
+    AND COALESCE(v.notes_wins,'')='' AND COALESCE(v.notes_issues,'')='' AND COALESCE(v.notes_focus,'')='' AND COALESCE(v.notes_commitments,'')='' ORDER BY v.scheduled_week DESC LIMIT 50`).all(cut30, ...tArgs);
   const holdsExpiring = db.prepare(`SELECT id, name, coach_id, expires FROM prospect_holds
     WHERE status='active' AND expires IS NOT NULL AND expires<=? ORDER BY expires LIMIT 20`).all(plus14)
     .filter(h => { if(!teamFilter) return true; const c = getCoach(h.coach_id); return c && c.team === teamFilter; });
@@ -941,7 +940,7 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
   const missingNotes = db.prepare(`
     SELECT v.id, v.client, v.client_id, v.scheduled_week
     FROM visits v
-    WHERE v.completed_by_coach_id=? AND v.id NOT IN (SELECT visit_id FROM client_notes WHERE visit_id IS NOT NULL)
+    WHERE v.completed_by_coach_id=? AND COALESCE(v.notes_wins,'')='' AND COALESCE(v.notes_issues,'')='' AND COALESCE(v.notes_focus,'')='' AND COALESCE(v.notes_commitments,'')=''
     ORDER BY v.scheduled_week DESC LIMIT 50`).all(c.id);
   send(res, 200, {
     coach: c,
