@@ -3079,7 +3079,6 @@ function formatCycleDate(dateStr) {
 route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
   const clientId = +m[1];
   
-  // Fetch notes from BOTH client_notes table AND visits with structured notes
   const notes = db.prepare(`
     SELECT 
       cn.id, cn.note_date as note_date, cn.note_type, cn.wins, cn.issues, cn.focus,
@@ -3087,19 +3086,8 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
     FROM client_notes cn
     LEFT JOIN visits v ON cn.visit_id = v.id
     WHERE cn.client_id = ?
-    
-    UNION ALL
-    
-    SELECT 
-      v.id, v.completed_date as note_date, 'Visit Note' as note_type, 
-      v.notes_wins as wins, v.notes_issues as issues, v.notes_focus as focus,
-      NULL as author_email, v.cal_coach as author_name, v.completed_date as created,
-      v.cycle, v.program
-    FROM visits v
-    WHERE v.client_id = ? AND v.completed = 1 AND v.completed_date IS NOT NULL
-    
-    ORDER BY note_date DESC, created DESC
-  `).all(clientId, clientId);
+    ORDER BY cn.note_date DESC, cn.created DESC
+  `).all(clientId);
   
   if (!notes.length) return send(res, 200, { cycles: [] });
   
