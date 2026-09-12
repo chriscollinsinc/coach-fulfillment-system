@@ -3096,7 +3096,7 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
       NULL as author_email, v.cal_coach as author_name, v.completed_date as created,
       v.cycle, v.program
     FROM visits v
-    WHERE v.client_id = ? AND v.completed = 1 AND (v.notes_wins IS NOT NULL OR v.notes_issues IS NOT NULL OR v.notes_focus IS NOT NULL)
+    WHERE v.client_id = ? AND v.completed = 1 AND v.completed_date IS NOT NULL
     
     ORDER BY note_date DESC, created DESC
   `).all(clientId, clientId);
