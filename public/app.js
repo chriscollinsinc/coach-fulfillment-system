@@ -606,10 +606,9 @@ function renderCarouselOnly() {
   const carouselDiv = document.getElementById("notesCarouselContainer");
   if (carouselDiv && st.clientProfile?.client?.id) {
     carouselDiv.innerHTML = renderNotesCarousel(st.clientProfile.client.id);
-    setupCarouselListeners();
   }
 }
-
+// 
 function setupCarouselListeners() {
   const container = document.getElementById("notesCarouselContainer");
   if (!container) return;
