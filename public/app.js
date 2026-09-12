@@ -606,7 +606,39 @@ function renderCarouselOnly() {
   const carouselDiv = document.getElementById("notesCarouselContainer");
   if (carouselDiv && st.clientProfile?.client?.id) {
     carouselDiv.innerHTML = renderNotesCarousel(st.clientProfile.client.id);
+    setupCarouselListeners();
   }
+}
+
+function setupCarouselListeners() {
+  const container = document.getElementById("notesCarouselContainer");
+  if (!container) return;
+  
+  // Tab click handlers
+  container.querySelectorAll(".carousel-cycle-tab").forEach(tab => {
+    tab.addEventListener("click", (e) => {
+      const idx = parseInt(e.target.getAttribute("data-cycle-idx"));
+      jumpToCycleCarousel(idx);
+      renderCarouselOnly();
+    });
+  });
+  
+  // Previous note button
+  const prevBtn = container.querySelector("[data-action="prev-note"]");
+  if (prevBtn) prevBtn.addEventListener("click", () => { prevNoteCarousel(); renderCarouselOnly(); });
+  
+  // Next note button
+  const nextBtn = container.querySelector("[data-action="next-note"]");
+  if (nextBtn) nextBtn.addEventListener("click", () => { nextNoteCarousel(); renderCarouselOnly(); });
+  
+  // Pagination dots
+  container.querySelectorAll(".carousel-dot").forEach(dot => {
+    dot.addEventListener("click", (e) => {
+      const noteIdx = parseInt(e.target.getAttribute("data-note-idx"));
+      st.notesCarousel.currentNoteIdx = noteIdx;
+      renderCarouselOnly();
+    });
+  });
 }
 
 function renderNotesCarousel(clientId) {
@@ -633,7 +665,7 @@ function renderNotesCarousel(clientId) {
   cycles.forEach((c, idx) => {
     const isActive = idx === currentCycleIdx;
     const tabColor = getCycleColor(c.cycle_num);
-    html += `<button onclick="jumpToCycleCarousel(${idx});renderCarouselOnly()" style="padding:14px 16px;border:none;background:transparent;color:${isActive?'#000':'#999'};font-size:13px;font-weight:${isActive?'600':'500'};cursor:pointer;transition:all 0.3s ease;position:relative;white-space:nowrap;${isActive?`border-bottom:3px solid ${tabColor};color:#000;`:''}" class="apple-tab">${esc(c.cycle_label)}</button>`;
+    html += `<button  style="padding:14px 16px;border:none;background:transparent;color:${isActive?'#000':'#999'};font-size:13px;font-weight:${isActive?'600':'500'};cursor:pointer;transition:all 0.3s ease;position:relative;white-space:nowrap;${isActive?`border-bottom:3px solid ${tabColor};color:#000;`:''}" data-cycle-idx="${idx}" class="carousel-cycle-tab">${esc(c.cycle_label)}</button>`;
   });
   html += `</div>`;
 
@@ -681,13 +713,13 @@ function renderNotesCarousel(clientId) {
     <div style="display:flex;justify-content:center;gap:8px;padding:8px 0">
       ${cycle.notes.map((_, idx) => {
         const isActive = idx === currentNoteIdx;
-        return `<button onclick="st.notesCarousel.currentNoteIdx=${idx};renderCarouselOnly()" style="width:${isActive?'28':'8'}px;height:8px;border-radius:4px;background:${isActive?'#000':'#ddd'};border:none;cursor:pointer;transition:all 0.3s ease;padding:0" title="Note ${idx+1}"></button>`;
+        return `<button data-note-idx="${idx}" class="carousel-dot" style="width:${isActive?'28':'8'}px;height:8px;border-radius:4px;background:${isActive?'#000':'#ddd'};border:none;cursor:pointer;transition:all 0.3s ease;padding:0" title="Note ${idx+1}"></button>`;
       }).join('')}
     </div>
     
     <!-- Navigation buttons -->
     <div style="display:flex;gap:12px;justify-content:center">
-      <button onclick="prevNoteCarousel();renderCarouselOnly()" style="padding:10px 14px;border:1px solid #e5e5e5;background:#fff;color:#333;border-radius:8px;font-size:14px;cursor:${isFirst?'not-allowed':'pointer'};opacity:${isFirst?'0.4':'1'};pointer-events:${isFirst?'none':'auto'};transition:all 0.2s;font-weight:500" ${isFirst?'disabled':''}>← Prev</button>
+      <button data-action="prev-note" style="padding:10px 14px;border:1px solid #e5e5e5;background:#fff;color:#333;border-radius:8px;font-size:14px;cursor:${isFirst?'not-allowed':'pointer'};opacity:${isFirst?'0.4':'1'};pointer-events:${isFirst?'none':'auto'};transition:all 0.2s;font-weight:500" ${isFirst?'disabled':''}>← Prev</button>
       
       <div style="font-size:13px;color:#999;display:flex;align-items:center;gap:4px">
         <span style="color:#000;font-weight:600">${currentNoteIdx + 1}</span>
@@ -695,7 +727,7 @@ function renderNotesCarousel(clientId) {
         <span>${cycle.notes.length}</span>
       </div>
       
-      <button onclick="nextNoteCarousel();renderCarouselOnly()" style="padding:10px 14px;border:1px solid #e5e5e5;background:#fff;color:#333;border-radius:8px;font-size:14px;cursor:${isLast?'not-allowed':'pointer'};opacity:${isLast?'0.4':'1'};pointer-events:${isLast?'none':'auto'};transition:all 0.2s;font-weight:500" ${isLast?'disabled':''}>Next →</button>
+      <button data-action="next-note" style="padding:10px 14px;border:1px solid #e5e5e5;background:#fff;color:#333;border-radius:8px;font-size:14px;cursor:${isLast?'not-allowed':'pointer'};opacity:${isLast?'0.4':'1'};pointer-events:${isLast?'none':'auto'};transition:all 0.2s;font-weight:500" ${isLast?'disabled':''}>Next →</button>
     </div>
   </div>`;
 
