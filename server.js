@@ -3067,6 +3067,15 @@ route('GET', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'],
     WHERE n.client_id=? ORDER BY n.id DESC`).all(+m[1]));
 });
 
+// Helper to format date as "MMM DD, YYYY"
+function formatCycleDate(dateStr) {
+  const d = new Date(dateStr);
+  const month = d.toLocaleDateString('en-US', { month: 'short' });
+  const day = d.getDate();
+  const year = d.getFullYear();
+  return `${month} ${day}, ${year}`;
+}
+
 route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
   const clientId = +m[1];
   
@@ -3111,8 +3120,14 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
         cycle_num: cycleNum,
         total_cycles: totalCycles,
         program: note.program || null,
+        earliestDate: note.note_date,
         notes: []
       };
+    } else {
+      // Track earliest date for this cycle
+      if (note.note_date < cycleMap[cycleLabel].earliestDate) {
+        cycleMap[cycleLabel].earliestDate = note.note_date;
+      }
     }
     
     // Add note to this cycle's notes array
@@ -3128,8 +3143,14 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
     });
   }
   
-  // Convert to array and sort by cycle_num descending (newest cycles first)
-  const cycles = Object.values(cycleMap).sort((a, b) => b.cycle_num - a.cycle_num);
+  // Convert to array and format cycle labels with dates
+  const cycles = Object.values(cycleMap).map(cycle => {
+    const dateStr = cycle.earliestDate ? formatCycleDate(cycle.earliestDate) : '';
+    return {
+      ...cycle,
+      cycle_label: dateStr ? `${dateStr} • ${cycle.cycle_label}` : cycle.cycle_label
+    };
+  }).sort((a, b) => b.cycle_num - a.cycle_num);
   
   send(res, 200, { cycles });
 });
