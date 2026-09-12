@@ -3070,17 +3070,27 @@ route('GET', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'],
 route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
   const clientId = +m[1];
   
-  // Fetch all notes for this client with their linked visit's cycle info
+  // Fetch notes from BOTH client_notes table AND visits with structured notes
   const notes = db.prepare(`
     SELECT 
-      cn.id, cn.note_date, cn.note_type, cn.wins, cn.issues, cn.focus,
-      cn.author_email, cn.author_name, cn.created, v.cycle, v.program,
-      cn.body
+      cn.id, cn.note_date as note_date, cn.note_type, cn.wins, cn.issues, cn.focus,
+      cn.author_email, cn.author_name, cn.created, v.cycle, v.program
     FROM client_notes cn
     LEFT JOIN visits v ON cn.visit_id = v.id
     WHERE cn.client_id = ?
-    ORDER BY cn.note_date DESC, cn.created DESC
-  `).all(clientId);
+    
+    UNION ALL
+    
+    SELECT 
+      v.id, v.completed_date as note_date, 'Visit Note' as note_type, 
+      v.notes_wins as wins, v.notes_issues as issues, v.notes_focus as focus,
+      NULL as author_email, v.cal_coach as author_name, v.completed_date as created,
+      v.cycle, v.program
+    FROM visits v
+    WHERE v.client_id = ? AND v.completed = 1 AND (v.notes_wins IS NOT NULL OR v.notes_issues IS NOT NULL OR v.notes_focus IS NOT NULL)
+    
+    ORDER BY note_date DESC, created DESC
+  `).all(clientId, clientId);
   
   if (!notes.length) return send(res, 200, { cycles: [] });
   
@@ -3123,7 +3133,6 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
   
   send(res, 200, { cycles });
 });
-
 const NOTE_TYPES = ['Coaching Call', 'LID'];
 route('POST', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
