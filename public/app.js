@@ -376,6 +376,12 @@ let st = {
   calSearch:'',
   due2027:false,
   handoffMode:0,
+  notesCarousel: {
+    cycles: [],
+    currentCycleIdx: 0,
+    currentNoteIdx: 0,
+    filterMode: 'all'
+  }
 };
 let occ = null; // occupancy map coach|week -> {type:'visit'|'block', ...}
 
@@ -537,6 +543,125 @@ function uiConfirm(msg, yesLabel){
     $('#uc-yes').onclick=()=>{ d.close(); res(true); };
     d.oncancel=()=>res(false);
   });
+}
+
+/* ---------- notes carousel (cycle-based display) ---------- */
+const CYCLE_COLORS = ['#4A90E2', '#1ABC9C', '#F39C12', '#E74C3C', '#9B59B6', '#27AE60'];
+function getCycleColor(cycleNum) {
+  return CYCLE_COLORS[(cycleNum - 1) % CYCLE_COLORS.length];
+}
+
+async function loadNotesCarousel(clientId) {
+  try {
+    const data = await api('GET', '/api/clients/' + clientId + '/notes-by-cycle');
+    st.notesCarousel.cycles = data.cycles || [];
+    st.notesCarousel.currentCycleIdx = 0;
+    st.notesCarousel.currentNoteIdx = 0;
+  } catch (e) {
+    console.error('Failed to load notes carousel:', e);
+    st.notesCarousel.cycles = [];
+  }
+}
+
+function nextNoteCarousel() {
+  if (!st.notesCarousel.cycles.length) return;
+  const cycle = st.notesCarousel.cycles[st.notesCarousel.currentCycleIdx];
+  if (!cycle || !cycle.notes.length) return;
+
+  if (st.notesCarousel.currentNoteIdx < cycle.notes.length - 1) {
+    st.notesCarousel.currentNoteIdx++;
+  } else if (st.notesCarousel.currentCycleIdx < st.notesCarousel.cycles.length - 1) {
+    st.notesCarousel.currentCycleIdx++;
+    st.notesCarousel.currentNoteIdx = 0;
+  }
+}
+
+function prevNoteCarousel() {
+  if (!st.notesCarousel.cycles.length) return;
+
+  if (st.notesCarousel.currentNoteIdx > 0) {
+    st.notesCarousel.currentNoteIdx--;
+  } else if (st.notesCarousel.currentCycleIdx > 0) {
+    st.notesCarousel.currentCycleIdx--;
+    const cycle = st.notesCarousel.cycles[st.notesCarousel.currentCycleIdx];
+    st.notesCarousel.currentNoteIdx = (cycle.notes.length || 1) - 1;
+  }
+}
+
+function jumpToCycleCarousel(cycleIdx) {
+  if (cycleIdx >= 0 && cycleIdx < st.notesCarousel.cycles.length) {
+    st.notesCarousel.currentCycleIdx = cycleIdx;
+    st.notesCarousel.currentNoteIdx = 0;
+  }
+}
+
+function renderNoteSection(title, content, color) {
+  if (!content) return '';
+  return `<div style="margin-bottom:16px">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:${color};letter-spacing:0.5px;margin-bottom:8px">${title}</div>
+    <div style="font-size:13px;line-height:1.6;color:#333">${esc(content)}</div>
+  </div>`;
+}
+
+function renderNotesCarousel(clientId) {
+  const { cycles, currentCycleIdx, currentNoteIdx } = st.notesCarousel;
+
+  if (!cycles.length) {
+    return '<p class="small" style="color:var(--muted)">No notes recorded yet.</p>';
+  }
+
+  const cycle = cycles[currentCycleIdx];
+  if (!cycle || !cycle.notes.length) {
+    return '<p class="small" style="color:var(--muted)">No notes in this cycle.</p>';
+  }
+
+  const note = cycle.notes[currentNoteIdx];
+  const color = getCycleColor(cycle.cycle_num);
+  const isLast = currentNoteIdx === cycle.notes.length - 1;
+  const isFirst = currentNoteIdx === 0;
+
+  let html = `<div style="margin-bottom:20px">
+    <div style="display:flex;gap:12px;margin-bottom:16px;align-items:center;flex-wrap:wrap">`;
+
+  // Cycle tabs
+  html += `<div style="display:flex;gap:6px">`;
+  cycles.forEach((c, idx) => {
+    const isActive = idx === currentCycleIdx;
+    const tabColor = getCycleColor(c.cycle_num);
+    html += `<button onclick="jumpToCycleCarousel(${idx});render()" style="padding:6px 12px;border:${isActive?'2px solid '+tabColor:'1px solid #ddd'};background:${isActive?tabColor+'22':'#fff'};color:#333;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s">${esc(c.cycle_label)}</button>`;
+  });
+  html += `</div>`;
+
+  // Note counter
+  html += `<span style="font-size:12px;color:var(--muted)">${currentNoteIdx + 1} of ${cycle.notes.length}</span>`;
+  html += `</div>`;
+
+  // Note card
+  html += `<div style="background:#fafafa;border-left:4px solid ${color};padding:20px;border-radius:4px;margin-bottom:16px;animation:slideInCard 0.4s cubic-bezier(0.34,1.56,0.64,1)">
+    <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:12px">
+      <div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${note.type}</div>
+        <div style="font-size:12px;color:var(--muted)">${fmt(note.date)} • ${esc(note.author || '—')}</div>
+      </div>
+    </div>
+    ${renderNoteSection('✓ Wins', note.wins, color)}
+    ${renderNoteSection('⚠ Issues', note.issues, color)}
+    ${renderNoteSection('→ Focus', note.focus, color)}
+  </div>`;
+
+  // Navigation
+  html += `<div style="display:flex;gap:8px;justify-content:space-between;align-items:center">
+    <button onclick="prevNoteCarousel();render()" style="padding:8px 16px;border:1px solid #ddd;background:#fff;color:#333;border-radius:4px;font-weight:600;cursor:pointer;opacity:${isFirst?'0.4':'1'};pointer-events:${isFirst?'none':'auto'}" ${isFirst?'disabled':''}>&lsaquo; Previous</button>
+
+    <div style="display:flex;gap:4px">
+      ${cycle.notes.map((_, idx) => `<div style="width:8px;height:8px;border-radius:50%;background:${idx===currentNoteIdx?color:'#ddd'};transition:all 0.2s" onclick="st.notesCarousel.currentNoteIdx=${idx};render()" style="cursor:pointer"></div>`).join('')}
+    </div>
+
+    <button onclick="nextNoteCarousel();render()" style="padding:8px 16px;border:1px solid #ddd;background:#fff;color:#333;border-radius:4px;font-weight:600;cursor:pointer;opacity:${isLast?'0.4':'1'};pointer-events:${isLast?'none':'auto'}" ${isLast?'disabled':''}>Next &rsaquo;</button>
+  </div>`;
+
+  html += `</div>`;
+  return html;
 }
 
 /* ---------- shell ---------- */
@@ -2429,6 +2554,7 @@ async function loadClientProfile(id){
     st.clientProfile = data;
     const notes = await api('GET','/api/clients/'+id+'/notes');
     st.clientNotes = notes;
+    await loadNotesCarousel(id);
     $('#main').innerHTML = clientProfileView(data, notes);
   }catch(e){
     console.error('Failed to load client:', id, e);
@@ -2616,8 +2742,8 @@ function clientProfileView(data, notes){
 
 
   html += `<div class="panel"><h2>📋 Notes History</h2>
-    <p class="small" style="margin-bottom:10px">Unified timeline of visit notes and coaching calls — chronologically sorted, newest first.</p>
-    ${buildUnifiedNotesHistory(visits, notes)}
+    <p class="small" style="margin-bottom:10px">Notes organized by visit cycle — navigate with tabs or arrows to explore coaching calls and visit notes.</p>
+    ${renderNotesCarousel(st.clientProfile.client.id)}
   </div>`;
 
   html += `<div class="panel"><h2>Notes</h2>
