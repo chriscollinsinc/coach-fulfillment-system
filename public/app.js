@@ -617,7 +617,7 @@ function setupCarouselListeners() {
   // Tab click handlers
   container.querySelectorAll(".carousel-cycle-tab").forEach(tab => {
     tab.addEventListener("click", (e) => {
-      const idx = parseInt(e.target.getAttribute("data-cycle-idx"));
+      const idx = parseInt(e.currentTarget.getAttribute("data-cycle-idx"));
       jumpToCycleCarousel(idx);
       renderCarouselOnly();
     });
@@ -634,7 +634,7 @@ function setupCarouselListeners() {
   // Pagination dots
   container.querySelectorAll(".carousel-dot").forEach(dot => {
     dot.addEventListener("click", (e) => {
-      const noteIdx = parseInt(e.target.getAttribute("data-note-idx"));
+      const noteIdx = parseInt(e.currentTarget.getAttribute("data-note-idx"));
       st.notesCarousel.currentNoteIdx = noteIdx;
       renderCarouselOnly();
     });
