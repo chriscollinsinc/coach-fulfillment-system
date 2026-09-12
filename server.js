@@ -3075,54 +3075,47 @@ function formatCycleDate(dateStr) {
   const year = d.getFullYear();
   return `${month} ${day}, ${year}`;
 }
-
 route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
   const clientId = +m[1];
   
   const notes = db.prepare(`
     SELECT 
       cn.id, cn.note_date as note_date, cn.note_type, cn.wins, cn.issues, cn.focus,
-      cn.author_email, cn.author_name, cn.created, v.cycle, v.program
+      cn.author_email, cn.author_name, cn.created, v.cycle, v.program, v.contract_id,
+      c.start_date, c.status
     FROM client_notes cn
     LEFT JOIN visits v ON cn.visit_id = v.id
+    LEFT JOIN contracts c ON v.contract_id = c.id
     WHERE cn.client_id = ?
-    ORDER BY cn.note_date DESC, cn.created DESC
+    ORDER BY c.start_date DESC, v.cycle DESC, cn.note_date DESC
   `).all(clientId);
   
   if (!notes.length) return send(res, 200, { cycles: [] });
   
-  // Group notes by cycle
-  const cycleMap = {};
+  // Group notes by CONTRACT (each tab = one contract/cycle period)
+  const contractMap = {};
   for (const note of notes) {
+    const contractId = note.contract_id || 'standalone';
     const cycleLabel = note.cycle || 'Unassigned';
+    const startDate = note.start_date ? formatCycleDate(new Date(note.start_date)) : 'Unknown date';
     
-    // Extract cycle number and total from "X of Y" format
-    const match = cycleLabel.match(/(\d+)\s+of\s+(\d+)/);
-    const cycleNum = match ? +match[1] : 0;
-    const totalCycles = match ? +match[2] : 1;
+    const tabLabel = `${startDate} • ${note.program || 'Program'}`;
     
-    // Initialize cycle bucket if not exists
-    if (!cycleMap[cycleLabel]) {
-      cycleMap[cycleLabel] = {
-        cycle_label: cycleLabel,
-        cycle_num: cycleNum,
-        total_cycles: totalCycles,
+    if (!contractMap[contractId]) {
+      contractMap[contractId] = {
+        contract_id: contractId,
+        cycle_label: tabLabel,
         program: note.program || null,
-        earliestDate: note.note_date,
+        start_date: note.start_date,
         notes: []
       };
-    } else {
-      // Track earliest date for this cycle
-      if (note.note_date < cycleMap[cycleLabel].earliestDate) {
-        cycleMap[cycleLabel].earliestDate = note.note_date;
-      }
     }
     
-    // Add note to this cycle's notes array
-    cycleMap[cycleLabel].notes.push({
+    contractMap[contractId].notes.push({
       id: note.id,
       date: note.note_date,
       type: note.note_type,
+      cycle: cycleLabel,
       wins: note.wins,
       issues: note.issues,
       focus: note.focus,
@@ -3131,15 +3124,12 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
     });
   }
   
-  // Convert to array and format cycle labels with dates
-  const cycles = Object.values(cycleMap).map(cycle => {
-    const dateStr = cycle.earliestDate ? formatCycleDate(cycle.earliestDate) : '';
-    return {
-      ...cycle,
-      cycle_label: dateStr ? `${dateStr} • ${cycle.cycle_label}` : cycle.cycle_label
-    };
-  }).sort((a, b) => b.cycle_num - a.cycle_num);
-  
+  // Convert to array, sort by start_date DESC (newest first)
+  const cycles = Object.values(contractMap).sort((a, b) => {
+    const dateA = new Date(a.start_date || 0);
+    const dateB = new Date(b.start_date || 0);
+    return dateB - dateA;
+  });
   send(res, 200, { cycles });
 });
 const NOTE_TYPES = ['Coaching Call', 'LID'];
