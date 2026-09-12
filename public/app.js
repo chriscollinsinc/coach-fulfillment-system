@@ -626,44 +626,77 @@ function renderNotesCarousel(clientId) {
   const isLast = currentNoteIdx === cycle.notes.length - 1;
   const isFirst = currentNoteIdx === 0;
 
-  let html = `<div style="margin-bottom:20px">
-    <div style="display:flex;gap:12px;margin-bottom:16px;align-items:center;flex-wrap:wrap">`;
+  let html = `<div style="margin-bottom:20px">`;
 
-  // Cycle tabs
-  html += `<div style="display:flex;gap:6px">`;
+  // Apple-style cycle tabs - clean, minimal, text-based
+  html += `<div style="display:flex;gap:0;margin-bottom:24px;border-bottom:1px solid #e5e5e5;position:relative;overflow-x:auto;-webkit-overflow-scrolling:touch">`;
   cycles.forEach((c, idx) => {
     const isActive = idx === currentCycleIdx;
     const tabColor = getCycleColor(c.cycle_num);
-    html += `<button onclick="jumpToCycleCarousel(${idx});renderCarouselOnly()" style="padding:6px 12px;border:${isActive?'2px solid '+tabColor:'1px solid #ddd'};background:${isActive?tabColor+'22':'#fff'};color:#333;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s">${esc(c.cycle_label)}</button>`;
+    html += `<button onclick="jumpToCycleCarousel(${idx});renderCarouselOnly()" style="padding:14px 16px;border:none;background:transparent;color:${isActive?'#000':'#999'};font-size:13px;font-weight:${isActive?'600':'500'};cursor:pointer;transition:all 0.3s ease;position:relative;white-space:nowrap;${isActive?`border-bottom:3px solid ${tabColor};color:#000;`:''}" class="apple-tab">${esc(c.cycle_label)}</button>`;
   });
   html += `</div>`;
 
-  // Note counter
-  html += `<span style="font-size:12px;color:var(--muted)">${currentNoteIdx + 1} of ${cycle.notes.length}</span>`;
-  html += `</div>`;
-
-  // Note card
-  html += `<div style="background:#fafafa;border-left:4px solid ${color};padding:20px;border-radius:4px;margin-bottom:16px;animation:slideInCard 0.4s cubic-bezier(0.34,1.56,0.64,1)">
-    <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:12px">
-      <div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${note.type}</div>
-        <div style="font-size:12px;color:var(--muted)">${fmt(note.date)} • ${esc(note.author || '—')}</div>
+  // Apple-style note card - clean, spacious, premium feel
+  html += `<div style="animation:fadeInNote 0.35s ease-out;margin-bottom:20px">
+    <div style="background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.08)">
+      <!-- Header with metadata -->
+      <div style="margin-bottom:18px;display:flex;justify-content:space-between;align-items:flex-start">
+        <div>
+          <div style="font-size:11px;letter-spacing:0.3px;color:#999;text-transform:uppercase;font-weight:600;margin-bottom:4px">${note.type}</div>
+          <div style="font-size:13px;color:#666">${fmt(note.date)} • ${esc(note.author || 'Unknown')}</div>
+        </div>
+        <div style="width:12px;height:12px;border-radius:50%;background:${color}"></div>
+      </div>
+      
+      <!-- Notes sections with clean typography -->
+      <div style="display:flex;flex-direction:column;gap:18px">
+        ${note.wins ? `<div>
+          <div style="font-size:12px;font-weight:600;color:#000;margin-bottom:8px;display:flex;align-items:center;gap:6px">
+            <span style="color:${color};font-size:14px">✓</span>Wins
+          </div>
+          <div style="font-size:14px;line-height:1.6;color:#333;margin-left:20px">${esc(note.wins)}</div>
+        </div>` : ''}
+        
+        ${note.issues ? `<div>
+          <div style="font-size:12px;font-weight:600;color:#000;margin-bottom:8px;display:flex;align-items:center;gap:6px">
+            <span style="color:${color};font-size:14px">⚠</span>Issues
+          </div>
+          <div style="font-size:14px;line-height:1.6;color:#333;margin-left:20px">${esc(note.issues)}</div>
+        </div>` : ''}
+        
+        ${note.focus ? `<div>
+          <div style="font-size:12px;font-weight:600;color:#000;margin-bottom:8px;display:flex;align-items:center;gap:6px">
+            <span style="color:${color};font-size:14px">→</span>Focus
+          </div>
+          <div style="font-size:14px;line-height:1.6;color:#333;margin-left:20px">${esc(note.focus)}</div>
+        </div>` : ''}
       </div>
     </div>
-    ${renderNoteSection('✓ Wins', note.wins, color)}
-    ${renderNoteSection('⚠ Issues', note.issues, color)}
-    ${renderNoteSection('→ Focus', note.focus, color)}
   </div>`;
 
-  // Navigation
-  html += `<div style="display:flex;gap:8px;justify-content:space-between;align-items:center">
-    <button onclick="prevNoteCarousel();renderCarouselOnly()" style="padding:8px 16px;border:1px solid #ddd;background:#fff;color:#333;border-radius:4px;font-weight:600;cursor:pointer;opacity:${isFirst?'0.4':'1'};pointer-events:${isFirst?'none':'auto'}" ${isFirst?'disabled':''}>&lsaquo; Previous</button>
-
-    <div style="display:flex;gap:4px">
-      ${cycle.notes.map((_, idx) => `<div style="width:8px;height:8px;border-radius:50%;background:${idx===currentNoteIdx?color:'#ddd'};transition:all 0.2s" onclick="st.notesCarousel.currentNoteIdx=${idx};renderCarouselOnly()" style="cursor:pointer"></div>`).join('')}
+  // Apple-style pagination and navigation - clean dots + swipe-like navigation
+  html += `<div style="display:flex;flex-direction:column;gap:16px">
+    <!-- Pagination dots -->
+    <div style="display:flex;justify-content:center;gap:8px;padding:8px 0">
+      ${cycle.notes.map((_, idx) => {
+        const isActive = idx === currentNoteIdx;
+        return `<button onclick="st.notesCarousel.currentNoteIdx=${idx};renderCarouselOnly()" style="width:${isActive?'28':'8'}px;height:8px;border-radius:4px;background:${isActive?'#000':'#ddd'};border:none;cursor:pointer;transition:all 0.3s ease;padding:0" title="Note ${idx+1}"></button>`;
+      }).join('')}
     </div>
-
-    <button onclick="nextNoteCarousel();renderCarouselOnly()" style="padding:8px 16px;border:1px solid #ddd;background:#fff;color:#333;border-radius:4px;font-weight:600;cursor:pointer;opacity:${isLast?'0.4':'1'};pointer-events:${isLast?'none':'auto'}" ${isLast?'disabled':''}>Next &rsaquo;</button>
+    
+    <!-- Navigation buttons -->
+    <div style="display:flex;gap:12px;justify-content:center">
+      <button onclick="prevNoteCarousel();renderCarouselOnly()" style="padding:10px 14px;border:1px solid #e5e5e5;background:#fff;color:#333;border-radius:8px;font-size:14px;cursor:${isFirst?'not-allowed':'pointer'};opacity:${isFirst?'0.4':'1'};pointer-events:${isFirst?'none':'auto'};transition:all 0.2s;font-weight:500" ${isFirst?'disabled':''}>← Prev</button>
+      
+      <div style="font-size:13px;color:#999;display:flex;align-items:center;gap:4px">
+        <span style="color:#000;font-weight:600">${currentNoteIdx + 1}</span>
+        <span>/</span>
+        <span>${cycle.notes.length}</span>
+      </div>
+      
+      <button onclick="nextNoteCarousel();renderCarouselOnly()" style="padding:10px 14px;border:1px solid #e5e5e5;background:#fff;color:#333;border-radius:8px;font-size:14px;cursor:${isLast?'not-allowed':'pointer'};opacity:${isLast?'0.4':'1'};pointer-events:${isLast?'none':'auto'};transition:all 0.2s;font-weight:500" ${isLast?'disabled':''}>Next →</button>
+    </div>
   </div>`;
 
   html += `</div>`;
