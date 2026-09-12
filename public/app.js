@@ -602,13 +602,12 @@ function renderNoteSection(title, content, color) {
     <div style="font-size:13px;line-height:1.6;color:#333">${esc(content)}</div>
   </div>`;
 }
-function renderCarouselOnly(clientId) {
+function renderCarouselOnly() {
   const carouselDiv = document.getElementById("notesCarouselContainer");
-  if (carouselDiv) {
-    carouselDiv.innerHTML = renderNotesCarousel(clientId);
+  if (carouselDiv && st.clientProfile?.client?.id) {
+    carouselDiv.innerHTML = renderNotesCarousel(st.clientProfile.client.id);
   }
 }
-
 
 function renderNotesCarousel(clientId) {
   const { cycles, currentCycleIdx, currentNoteIdx } = st.notesCarousel;
@@ -635,7 +634,7 @@ function renderNotesCarousel(clientId) {
   cycles.forEach((c, idx) => {
     const isActive = idx === currentCycleIdx;
     const tabColor = getCycleColor(c.cycle_num);
-    html += `<button onclick="jumpToCycleCarousel(${idx});renderCarouselOnly(clientId)" style="padding:6px 12px;border:${isActive?'2px solid '+tabColor:'1px solid #ddd'};background:${isActive?tabColor+'22':'#fff'};color:#333;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s">${esc(c.cycle_label)}</button>`;
+    html += `<button onclick="jumpToCycleCarousel(${idx});renderCarouselOnly()" style="padding:6px 12px;border:${isActive?'2px solid '+tabColor:'1px solid #ddd'};background:${isActive?tabColor+'22':'#fff'};color:#333;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s">${esc(c.cycle_label)}</button>`;
   });
   html += `</div>`;
 
@@ -658,13 +657,13 @@ function renderNotesCarousel(clientId) {
 
   // Navigation
   html += `<div style="display:flex;gap:8px;justify-content:space-between;align-items:center">
-    <button onclick="prevNoteCarousel();renderCarouselOnly(clientId)" style="padding:8px 16px;border:1px solid #ddd;background:#fff;color:#333;border-radius:4px;font-weight:600;cursor:pointer;opacity:${isFirst?'0.4':'1'};pointer-events:${isFirst?'none':'auto'}" ${isFirst?'disabled':''}>&lsaquo; Previous</button>
+    <button onclick="prevNoteCarousel();renderCarouselOnly()" style="padding:8px 16px;border:1px solid #ddd;background:#fff;color:#333;border-radius:4px;font-weight:600;cursor:pointer;opacity:${isFirst?'0.4':'1'};pointer-events:${isFirst?'none':'auto'}" ${isFirst?'disabled':''}>&lsaquo; Previous</button>
 
     <div style="display:flex;gap:4px">
-      ${cycle.notes.map((_, idx) => `<div style="width:8px;height:8px;border-radius:50%;background:${idx===currentNoteIdx?color:'#ddd'};transition:all 0.2s" onclick="st.notesCarousel.currentNoteIdx=${idx};renderCarouselOnly(clientId)" style="cursor:pointer"></div>`).join('')}
+      ${cycle.notes.map((_, idx) => `<div style="width:8px;height:8px;border-radius:50%;background:${idx===currentNoteIdx?color:'#ddd'};transition:all 0.2s" onclick="st.notesCarousel.currentNoteIdx=${idx};renderCarouselOnly()" style="cursor:pointer"></div>`).join('')}
     </div>
 
-    <button onclick="nextNoteCarousel();renderCarouselOnly(clientId)" style="padding:8px 16px;border:1px solid #ddd;background:#fff;color:#333;border-radius:4px;font-weight:600;cursor:pointer;opacity:${isLast?'0.4':'1'};pointer-events:${isLast?'none':'auto'}" ${isLast?'disabled':''}>Next &rsaquo;</button>
+    <button onclick="nextNoteCarousel();renderCarouselOnly()" style="padding:8px 16px;border:1px solid #ddd;background:#fff;color:#333;border-radius:4px;font-weight:600;cursor:pointer;opacity:${isLast?'0.4':'1'};pointer-events:${isLast?'none':'auto'}" ${isLast?'disabled':''}>Next &rsaquo;</button>
   </div>`;
 
   html += `</div>`;
