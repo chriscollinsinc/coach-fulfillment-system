@@ -624,11 +624,11 @@ function setupCarouselListeners() {
   });
   
   // Previous note button
-  const prevBtn = container.querySelector("[data-action="prev-note"]");
+  const prevBtn = container.querySelector("[data-action='prev-note']");
   if (prevBtn) prevBtn.addEventListener("click", () => { prevNoteCarousel(); renderCarouselOnly(); });
   
   // Next note button
-  const nextBtn = container.querySelector("[data-action="next-note"]");
+  const nextBtn = container.querySelector("[data-action='next-note']");
   if (nextBtn) nextBtn.addEventListener("click", () => { nextNoteCarousel(); renderCarouselOnly(); });
   
   // Pagination dots
