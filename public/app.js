@@ -675,8 +675,9 @@ function renderNotesCarousel(clientId) {
       <!-- Header with metadata -->
       <div style="margin-bottom:18px;display:flex;justify-content:space-between;align-items:flex-start">
         <div>
-          <div style="font-size:11px;letter-spacing:0.3px;color:#999;text-transform:uppercase;font-weight:600;margin-bottom:4px">Completed by: ${esc(note.author || 'Unknown')}</div>
-          <div style="font-size:13px;color:#666">${fmt(note.date)}</div>
+          <div style="font-size:14px;color:#000;font-weight:600;margin-bottom:8px">📅 ${fmt(note.date)}</div>
+          <div style="font-size:11px;letter-spacing:0.3px;color:#999;text-transform:uppercase;font-weight:600;margin-bottom:6px">Cycle: ${esc(cycle.cycle_label)}</div>
+          <div style="font-size:11px;letter-spacing:0.3px;color:#999;text-transform:uppercase;font-weight:600">By: ${esc(note.author || 'Unknown')}</div>
         </div>
         <div style="width:12px;height:12px;border-radius:50%;background:${color}"></div>
       </div>
