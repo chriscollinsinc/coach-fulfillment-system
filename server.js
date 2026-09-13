@@ -3083,7 +3083,7 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
       v.id, v.completed_date as note_date, 'Visit Note' as note_type,
       v.notes_wins as wins, v.notes_issues as issues, v.notes_focus as focus,
       v.completed_by_email as author_email, v.completed_by_coach_id as author_name,
-      v.created, v.cycle, v.program, v.contract_id,
+      v.completed_date as created, v.cycle, v.program, v.contract_id,
       c.start_date, c.status
     FROM visits v
     LEFT JOIN contracts c ON v.contract_id = c.id
