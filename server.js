@@ -517,7 +517,7 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
   // Handle manual team and coach name for historical visits (e.g., fired coaches)
   const manualTeam = body && body.team ? String(body.team).trim() : null;
   const manualCoachName = body && body.manual_coach_name ? String(body.manual_coach_name).trim() : null;
-  const completedDate = body && body.completed_date ? String(body.completed_date).trim() : null;
+  const completedDate = body && body.completed_date ? String(body.completed_date).trim() : new Date().toISOString().slice(0,10);
   db.prepare('UPDATE visits SET completed=1, scheduled_week=?, completed_by_coach_id=?, completed_by_email=?, team=?, manual_coach_name=?, completed_date=? WHERE id=?')
     .run(completionDate, creditCoachId, user.email, manualTeam || v.team, manualCoachName, completedDate, v.id);
   // Optional store tag for multi-store contracts — record WHICH store was visited.
@@ -3078,62 +3078,64 @@ function formatCycleDate(dateStr) {
 route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
   try {
     const clientId = +m[1];
-    
+
+    // Query notes from completed visits (where notes are stored on visits table)
+    // Use COALESCE to fallback: completed_date → due → today (for historical visits with missing dates)
     const notes = db.prepare(`
-    SELECT
-      v.id, v.completed_date as note_date, 'Visit Note' as note_type,
-      v.notes_wins as wins, v.notes_issues as issues, v.notes_focus as focus,
-      v.completed_by_email as author_email, v.completed_by_coach_id as author_name,
-      v.completed_date as created, v.cycle, v.program, v.contract_id,
-      c.start_date, c.status
-    FROM visits v
-    LEFT JOIN contracts c ON v.contract_id = c.id
-    WHERE v.client_id = ? AND v.completed = 1
-      AND (v.notes_wins IS NOT NULL OR v.notes_issues IS NOT NULL OR v.notes_focus IS NOT NULL OR v.notes_commitments IS NOT NULL)
-    ORDER BY c.start_date DESC, v.cycle DESC, v.completed_date DESC
-  `).all(clientId);
-  
-  if (!notes.length) return send(res, 200, { cycles: [] });
-  
-  // Group notes by CONTRACT (each tab = one contract/cycle period)
-  const contractMap = {};
-  for (const note of notes) {
-    const contractId = note.contract_id || 'standalone';
-    const cycleLabel = note.cycle || 'Unassigned';
-    const startDate = note.start_date ? formatCycleDate(new Date(note.start_date)) : 'Unknown date';
-    
-    const tabLabel = `${startDate} • ${note.program || 'Program'}`;
-    
-    if (!contractMap[contractId]) {
-      contractMap[contractId] = {
-        contract_id: contractId,
-        cycle_label: tabLabel,
-        program: note.program || null,
-        start_date: note.start_date,
-        notes: []
-      };
+      SELECT
+        v.id, COALESCE(v.completed_date, v.due, CURRENT_DATE) as note_date, 'Visit Note' as note_type,
+        v.notes_wins as wins, v.notes_issues as issues, v.notes_focus as focus,
+        v.completed_by_email as author_email, v.completed_by_coach_id as author_name,
+        COALESCE(v.completed_date, v.due, CURRENT_DATE) as created, v.cycle, v.program, v.contract_id,
+        c.start_date, c.status
+      FROM visits v
+      LEFT JOIN contracts c ON v.contract_id = c.id
+      WHERE v.client_id = ? AND v.completed = 1
+        AND (v.notes_wins IS NOT NULL OR v.notes_issues IS NOT NULL OR v.notes_focus IS NOT NULL OR v.notes_commitments IS NOT NULL)
+      ORDER BY c.start_date DESC, v.cycle DESC, COALESCE(v.completed_date, v.due, CURRENT_DATE) DESC
+    `).all(clientId);
+
+    if (!notes.length) return send(res, 200, { cycles: [] });
+
+    // Group notes by CONTRACT (each tab = one contract/cycle period)
+    const contractMap = {};
+    for (const note of notes) {
+      const contractId = note.contract_id || 'standalone';
+      const cycleLabel = note.cycle || 'Unassigned';
+      const startDate = note.start_date ? formatCycleDate(new Date(note.start_date)) : 'Unknown date';
+
+      const tabLabel = `${startDate} • ${note.program || 'Program'}`;
+
+      if (!contractMap[contractId]) {
+        contractMap[contractId] = {
+          contract_id: contractId,
+          cycle_label: tabLabel,
+          program: note.program || null,
+          start_date: note.start_date,
+          notes: []
+        };
+      }
+
+      contractMap[contractId].notes.push({
+        id: note.id,
+        date: note.note_date,
+        type: note.note_type,
+        cycle: cycleLabel,
+        wins: note.wins,
+        issues: note.issues,
+        focus: note.focus,
+        author: note.author_name || note.author_email,
+        created: note.created
+      });
     }
-    
-    contractMap[contractId].notes.push({
-      id: note.id,
-      date: note.note_date,
-      type: note.note_type,
-      cycle: cycleLabel,
-      wins: note.wins,
-      issues: note.issues,
-      focus: note.focus,
-      author: note.author_name || note.author_email,
-      created: note.created
+
+    // Convert to array, sort by start_date DESC (newest first)
+    const cycles = Object.values(contractMap).sort((a, b) => {
+      const dateA = new Date(a.start_date || 0);
+      const dateB = new Date(b.start_date || 0);
+      return dateB - dateA;
     });
-  }
-  
-  // Convert to array, sort by start_date DESC (newest first)
-  const cycles = Object.values(contractMap).sort((a, b) => {
-    const dateA = new Date(a.start_date || 0);
-    const dateB = new Date(b.start_date || 0);
-    return dateB - dateA;
-  });
-  send(res, 200, { cycles });
+    send(res, 200, { cycles });
   } catch (e) {
     console.error('[/api/clients/:id/notes-by-cycle error]', e.message);
     err(res, 500, 'Failed to load notes: ' + e.message);
