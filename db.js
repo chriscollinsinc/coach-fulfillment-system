@@ -225,6 +225,12 @@ ensureColumn('visits', 'manual_coach_name', 'TEXT');
 /* Actual completion date for historical visits, allowing manual entry when different from
    the scheduled week. Used for reconciling archive records with actual completion dates. */
 ensureColumn('visits', 'completed_date', 'TEXT');
+/* Visit notes: structured coaching call notes captured when a coach completes a visit.
+   wins/issues/focus are the core coaching note fields; commitments tracks action items. */
+ensureColumn('visits', 'notes_wins', 'TEXT');
+ensureColumn('visits', 'notes_issues', 'TEXT');
+ensureColumn('visits', 'notes_focus', 'TEXT');
+ensureColumn('visits', 'notes_commitments', 'TEXT');
 /* Basic profile fields for a coach as a person, not just as a scheduling id —
    shown on their profile page, editable by admins/leads. */
 ensureColumn('coaches', 'phone', 'TEXT');
