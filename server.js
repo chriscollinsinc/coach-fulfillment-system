@@ -3079,15 +3079,17 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
   const clientId = +m[1];
   
   const notes = db.prepare(`
-    SELECT 
-      cn.id, cn.note_date as note_date, cn.note_type, cn.wins, cn.issues, cn.focus,
-      cn.author_email, cn.author_name, cn.created, v.cycle, v.program, v.contract_id,
+    SELECT
+      v.id, v.completed_date as note_date, 'Visit Note' as note_type,
+      v.notes_wins as wins, v.notes_issues as issues, v.notes_focus as focus,
+      v.completed_by_email as author_email, v.completed_by_coach_id as author_name,
+      v.created, v.cycle, v.program, v.contract_id,
       c.start_date, c.status
-    FROM client_notes cn
-    LEFT JOIN visits v ON cn.visit_id = v.id
+    FROM visits v
     LEFT JOIN contracts c ON v.contract_id = c.id
-    WHERE cn.client_id = ?
-    ORDER BY c.start_date DESC, v.cycle DESC, cn.note_date DESC
+    WHERE v.client_id = ? AND v.completed = 1
+      AND (v.notes_wins IS NOT NULL OR v.notes_issues IS NOT NULL OR v.notes_focus IS NOT NULL OR v.notes_commitments IS NOT NULL)
+    ORDER BY c.start_date DESC, v.cycle DESC, v.completed_date DESC
   `).all(clientId);
   
   if (!notes.length) return send(res, 200, { cycles: [] });
