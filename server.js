@@ -3076,9 +3076,10 @@ function formatCycleDate(dateStr) {
   return `${month} ${day}, ${year}`;
 }
 route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales','coach'], (req, res, m) => {
-  const clientId = +m[1];
-  
-  const notes = db.prepare(`
+  try {
+    const clientId = +m[1];
+    
+    const notes = db.prepare(`
     SELECT
       v.id, v.completed_date as note_date, 'Visit Note' as note_type,
       v.notes_wins as wins, v.notes_issues as issues, v.notes_focus as focus,
@@ -3133,6 +3134,10 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
     return dateB - dateA;
   });
   send(res, 200, { cycles });
+  } catch (e) {
+    console.error('[/api/clients/:id/notes-by-cycle error]', e.message);
+    err(res, 500, 'Failed to load notes: ' + e.message);
+  }
 });
 const NOTE_TYPES = ['Coaching Call', 'LID'];
 route('POST', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
