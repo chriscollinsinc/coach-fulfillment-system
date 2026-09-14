@@ -3127,7 +3127,8 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
         issues: note.issues,
         focus: note.focus,
         author: note.author_name || note.author_email,
-        created: note.created
+        created: note.created,
+        scheduled_on: note.scheduled_on
       });
     }
 
