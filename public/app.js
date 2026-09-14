@@ -654,7 +654,7 @@ function renderNotesCarousel(clientId) {
   }
 
   const note = cycle.notes[currentNoteIdx];
-  const color = getCycleColor(cycle.cycle_num);
+  const color = getCycleColor(cycle.cycle_num || (currentCycleIdx + 1));
   const isLast = currentNoteIdx === cycle.notes.length - 1;
   const isFirst = currentNoteIdx === 0;
 
@@ -664,47 +664,41 @@ function renderNotesCarousel(clientId) {
   html += `<div style="display:flex;gap:0;margin-bottom:24px;border-bottom:1px solid #e5e5e5;position:relative;overflow-x:auto;-webkit-overflow-scrolling:touch">`;
   cycles.forEach((c, idx) => {
     const isActive = idx === currentCycleIdx;
-    const tabColor = getCycleColor(c.cycle_num);
+    const tabColor = getCycleColor(c.cycle_num || (idx + 1));
     html += `<button  style="padding:14px 16px;border:none;background:transparent;color:${isActive?'#000':'#999'};font-size:13px;font-weight:${isActive?'600':'500'};cursor:pointer;transition:all 0.3s ease;position:relative;white-space:nowrap;${isActive?`border-bottom:3px solid ${tabColor};color:#000;`:''}" data-cycle-idx="${idx}" class="carousel-cycle-tab">${esc(c.cycle_label)}</button>`;
   });
   html += `</div>`;
 
-  // Apple-style note card - clean, spacious, premium feel
-  html += `<div style="animation:fadeInNote 0.35s ease-out;margin-bottom:20px">
-    <div style="background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.08)">
-      <!-- Header with metadata -->
-      <div style="margin-bottom:18px;display:flex;justify-content:space-between;align-items:flex-start">
-        <div>
-          <div style="font-size:14px;color:#000;font-weight:600;margin-bottom:8px">📅 ${fmt(note.date)}</div>
-          <div style="font-size:11px;letter-spacing:0.3px;color:#999;margin-bottom:8px">Completed on: ${fmt(note.scheduled_on)}</div>
-          <div style="font-size:11px;letter-spacing:0.3px;color:#999;text-transform:uppercase;font-weight:600;margin-bottom:6px">Cycle: ${esc(cycle.cycle_label)}</div>
-          <div style="font-size:11px;letter-spacing:0.3px;color:#999;text-transform:uppercase;font-weight:600">By: ${esc(note.author || 'Unknown')}</div>
-        </div>
-        <div style="width:12px;height:12px;border-radius:50%;background:${color}"></div>
+  // Note card — colour band header + three tinted columns (Wins / Issues / Focus)
+  const coachName = (coach(note.author)?.name) || (note.author ? note.author.split('_').slice(-2).map(s=>s.charAt(0).toUpperCase()+s.slice(1)).join(' ') : 'Unknown');
+  const chip = (label, val) => `<span style="display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:999px;padding:5px 11px;font-size:12px;color:#fff;white-space:nowrap"><span style="font-family:var(--head);font-size:9.5px;letter-spacing:.8px;text-transform:uppercase;opacity:.85">${label}</span><b style="font-weight:600">${val}</b></span>`;
+  const section = (title, icon, tone, body) => `<div style="padding:18px 20px;background:${tone.bg};border-top:3px solid ${tone.fg};min-height:120px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="width:24px;height:24px;border-radius:50%;background:${tone.fg};color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">${icon}</span>
+        <span style="font-family:var(--head);font-size:12px;letter-spacing:1px;text-transform:uppercase;color:${tone.fg};font-weight:600">${title}</span>
       </div>
-      
-      <!-- Notes sections with clean typography -->
-      <div style="display:flex;flex-direction:column;gap:18px">
-        ${note.wins ? `<div>
-          <div style="font-size:12px;font-weight:600;color:#000;margin-bottom:8px;display:flex;align-items:center;gap:6px">
-            <span style="color:${color};font-size:14px">✓</span>Wins
-          </div>
-          <div style="font-size:14px;line-height:1.6;color:#333;margin-left:20px">${esc(note.wins)}</div>
-        </div>` : ''}
-        
-        ${note.issues ? `<div>
-          <div style="font-size:12px;font-weight:600;color:#000;margin-bottom:8px;display:flex;align-items:center;gap:6px">
-            <span style="color:${color};font-size:14px">⚠</span>Issues
-          </div>
-          <div style="font-size:14px;line-height:1.6;color:#333;margin-left:20px">${esc(note.issues)}</div>
-        </div>` : ''}
-        
-        ${note.focus ? `<div>
-          <div style="font-size:12px;font-weight:600;color:#000;margin-bottom:8px;display:flex;align-items:center;gap:6px">
-            <span style="color:${color};font-size:14px">→</span>Focus
-          </div>
-          <div style="font-size:14px;line-height:1.6;color:#333;margin-left:20px">${esc(note.focus)}</div>
-        </div>` : ''}
+      ${body ? `<div style="font-size:14px;line-height:1.6;color:#222;white-space:pre-wrap">${esc(body)}</div>`
+             : `<div style="font-size:13px;color:#9a9a9f;font-style:italic">Nothing noted</div>`}
+    </div>`;
+  const TONES = { win:{fg:'#1e8e5a',bg:'#eef8f2'}, issue:{fg:'#c77d0a',bg:'#fdf4e3'}, focus:{fg:'#1d4f91',bg:'#e9f0fb'} };
+
+  html += `<div style="animation:fadeInNote 0.35s ease-out;margin-bottom:20px">
+    <div style="background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);border:1px solid var(--line)">
+      <div style="background:linear-gradient(135deg,${color} 0%,${color}d9 100%);padding:18px 22px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+        <div>
+          <div style="font-family:var(--head);font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:rgba(255,255,255,.85)">Visit completed</div>
+          <div style="font-family:var(--head);font-size:28px;font-weight:600;line-height:1.1;color:#fff">${fmt(note.scheduled_on || note.date)}</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+          ${chip('Due', fmt(note.date))}
+          ${note.cycle ? chip('Cycle', esc(note.cycle)) : ''}
+          ${chip('Coach', esc(coachName))}
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--line)">
+        ${section('Wins','✓',TONES.win,note.wins)}
+        ${section('Issues','!',TONES.issue,note.issues)}
+        ${section('Focus','→',TONES.focus,note.focus)}
       </div>
     </div>
   </div>`;
