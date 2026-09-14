@@ -3095,6 +3095,8 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
       ORDER BY c.start_date DESC, v.cycle DESC, COALESCE(v.completed_date, v.due, CURRENT_DATE) DESC
     `).all(clientId);
 
+    console.log(`[notes-by-cycle] Client ${clientId}: Found ${notes.length} notes. First note date:`, notes.length > 0 ? notes[0].note_date : 'N/A');
+
     if (!notes.length) return send(res, 200, { cycles: [] });
 
     // Group notes by CONTRACT (each tab = one contract/cycle period)
