@@ -1268,16 +1268,16 @@ function board(){
       let cls='slot', inner='', click='';
       if(!o){
         cls+=' s-open'+(past?' s-past':'');
-        // Placing (moving a card onto an open week) stays admin/lead-only — st.placing
-        // is only ever set from buttons already gated on canEdit() below, so this
-        // branch is unreachable for sales/coach in practice, but it's guarded here too.
+        // Placing: admin/lead can drop onto any open week on the board; a coach can drop a
+        // visit they own onto their OWN row only (the server enforces the same rule).
         // Past weeks ARE editable: a visit that happened last week and never got its
         // card added gets backfilled here (then shows on the "confirm completed" to-do),
         // and a past open week can be set to a custom card — Home/Truck/Training/Off/etc.
         // — to fill in what a coach was actually doing that week.
         // Coaches can only manage their own weeks
         const coachCanManage = D.user.role === 'coach' ? c.id === D.user.coach_id : true;
-        if(placing && canEdit()){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
+        const canPlaceHere = placing && (canEdit() || (ownsVisit(placing) && c.id === D.user.coach_id));
+        if(canPlaceHere){ cls+=' target'+(past?' target-past':''); inner=''; click=` onclick="placeHere('${c.id}','${w}')"`; }
         else if(canEditWeeks() && coachCanManage && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
