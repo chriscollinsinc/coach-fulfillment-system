@@ -771,19 +771,17 @@ function render(){
   const r = D.user.role;
   const hasPending = (r==='admin'||r==='lead');
   views.dashboard='Today';
-  if(canEditWeeks()) views.board='Schedule Board'; // admin/lead/sales/coach — see canEditWeeks()
-  // Coaches see global view of their team; admin/lead/sales see views of multiple teams
-  if(canEditWeeks()){
-    if(D.user.role === 'coach' || myTeams().length > 1) views.global='Global Calendar';
-  }
-  views.inventory = r==='coach' ? 'My Visits' : 'LID Inventory';
+  // One Calendar tab (2026-09-15 nav cleanup): the board's own controls switch between
+  // my row / team / all teams / list view, so Schedule Board, Global Calendar and My
+  // Schedule no longer need separate tabs. My Profile moved to the avatar (top right).
+  if(canEditWeeks()) views.board='Calendar'; // admin/lead/sales/coach — see canEditWeeks()
+  views.inventory = r==='coach' ? 'Visit List' : 'LID Inventory';
   views.clients='Clients'; // dropdown for admin/lead (Active Clients + Unassigned Clients); plain link otherwise
-  views.availability='Availability';
-  if(r==='coach'||D.user.coach_id) views.mysched='My Schedule';
-  if(r==='coach' && D.user.coach_id) views.myprofile='My Profile';
+  if(r!=='coach') views.availability='Availability'; // sales-capacity tool — not a coach's concern
   if(r==='admin') views.admin='Admin';
   views.faq='FAQ';
-  if(!views[st.view] && st.view!=='clientprofile' && st.view!=='coachprofile' && st.view!=='formercoaches' && !(st.view==='pending'&&hasPending)){
+  const CAL_VIEWS = ['board','global','formercoaches','mysched'];
+  if(!views[st.view] && !CAL_VIEWS.includes(st.view) && st.view!=='clientprofile' && st.view!=='coachprofile' && !(st.view==='pending'&&hasPending)){
     // First landing: leads live on the Schedule Board day-to-day, not the capacity dashboard
     st.view = r==='lead' ? 'board' : Object.keys(views)[0];
   }
@@ -799,8 +797,8 @@ function render(){
         </div>
       </div>`;
     }
-    const active = st.view===k||(k==='clients'&&st.view==='clientprofile')||(k==='myprofile'&&st.view==='coachprofile'&&st.coachId===D.user.coach_id);
-    return `<button class="${active?'active':''}" onclick="${k==='myprofile'?`openCoachProfile('${D.user.coach_id}')`:`go('${k}')`}">${v}</button>`;
+    const active = st.view===k||(k==='clients'&&st.view==='clientprofile')||(k==='board'&&CAL_VIEWS.includes(st.view));
+    return `<button class="${active?'active':''}" onclick="go('${k}')">${v}</button>`;
   }).join('');
   app.innerHTML = `
   <header>
@@ -813,8 +811,8 @@ function render(){
       <div id="gsResults" class="gsearch-results"></div>
     </div>
     <div class="userchip" style="display:flex;align-items:center;gap:8px">
-      ${avatarHtml(D.user.name, D.user.team, 30)}
-      <span>${esc(D.user.name)} · ${D.user.role}${D.user.team?' · '+D.user.team:''}<br>
+      ${D.user.coach_id ? `<a onclick="openCoachProfile('${D.user.coach_id}')" title="My profile" style="cursor:pointer;display:flex">${avatarHtml(D.user.name, D.user.team, 30)}</a>` : avatarHtml(D.user.name, D.user.team, 30)}
+      <span>${D.user.coach_id ? `<a onclick="openCoachProfile('${D.user.coach_id}')" title="My profile" style="color:inherit;cursor:pointer">${esc(D.user.name)}</a>` : esc(D.user.name)} · ${D.user.role}${D.user.team?' · '+D.user.team:''}<br>
       <a onclick="pwDlg()">password</a> · <a onclick="logout()">sign out</a></span></div>
   </header>
   <main id="main"></main>`;
@@ -1154,7 +1152,7 @@ function todayCoachView(t){
     <div class="btnrow" style="margin-top:8px">
       ${t.nextVisit.client_id?`<button class="btn tiny" onclick="openClientProfile(${t.nextVisit.client_id})">Client profile &amp; notes</button>`:''}
       <button class="btn tiny primary" onclick="openVisitModal(${t.nextVisit.id})">Complete it</button></div>`
-    : `<p class="small">Nothing on your calendar yet — check My Schedule or ask your lead.</p>`;
+    : `<p class="small">Nothing on your calendar yet — open the Calendar tab or ask your lead.</p>`;
   html+=`</div>`;
   const sec=(title,list,empty)=>{
     let h=`<div class="panel"><h2>${title} (${list.length})</h2>`;
@@ -1243,6 +1241,7 @@ function board(){
     ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
     ${(D.user.role === 'coach' && myTeams().length === 1)?`<button class="btn ${global?'primary':''}" onclick="st.view='${global?'board':'global'}';st.placing=null;render()">${global?'My Calendar':'Team Overview'}</button>`:''}
     ${(canEditWeeks() && D.user.role !== 'coach')?`<button class="btn ${st.view==='formercoaches'?'primary':''}" onclick="st.view='formercoaches';st.placing=null;render()">Former Coaches</button>`:""}
+    ${D.user.coach_id?`<button class="btn" title="Your next 16 weeks as a list" onclick="st.view='mysched';st.placing=null;render()">☰ List view</button>`:''}
     <span style="flex:1"></span>
     <div class="calsearch">
       <input id="calSearchBox" placeholder="🔍 Search a client's visits…" autocomplete="off" value="${esc(st.calSearch||'')}"
@@ -2893,6 +2892,11 @@ function coachProfileView(data){
   </div>`;
 
   const todoTotal = (todo.overdue.length + todo.dueSoon.length + todo.missingNotes.length);
+  if(isSelf){
+    // A coach's own to-do lives on Today (overdue, due soon, notes owed) — don't repeat it here.
+    html += `<div class="panel"><h2>To-do${todoTotal?` (${todoTotal})`:''}</h2>
+      <p class="small">${todoTotal ? `You have ${todoTotal} item${todoTotal===1?'':'s'} outstanding — ` : 'Nothing outstanding — '}your working list is on <a onclick="go('dashboard')" style="cursor:pointer"><b>Today</b></a>.</p></div>`;
+  } else {
   html += `<div class="panel"><h2>To-do${todoTotal?` (${todoTotal})`:''}</h2>`;
   if(!todoTotal){
     html += `<p class="small">Nothing outstanding — no overdue stores, nothing due in the next 2 weeks, and every completed visit has a note.</p>`;
@@ -2905,6 +2909,7 @@ function coachProfileView(data){
       todo.missingNotes.map(v=>`<tr><td>${clientLink(v.client, v.client_id)}</td><td class="mono">${fmt(v.scheduled_week)}</td></tr>`).join('') + `</table>`;
   }
   html += `</div>`;
+  }
 
   html += `<div class="panel"><h2>Assigned stores</h2>` +
     (assignedClients.length ? `<table><tr><th>Client</th><th>Status</th></tr>` +
@@ -3243,7 +3248,8 @@ function mySchedule(){
   const c=coach(cid);
   if(!c) return `<div class="panel"><h2>My schedule</h2><p class="small">Your account isn't linked to a coach yet — ask an admin to set it in Admin → Users.</p></div>`;
   const weeks=mondaysRange(TODAY,addDays(TODAY,7*16));
-  let html=`<div class="panel"><h2>${esc(c.name)} — next 16 weeks</h2><table><tr><th>Week of</th><th>Assignment</th><th>Details</th></tr>`;
+  let html=`<div class="panel"><div class="controls" style="margin-bottom:8px"><button class="btn primary" style="cursor:default">☰ List view</button><button class="btn" onclick="st.view='board';render()">▦ Calendar</button></div>
+    <h2>${esc(c.name)} — next 16 weeks</h2><table><tr><th>Week of</th><th>Assignment</th><th>Details</th></tr>`;
   for(const w of weeks){
     const o=occ[cid+'|'+w];
     let what='<span class="pill p-done">Open</span>', det='';
