@@ -2539,31 +2539,36 @@ function regenerateContractDlg(contractId, program, visitsN, startDate, firstPay
 }
 async function generateNextCycleDlg(clientId, contracts){
   if(!contracts || contracts.length === 0) { uiAlert('No active contracts'); return; }
-  if(contracts.length > 1) { uiAlert('Multiple active contracts — please select which one'); return; } // TODO: select dialog
-  const contract = contracts[0];
-  
-  openDlg(`<h3>Generate next cycle</h3>
-    <p>Program: <b>${esc(contract.program)}</b></p>
-    <p>Visits per cycle: <b>${contract.visits}</b></p>
-    <p class="small" style="color:var(--muted)">This will create the next cycle of visits starting from the last scheduled date, or from the contract start date if no visits exist yet.</p>
-    <div style="margin-top:16px">
-      <button class="btn" onclick="generateNextCycle(${contract.id}); closeDlg()">Generate</button>
-      <button class="btn secondary" onclick="closeDlg()">Cancel</button>
+  // One contract: straight to the preview. Several: pick which one first.
+  if(contracts.length === 1) return extendVisitsDlg(contracts[0].id);
+  openDlg(`<h3>Extend visits</h3>
+    <p class="small" style="color:var(--muted)">This client has more than one active contract. Which one?</p>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+      ${contracts.map(c=>`<button class="btn" onclick="closeDlg();extendVisitsDlg(${c.id})">${esc(c.program)} · ${c.visits} per cycle${c.start_date?` · since ${fmt(c.start_date)}`:''}</button>`).join('')}
     </div>
-  `, {wide:true});
+    <div class="dlgrow" style="margin-top:14px"><button class="btn" onclick="closeDlg()">Cancel</button></div>`);
 }
-async function generateNextCycle(contractId){
+async function extendVisitsDlg(contractId){
+  let p;
+  try{ p = await api('GET', `/api/contracts/${contractId}/extend/preview`); }
+  catch(e){ uiAlert(e.message || 'Could not preview'); return; }
+  const yr = (p.horizon||'').slice(0,4);
+  const rows = (p.visits||[]).map(v=>`<tr><td class="mono">${esc(v.cycle)}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('');
+  openDlg(`<h3>Extend visits through ${yr}</h3>
+    <p class="small" style="color:var(--muted)"><b>${esc(p.program)}</b> · ${p.visitsPerCycle} visits per cycle. Continues the cycle from the latest visit on this contract, wrapping back to "1 of ${p.visitsPerCycle}" after "${p.visitsPerCycle} of ${p.visitsPerCycle}". Nothing existing is changed.</p>
+    ${p.created ? `<table style="margin-top:10px"><tr><th>Cycle</th><th>Due</th></tr>${rows}</table>`
+                : `<p style="margin-top:12px">Already covered — this contract has visits through Dec ${yr}. Nothing to add.</p>`}
+    <div class="dlgrow" style="margin-top:14px">
+      <button class="btn" onclick="closeDlg()">Cancel</button>
+      ${p.created ? `<button class="btn primary" onclick="closeDlg();extendVisitsApply(${contractId})">Add ${p.created} visit${p.created!==1?'s':''}</button>` : ''}
+    </div>`, {wide:true});
+}
+async function extendVisitsApply(contractId){
   try{
-    const result = await api('POST', '/api/contracts/' + contractId + '/generate-cycle', {});
-    if(result.ok){
-      await refresh();
-      toast(`Generated ${result.visitsCreated} new visit${result.visitsCreated !== 1 ? 's' : ''}`);
-    }else{
-      uiAlert(result.error || 'Could not generate cycle');
-    }
-  }catch(e){
-    uiAlert(e.message || 'Error generating cycle');
-  }
+    const r = await api('POST', `/api/contracts/${contractId}/extend`, {});
+    await refresh();
+    toast(`Added ${r.created} visit${r.created !== 1 ? 's' : ''} through ${(r.horizon||'').slice(0,4)}`);
+  }catch(e){ uiAlert(e.message || 'Could not extend visits'); }
 }
 function onRgFirstPayChange(){
   const v = $('#rgFirstPay').value;
@@ -2811,7 +2816,7 @@ function clientProfileView(data, notes){
       `</table></details>` : ''}
   </div>`;
 
-  html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Generate next cycle</button>`:''}
+  html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Extend visits</button>`:''}
     </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled On</th><th>Completed By</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?completedPill(v)
@@ -3328,7 +3333,7 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
   <div id="deletedOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Rolling schedule</h2>
-  <p class="small" style="margin-bottom:12px">Keeps every active contract's repeating cycle populated 12 months out — never touches completed history or deletes anything, only adds visits past whatever's already there. <b>Currently preview-only</b> — the nightly job reports what it would add but doesn't create anything yet, and it stays that way until you click Apply below. Review the list carefully before applying, especially against any manual calendar audit already in progress — this reads off the LAST visit already on each contract, so if a coach has already added a visit for the next cycle by hand, this should count forward from that and not duplicate it, but it's worth spot-checking a few before trusting it at scale.</p>
+  <p class="small" style="margin-bottom:12px">Keeps every active contract's repeating cycle populated through <b>Dec 31 of next calendar year</b> — never touches completed history or deletes anything, only adds visits past whatever's already there, wrapping the cycle counter back to 1 after the last visit. <b>Runs live every night</b> (since Sep 14, 2026); the nightly summary email lists what was added. Preview shows anything it would add right now; Apply runs it immediately instead of waiting for tonight. Per-client, the "Extend visits" button on a client's Visit History does the same thing for one contract.</p>
   <div class="controls"><button class="btn primary" onclick="loadRollingSchedulePreview()">Preview</button>
   <button class="btn danger" id="rollingApplyBtn" onclick="applyRollingSchedule()" disabled>Apply (run a Preview first)</button></div>
   <div id="rollingScheduleOut" class="small">Click Preview to see what this would add.</div></div>

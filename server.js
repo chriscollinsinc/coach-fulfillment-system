@@ -2511,7 +2511,7 @@ function snapshotClientHealth(){
  * program changes. Nothing in the app was keeping that repetition going once the
  * most recently generated batch ran out, so a long-lived contract's visits would
  * just silently stop appearing (Bowman Chevrolet had nothing past Dec 2025).
- * This keeps a rolling ROLLING_MONTHS-out window of future visits populated for
+ * This keeps a rolling rollingHorizon()-out window of future visits populated for
  * every active, fixed-cadence contract — "visits for a calendar year should be
  * visible from today's date," per Mike's own framing. Purely additive: it reads
  * whatever the contract's own most recent visit already is (completed or not)
@@ -2521,7 +2521,10 @@ function snapshotClientHealth(){
  * CHANGE history — once the reanchor-on-Keap-cadence-change feature exists (the
  * next phase), this will just keep counting forward from whatever fresh anchor
  * that produces, the same as it does today from a plain completed visit. */
-const ROLLING_MONTHS = 12;
+/* Horizon: every active contract always has visits through Dec 31 of NEXT calendar
+ * year (per Mike, 2026-09-14): in 2026 the whole of 2027 is visible; on Jan 1 2027
+ * the nightly run extends everyone through 2028. */
+const rollingHorizon = () => `${new Date().getFullYear() + 1}-12-31`;
 /* dryRun:true computes the exact same list without writing anything — used both
  * by the preview endpoint (so this can be reviewed before it ever touches real
  * data or a coach's in-progress manual audit) and by the nightly job itself,
@@ -2560,9 +2563,7 @@ function extendRollingSchedule(contract, opts = {}){
     team = (teamRow && teamRow.team) || null;
   }
   
-  const horizon = new Date(); 
-  horizon.setMonth(horizon.getMonth() + ROLLING_MONTHS);
-  const horizonStr = horizon.toISOString().slice(0, 10);
+  const horizonStr = rollingHorizon();
   
   const visits = [];
   let guard = 0; // safety valve, not a real cap
@@ -2655,12 +2656,9 @@ async function runNightlyMaintenance(actorEmail){
   // reuses the warm 60s subscription-list cache.
   try{ summary.cadence = await detectCadenceChanges(); }
   catch(e){ summary.cadence = { error: String(e && e.message || e) }; }
-  // Dry-run only for now, by design: Mike asked to see the real list before this
-  // ever auto-applies against live data, since coaches are actively doing a
-  // manual audit and this shouldn't create visits underneath that work
-  // unreviewed. Flip to {dryRun:false} once he's reviewed a preview and says go —
-  // until then this only reports what it WOULD do, same as everything else here.
-  try{ summary.rollingSchedule = sweepRollingSchedule({ dryRun: true }); }
+  // LIVE since 2026-09-14: Mike reviewed the preview (47 visits / 23 clients, all
+  // clean) and turned auto-apply on. Purely additive — see extendRollingSchedule.
+  try{ summary.rollingSchedule = sweepRollingSchedule({ dryRun: false }); }
   catch(e){ summary.rollingSchedule = { error: String(e && e.message || e) }; }
   try{ summary.revenue = recordRevenueSnapshot(); }
   catch(e){ summary.revenue = { error: String(e && e.message || e) }; }
@@ -2696,7 +2694,11 @@ async function runNightlyMaintenance(actorEmail){
         ? summary.cadence.changes.slice(0,15).map(ch => `  - ${ch.client}: ${ch.currentProgram} → ${ch.suggestedProgram} (per ${ch.basis})`)
           .concat(summary.cadence.changes.length > 15 ? [`  …and ${summary.cadence.changes.length - 15} more`] : [])
         : []),
-      `Rolling schedule (PREVIEW ONLY — not yet applied): ${summary.rollingSchedule.error ? 'FAILED — ' + summary.rollingSchedule.error : `would add ${summary.rollingSchedule.totalCreated} visit(s) across ${summary.rollingSchedule.perClient.length} contract(s) to keep the next ${ROLLING_MONTHS} months populated (${summary.rollingSchedule.contractsChecked} active contract(s) checked) — review at Admin → Data → Rolling schedule before applying`}`,
+      `Rolling schedule: ${summary.rollingSchedule.error ? 'FAILED — ' + summary.rollingSchedule.error : `added ${summary.rollingSchedule.totalCreated} visit(s) across ${summary.rollingSchedule.perClient.length} contract(s) so every active client has visits through ${rollingHorizon().slice(0,4)} (${summary.rollingSchedule.contractsChecked} active contract(s) checked)`}`,
+      ...(summary.rollingSchedule.perClient && summary.rollingSchedule.perClient.length
+        ? summary.rollingSchedule.perClient.slice(0,15).map(p => `  - ${p.client} [${p.program}]: +${p.created} (${p.visits[0].cycle} due ${p.visits[0].due}${p.created>1 ? ` … ${p.visits[p.visits.length-1].cycle} due ${p.visits[p.visits.length-1].due}` : ''})`)
+          .concat(summary.rollingSchedule.perClient.length > 15 ? [`  …and ${summary.rollingSchedule.perClient.length - 15} more`] : [])
+        : []),
       `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
       `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
       `Database backup: ${summary.backup.ok ? `sent (${Math.round((summary.backup.sizeBytes||0)/1024)} KB)` : 'FAILED — ' + (summary.backup.error || 'see results')}`,
@@ -3693,115 +3695,24 @@ async function keapSyncAllLinkedContracts(actorEmail){
 }
 
 
-/* Generate the next cycle of visits for a contract. Intelligently determines if this is:
-   - A first cycle (no visits yet): creates visits 1-N starting from contract start date
-   - A partial cycle (e.g., 2 of 4): completes the remaining visits (3 of 4, 4 of 4)
-   - A completed cycle: starts a new full cycle (1 of N, 2 of N, etc.)
-   Dates are calculated based on program intervals (Monthly, Quarterly, etc).
-   Visits are assigned to the same coach as the previous cycle. */
-route('POST', /^\/api\/contracts\/(\d+)\/generate-cycle$/, ['admin','lead'], async (req, res, m, body, user) => {
-  const contractId = +m[1];
-  const contract = db.prepare('SELECT c.*, cl.name as client_name, cl.id as client_id, cl.assigned_coach_id FROM contracts c JOIN clients cl ON c.client_id=cl.id WHERE c.id=?').get(contractId);
-  if(!contract) return err(res, 404, 'contract not found');
-  
-  // Get all visits for this contract (visits are keyed by client name, not contract_id)
-  const visits = db.prepare('SELECT * FROM visits WHERE client=? ORDER BY id DESC').all(contract.client_name);
-  
-  // Parse the program to get interval and determine visit cadence
-  // Examples: "Monthly", "Quarterly", "Weekly", etc.
-  const program = String(contract.program || '').toLowerCase();
-  let intervalDays = 30; // default: monthly
-  if(program.includes('quarterly')) intervalDays = 90;
-  else if(program.includes('weekly')) intervalDays = 7;
-  else if(program.includes('bi-weekly')) intervalDays = 14;
-  else if(program.includes('annual')) intervalDays = 365;
-  
-  const visitsPerCycle = contract.visits || 4;
-  
-  // Determine the next cycle to create
-  let nextCycleStart = 1; // which visit # to start at
-  let baseDate = contract.start_date ? new Date(contract.start_date) : new Date(); // starting date for calculations
-  let assignedCoach = null;
-  
-  if(visits.length > 0) {
-    // Parse last visit's cycle to see where we are
-    const lastVisit = visits[0]; // most recent
-    const cycleMatch = (lastVisit.cycle || '').match(/(\d+)\s+of\s+(\d+)/);
-    if(cycleMatch) {
-      const currentNum = +cycleMatch[1];
-      const currentTotal = +cycleMatch[2];
-      
-      if(currentNum < currentTotal) {
-        // Partial cycle - continue it
-        nextCycleStart = currentNum + 1;
-      } else {
-        // Full cycle complete - start new one
-        nextCycleStart = 1;
-      }
-    }
-    
-    // Use the date of the last visit as basis for calculating next dates
-    if(lastVisit.due) baseDate = new Date(lastVisit.due);
-    
-    // Get the coach from the last visit
-    assignedCoach = lastVisit.cal_coach;
-  }
-  
-  // Get the first visit to extract more context
-  if(visits.length > 0) {
-    const firstVisit = visits[visits.length - 1];
-    if(firstVisit.cal_coach) assignedCoach = firstVisit.cal_coach;
-  }
-
-  // If still no coach assigned, use the client's assigned coach
-  if(!assignedCoach && contract.assigned_coach_id) {
-    assignedCoach = contract.assigned_coach_id;
-  }
-  
-  // Create new visits
-  const visitsToCreate = [];
-  for(let i = nextCycleStart; i <= visitsPerCycle; i++) {
-    // Calculate due date: base + (i-1) * interval days
-    const daysOffset = (i - 1) * intervalDays;
-    const dueDate = new Date(baseDate.getTime() + daysOffset * 24 * 60 * 60 * 1000);
-    const dueDateStr = dueDate.toISOString().split('T')[0];
-    
-    const cycleLabel = `${i} of ${visitsPerCycle}`;
-    
-    // Insert the visit
-    const result = db.prepare(`
-      INSERT INTO visits(
-        client, client_id, program, cycle, due, completed, team,
-        coach_hist, salesperson, sold, source, cal_coach, sched_hist
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      contract.client_name,
-      contract.client_id,
-      contract.program,
-      cycleLabel,
-      dueDateStr,
-      0, // completed
-      '', // team - will be set if we have a coach
-      '', // coach_hist
-      '', // salesperson
-      null, // sold
-      'system',
-      assignedCoach,
-      null
-    );
-    
-    visitsToCreate.push({ id: result.lastInsertRowid, cycle: cycleLabel, due: dueDateStr });
-  }
-  
-  log(user.email, 'contract.generate_cycle', { 
-    contractId, 
-    clientId: contract.client_id,
-    program: contract.program,
-    visitsCreated: visitsToCreate.length,
-    cycleRange: `${nextCycleStart} to ${visitsPerCycle}`
-  });
-  
-  send(res, 200, { ok: true, visitsCreated: visitsToCreate.length, visits: visitsToCreate });
+/* Per-contract "Extend visits" (replaces the old generate-cycle route, which used
+ * 90-day math, ignored contract_id, and read "latest" by row id). Same engine as the
+ * nightly rolling schedule, scoped to one contract: preview shows exactly what would
+ * be added through the horizon; apply writes it. */
+function contractForExtend(id){
+  return db.prepare(`SELECT c.*, cl.name AS client_name FROM contracts c JOIN clients cl ON cl.id=c.client_id WHERE c.id=?`).get(+id);
+}
+route('GET', /^\/api\/contracts\/(\d+)\/extend\/preview$/, ['admin','lead'], (req, res, m) => {
+  const c = contractForExtend(m[1]); if(!c) return err(res, 404, 'contract not found');
+  const r = extendRollingSchedule(c, { dryRun: true });
+  send(res, 200, { ok: true, horizon: rollingHorizon(), program: c.program, visitsPerCycle: c.visits, ...r });
+});
+route('POST', /^\/api\/contracts\/(\d+)\/extend$/, ['admin','lead'], (req, res, m, body, user) => {
+  const c = contractForExtend(m[1]); if(!c) return err(res, 404, 'contract not found');
+  if(c.status !== 'active') return err(res, 400, 'Contract is not active');
+  const r = extendRollingSchedule(c, { dryRun: false });
+  log(user.email, 'contract.extend_visits', { contractId: c.id, clientId: c.client_id, program: c.program, created: r.created });
+  send(res, 200, { ok: true, horizon: rollingHorizon(), ...r });
 });
 
 
