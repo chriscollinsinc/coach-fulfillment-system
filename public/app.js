@@ -2835,29 +2835,26 @@ function clientProfileView(data, notes){
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
 
-  html += `<div class="panel"><h2>📋 Notes History</h2>
-    <p class="small" style="margin-bottom:10px">Notes organized by visit cycle — navigate with tabs or arrows to explore coaching calls and visit notes.</p>
+  html += `<div class="panel"><h2>📋 Visit Notes</h2>
+    <p class="small" style="margin-bottom:10px">Wins, issues and focus recorded when a visit is completed — one card per visit, grouped by contract. Use the arrows or dots to move between visits.</p>
     <div id="notesCarouselContainer">${renderNotesCarousel(st.clientProfile.client.id)}</div>
   </div>`;
 
-  html += `<div class="panel"><h2>Notes</h2>
-    <p class="small" style="margin-bottom:10px">Any coach, lead, or admin can add a note here — this is meant to replace jotting notes in Keap going forward. Only admins can edit or delete a note.</p>
-    <div class="controls" style="margin-bottom:6px">
-      <label style="margin:0">Date</label><input type="date" id="cliNoteDate" value="${TODAY}" style="width:150px">
-      <label style="margin:0">Type</label><select id="cliNoteType" onchange="toggleNoteFields()"><option>Coaching Call</option><option>LID</option></select>
-    </div>
-    <div id="cnFreeform"><textarea id="cliNoteBody" rows="3" style="width:100%;box-sizing:border-box" placeholder="Quick note — a call, an email, a heads-up about this client…"></textarea></div>
-    <div id="cnStructured" style="display:none">
-      <div class="cvfield"><label>Wins ${micBtn('cnWins')}</label><textarea id="cnWins" rows="2" placeholder="What went well."></textarea></div>
-      <div class="cvfield"><label>Issues / roadblocks ${micBtn('cnIssues')}</label><textarea id="cnIssues" rows="2" placeholder="What's stuck."></textarea></div>
-      <div class="cvfield"><label>Focus for next visit ${micBtn('cnFocus')}</label><textarea id="cnFocus" rows="2" placeholder="Where to pick up next time."></textarea></div>
-      <p class="small" style="color:var(--muted);margin-top:6px">Same shape as completing a visit. To also log <b>commitments</b>, complete the visit from the calendar — that ties them to the visit and carries them forward.</p>
+  // Monthly coaching calls — separate from visits, 12 a year.
+  html += coachingCallsPanel(client, notes);
+
+  const generalNotes = notes.filter(n => n.note_type !== 'Coaching Call');
+  html += `<div class="panel"><h2>General Notes</h2>
+    <p class="small" style="margin-bottom:10px">Anything that isn't a visit or a monthly call — an email, a heads-up, a billing question, a change of contact. Any coach, lead, or admin can add one; only admins can edit or delete.</p>
+    <div class="controls" style="margin-bottom:6px;align-items:flex-start">
+      <div><label style="margin:0 0 3px;display:block">Date</label><input type="date" id="cliNoteDate" value="${TODAY}" style="width:150px"></div>
+      <div style="flex:1;min-width:240px"><label style="margin:0 0 3px;display:block">Note ${micBtn('cliNoteBody')}</label><textarea id="cliNoteBody" rows="2" style="width:100%;box-sizing:border-box" placeholder="Quick note about this client…"></textarea></div>
     </div>
     <div class="dlgrow" style="margin-top:6px">
       <button class="btn primary" onclick="saveClientNote(${client.id})">Add note</button>
       ${canEdit() && client.keap_id ? `<button class="btn" onclick="keapNotesPreviewDlg(${client.id})">Import from Keap…</button>` : ''}
     </div>
-    <div style="margin-top:14px">${notes.length ? notes.map(n=>clientNoteCard(client.id, n)).join('') : '<p class="small">No notes yet.</p>'}</div>
+    <div style="margin-top:14px">${generalNotes.length ? generalNotes.map(n=>clientNoteCard(client.id, n)).join('') : '<p class="small">No general notes yet.</p>'}</div>
   </div>`;
 
   html += `<div class="panel"><h2>Coming soon</h2>
@@ -3074,8 +3071,83 @@ async function doDeleteClient(clientId, clientName){
   closeDlg(); toast(clientName+' deleted');
   go('clients');
 }
+/* ---------- Coaching Calls (monthly) ----------
+ * Every client gets a coaching call each month — 12 a year — whether or not a visit
+ * happens that month. Visit notes live on the visit row; coaching calls are
+ * client_notes rows of type 'Coaching Call'. This panel shows a 12-month coverage
+ * strip for one year, a quick-log form, and the calls for that year. */
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function callsYear(){ return st.callsYear || +TODAY.slice(0,4); }
+function setCallsYear(y){ st.callsYear = y; st.callsMonth = null; rerenderCalls(); }
+function setCallsMonth(m){ st.callsMonth = (st.callsMonth === m) ? null : m; rerenderCalls(); }
+function rerenderCalls(){
+  const el = $('#coachingCallsPanel'); if(!el) return;
+  el.outerHTML = coachingCallsPanel(st.clientProfile.client, st.clientNotes || []);
+}
+function coachingCallsPanel(client, notes){
+  const year = callsYear();
+  const calls = notes.filter(n => n.note_type === 'Coaching Call');
+  const inYear = calls.filter(n => (n.note_date||'').slice(0,4) === String(year));
+  const byMonth = Array.from({length:12}, () => []);
+  inYear.forEach(n => { const m = +(n.note_date||'').slice(5,7) - 1; if(m >= 0 && m < 12) byMonth[m].push(n); });
+  const curY = +TODAY.slice(0,4), curM = +TODAY.slice(5,7) - 1;
+  const years = [...new Set(calls.map(n => +(n.note_date||'').slice(0,4)).filter(Boolean).concat([curY]))].sort((a,b)=>b-a);
+
+  // Coverage: months up to and including the current one that have at least one call.
+  const monthsElapsed = year < curY ? 12 : year > curY ? 0 : curM + 1;
+  const covered = byMonth.slice(0, monthsElapsed).filter(m => m.length).length;
+  const missed = byMonth.slice(0, Math.max(0, year < curY ? 12 : curM)).filter(m => !m.length).length;
+
+  const cell = (m) => {
+    const has = byMonth[m].length;
+    const isCur = year === curY && m === curM;
+    const isPast = year < curY || (year === curY && m < curM);
+    const sel = st.callsMonth === m;
+    let bg, fg, border, label;
+    if(has){ bg = '#e2f4ea'; fg = '#186b45'; border = '#1e8e5a'; label = has > 1 ? `${has} calls` : 'called'; }
+    else if(isCur){ bg = '#fdeecd'; fg = '#8a5b06'; border = '#c77d0a'; label = 'due'; }
+    else if(isPast){ bg = '#fbe3e3'; fg = '#a12626'; border = '#c23b3b'; label = 'missed'; }
+    else { bg = '#f3f2f1'; fg = '#9a9aa2'; border = 'transparent'; label = ''; }
+    return `<button onclick="setCallsMonth(${m})" title="${MONTHS_SHORT[m]} ${year}${has ? ` — ${has} call${has>1?'s':''}` : ''}" style="flex:1;min-width:52px;padding:8px 4px;border-radius:8px;border:2px solid ${sel ? 'var(--ink)' : border};background:${bg};color:${fg};cursor:pointer;text-align:center;line-height:1.2">
+      <div style="font-family:var(--head);font-size:11px;letter-spacing:.8px;text-transform:uppercase;font-weight:600">${MONTHS_SHORT[m]}</div>
+      <div style="font-size:10.5px;margin-top:2px;min-height:12px">${label}</div>
+    </button>`;
+  };
+
+  const listed = (st.callsMonth != null ? byMonth[st.callsMonth] : inYear).slice().sort((a,b) => (b.note_date||'').localeCompare(a.note_date||'') || b.id - a.id);
+  const filterNote = st.callsMonth != null ? ` · showing ${MONTHS_SHORT[st.callsMonth]} <button class="btn tiny" onclick="setCallsMonth(${st.callsMonth})">show all ${year}</button>` : '';
+
+  return `<div class="panel" id="coachingCallsPanel"><h2>🎧 Coaching Calls</h2>
+    <p class="small" style="margin-bottom:10px">One call per month, every month — including months with a visit. Log the call here; the strip shows which months of ${year} are covered.</p>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+      <button class="btn tiny" onclick="setCallsYear(${year-1})">‹ ${year-1}</button>
+      <span style="font-family:var(--head);font-size:16px;letter-spacing:1px">${year}</span>
+      <button class="btn tiny" onclick="setCallsYear(${year+1})" ${year >= curY + 1 ? 'disabled' : ''}>${year+1} ›</button>
+      <span class="small" style="margin-left:6px">${year > curY ? 'Nothing due yet' : `<b style="color:${missed ? 'var(--bad)' : 'var(--ok)'}">${covered} of ${monthsElapsed}</b> month${monthsElapsed===1?'':'s'} covered${missed ? ` · <b style="color:var(--bad)">${missed} missed</b>` : ''}`}${filterNote}</span>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${MONTHS_SHORT.map((_,m)=>cell(m)).join('')}</div>
+    <div class="controls" style="margin-bottom:6px;align-items:flex-start">
+      <div><label style="margin:0 0 3px;display:block">Call date</label><input type="date" id="callDate" value="${TODAY}" style="width:150px"></div>
+      <div style="flex:1;min-width:240px"><label style="margin:0 0 3px;display:block">What was covered ${micBtn('callBody')}</label><textarea id="callBody" rows="2" style="width:100%;box-sizing:border-box" placeholder="Who you spoke with, what you covered, anything to follow up…"></textarea></div>
+    </div>
+    <div class="dlgrow" style="margin-bottom:12px"><button class="btn primary" onclick="saveCoachingCall(${client.id})">Log call</button></div>
+    <div>${listed.length ? listed.map(n => clientNoteCard(client.id, n)).join('') : `<p class="small">No coaching calls logged for ${st.callsMonth != null ? MONTHS_SHORT[st.callsMonth] + ' ' : ''}${year}.</p>`}</div>
+  </div>`;
+}
+async function saveCoachingCall(clientId){
+  const note_date = ($('#callDate')||{}).value || TODAY;
+  const body = (($('#callBody')||{}).value || '').trim();
+  if(!body){ uiAlert('Add a line about the call first'); return; }
+  if(window._rec){ try{window._rec.stop()}catch(e){} window._rec=null; }
+  await api('POST','/api/clients/'+clientId+'/notes', { note_date, note_type: 'Coaching Call', body });
+  toast('Call logged');
+  st.callsYear = +note_date.slice(0,4); st.callsMonth = null;
+  await loadClientProfile(clientId);
+}
+
 function clientNoteCard(clientId, n){
-  const title = `${fmt(n.note_date)} — ${esc(n.note_type)}`;
+  const typeLabel = n.note_type === 'LID' ? 'LID note <span class="small">(legacy)</span>' : n.note_type === 'Coaching Call' ? '🎧 Coaching call' : 'Note';
+  const title = `${fmt(n.note_date)} — ${typeLabel}`;
   const isAdmin = D.user.role === 'admin';
   const editedTag = n.edited ? ` <span class="small">(edited ${n.edited.slice(0,16).replace('T',' ')})</span>` : '';
   const keapTag = n.source === 'keap' ? ` <span class="pill" style="background:#e2f0f0;color:#2a6a6a">via Keap</span>` : '';
@@ -3132,29 +3204,12 @@ async function doImportKeapNotes(clientId){
   closeDlg(); toast(`Imported ${r.imported} note(s) from Keap`);
   await loadClientProfile(clientId);
 }
-function toggleNoteFields(){
-  const lid = (($('#cliNoteType')||{}).value)==='LID';
-  const s=$('#cnStructured'), f=$('#cnFreeform');
-  if(s) s.style.display = lid?'block':'none';
-  if(f) f.style.display = lid?'none':'block';
-}
 async function saveClientNote(clientId){
-  const note_type = ($('#cliNoteType')||{}).value || 'Coaching Call';
-  const note_date = $('#cliNoteDate').value || TODAY;
-  const val = x => ((($('#'+x)||{}).value)||'').trim();
-  let payload;
-  if(note_type==='LID'){
-    const wins=val('cnWins'), issues=val('cnIssues'), focus=val('cnFocus');
-    if(!wins && !issues && !focus){ uiAlert('Add at least one of Wins / Issues / Focus'); return; }
-    const parts=[]; if(wins)parts.push('Wins: '+wins); if(issues)parts.push('Issues: '+issues); if(focus)parts.push('Focus next: '+focus);
-    payload={ note_date, note_type:'LID', wins, issues, focus, body:parts.join('\n') };
-  } else {
-    const body=($('#cliNoteBody').value||'').trim();
-    if(!body){ uiAlert('Note cannot be empty'); return; }
-    payload={ note_date, note_type, body };
-  }
+  const note_date = ($('#cliNoteDate')||{}).value || TODAY;
+  const body = (($('#cliNoteBody')||{}).value || '').trim();
+  if(!body){ uiAlert('Note cannot be empty'); return; }
   if(window._rec){ try{window._rec.stop()}catch(e){} window._rec=null; }
-  await api('POST','/api/clients/'+clientId+'/notes', payload);
+  await api('POST','/api/clients/'+clientId+'/notes', { note_date, note_type: 'General', body });
   toast('Note added');
   await loadClientProfile(clientId);
 }
@@ -3162,7 +3217,8 @@ function editNoteDlg(clientId, noteId){
   const n = (st.clientNotes||[]).find(x=>x.id===noteId); if(!n) return;
   openDlg(`<h3>Edit note</h3>
     <label>Date</label><input type="date" id="enDate" value="${n.note_date}">
-    <label>Type</label><select id="enType"><option ${n.note_type==='Coaching Call'?'selected':''}>Coaching Call</option><option ${n.note_type==='LID'?'selected':''}>LID</option></select>
+    <label>Type</label><select id="enType"><option ${n.note_type==='Coaching Call'?'selected':''}>Coaching Call</option><option ${n.note_type==='General'?'selected':''}>General</option>${n.note_type==='LID'?'<option selected>LID</option>':''}</select>
+    <p class="small" style="color:var(--muted);margin-top:2px">Moving a note to "Coaching Call" counts it toward that month's call coverage.</p>
     <label>Note</label><textarea id="enBody" rows="4" style="width:100%;box-sizing:border-box">${esc(n.body)}</textarea>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveEditedNote(${clientId},${noteId})">Save</button></div>`);

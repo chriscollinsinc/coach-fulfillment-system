@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS client_notes(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client_id INTEGER NOT NULL,
   note_date TEXT NOT NULL,            -- 'YYYY-MM-DD' — the date the call/LID actually happened
-  note_type TEXT NOT NULL DEFAULT 'Coaching Call' CHECK(note_type IN ('Coaching Call','LID')),
+  note_type TEXT NOT NULL DEFAULT 'Coaching Call' CHECK(note_type IN ('Coaching Call','LID','General')),
   author_email TEXT NOT NULL,
   author_name TEXT DEFAULT '',
   body TEXT NOT NULL,
@@ -209,6 +209,29 @@ ensureColumn('client_notes', 'visit_id', 'INTEGER');
 ensureColumn('client_notes', 'source', "TEXT NOT NULL DEFAULT 'app'");
 ensureColumn('client_notes', 'keap_note_id', 'TEXT');
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ucn_keap_note ON client_notes(keap_note_id) WHERE keap_note_id IS NOT NULL;`);
+/* 2026-09-14: notes split into Coaching Calls (monthly, counted for coverage), Visit
+ * Notes (live on the visit row), and General (anything else). Older databases carry a
+ * CHECK that only allows 'Coaching Call'/'LID'; SQLite can't alter a CHECK in place,
+ * so rebuild the table once, preserving every column and row. 'LID' stays allowed so
+ * legacy rows remain valid; the UI no longer creates new ones. */
+(function widenNoteTypeCheck(){
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='client_notes'").get();
+  if(!row || !/CHECK\(note_type IN \('Coaching Call','LID'\)\)/.test(row.sql)) return;
+  const newSql = row.sql
+    .replace("CHECK(note_type IN ('Coaching Call','LID'))", "CHECK(note_type IN ('Coaching Call','LID','General'))")
+    .replace(/CREATE TABLE (IF NOT EXISTS )?"?client_notes"?/, 'CREATE TABLE client_notes__new');
+  db.exec('BEGIN');
+  try{
+    db.exec(newSql);
+    db.exec('INSERT INTO client_notes__new SELECT * FROM client_notes');
+    db.exec('DROP TABLE client_notes');
+    db.exec('ALTER TABLE client_notes__new RENAME TO client_notes');
+    db.exec('CREATE INDEX IF NOT EXISTS icn_client ON client_notes(client_id)');
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS ucn_keap_note ON client_notes(keap_note_id) WHERE keap_note_id IS NOT NULL');
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); throw e; }
+  console.log('✅ client_notes: note_type now allows General');
+})();
 /* Who actually completed a visit, captured at the moment it's completed — this is
    what a coach's profile/history is built from. It's intentionally separate from
    cal_coach (who's currently scheduled) so that reassigning a client to a new coach,

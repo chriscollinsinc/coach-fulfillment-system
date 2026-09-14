@@ -3136,7 +3136,7 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
     err(res, 500, 'Failed to load notes: ' + e.message);
   }
 });
-const NOTE_TYPES = ['Coaching Call', 'LID'];
+const NOTE_TYPES = ['Coaching Call', 'LID', 'General']; // LID is legacy: readable, no longer created by the UI
 route('POST', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
