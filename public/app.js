@@ -430,9 +430,18 @@ function jumpToCalendar(id){
  * date and the scheduled week; clicking jumps straight to that cell on the
  * Schedule Board (stopPropagation so it doesn't also trigger a row's own onclick,
  * e.g. Inventory rows opening the visit drawer underneath it). */
+// Week-of date (Monday) → the Sunday that closes that week, ISO string.
+const weekEndOf = mon => { const d = new Date(mon + 'T00:00:00'); d.setDate(d.getDate() + 6); return d.toISOString().slice(0,10); };
 function calendarPill(v){
+  const who = v.cal_coach ? ' — ' + (coach(v.cal_coach)?.name || '') : '';
+  // Scheduled week is over and nobody marked it complete: the visit presumably happened
+  // but the coach never filed notes. Surface that instead of a reassuring "On calendar".
+  if(v.cal_week && weekEndOf(v.cal_week) < TODAY){
+    const tip = `Scheduled for week of ${fmtW(v.cal_week)}${who}. That week has passed and the visit hasn't been marked complete — notes are missing. Click to view it on the calendar.`;
+    return `<span class="pill p-over" style="cursor:pointer" title="${esc(tip)}" onclick="event.stopPropagation();jumpToCalendar(${v.id})">Notes missing</span>`;
+  }
   const late = v.due && v.due < TODAY;
-  const tip = `Due ${fmt(v.due)} — scheduled for week of ${fmtW(v.cal_week)}${v.cal_coach?' — '+(coach(v.cal_coach)?.name||''):''}`;
+  const tip = `Due ${fmt(v.due)} — scheduled for week of ${fmtW(v.cal_week)}${who}`;
   return `<span class="pill ${late?'p-due':'p-cal'}" style="cursor:pointer" title="${esc(tip)}" onclick="event.stopPropagation();jumpToCalendar(${v.id})">${late?'Late — on calendar':'On calendar'}</span>`;
 }
 /* Completed-visit badge. When the visit was placed on the calendar (cal_week set), it
