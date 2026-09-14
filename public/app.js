@@ -2639,6 +2639,8 @@ async function detachCompanyId(clientId){
     toast('Company ID removed');
   }catch(e){ uiAlert(e.message||'Could not remove company ID'); }
 }
+// Re-render the profile from cached data (no refetch) — for fold/unfold and similar UI-only toggles.
+function rerenderClientProfile(){ if(st.clientProfile && st.view==='clientprofile'){ $('#main').innerHTML = clientProfileView(st.clientProfile, st.clientNotes || []); setupCarouselListeners(); } }
 async function loadClientProfile(id){
   try{
     const data = await api('GET','/api/clients/'+id);
@@ -2820,24 +2822,53 @@ function clientProfileView(data, notes){
       `</table></details>` : ''}
   </div>`;
 
-  html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Extend visits</button>`:''}
-    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled On</th><th>Coach</th><th>Status</th><th></th></tr>` +
-    visits.slice().reverse().map(v=>{
-      const pill = v.completed?completedPill(v)
-        : v.cal_week?calendarPill(v)
-        : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
-      // Coach column: the coach the visit is placed under; before it's placed, fall back
-      // to the client's assigned coach (who owns it and will place it), shown muted.
-      const placedCoach = v.cal_coach ? coach(v.cal_coach) : null;
-      const assignedCoach = !placedCoach && client.assigned_coach_id ? coach(client.assigned_coach_id) : null;
-      const coachCell = placedCoach ? esc(placedCoach.name)
-        : assignedCoach ? `<span style="color:var(--muted)" title="Client's assigned coach — visit not placed on the calendar yet">${esc(assignedCoach.name)} <span class="small">(assigned)</span></span>`
-        : '—';
-      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${coachCell}</td><td>${pill}</td>
-        <td style="white-space:nowrap">${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}${v.cal_week && !v.completed && (canEdit() || (D.user.role==='coach' && client.assigned_coach_id===D.user.coach_id)) ? ` <button class="btn tiny" title="Take this visit off the calendar" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}${v.completed && isAdmin() ? ` <button class="btn tiny danger" title="Admin: undo this completion" onclick="reopenVisit(${v.id})">Mark incomplete</button>` : ''}</td></tr>`;
-    }).join('') +
-    `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
-
+  // ---- Visit History, grouped by cycle lap ("1 of n" … "n of n") ----
+  // A forever contract accumulates dozens of rows; one collapsible block per lap keeps
+  // it readable. The lap containing today's work is open; past and future laps fold to
+  // a one-line summary. st.vhOpen remembers what the user toggled on this profile.
+  const visitRow = v => {
+    const pill = v.completed?completedPill(v)
+      : v.cal_week?calendarPill(v)
+      : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
+    const placedCoach = v.cal_coach ? coach(v.cal_coach) : null;
+    const assignedCoach = !placedCoach && client.assigned_coach_id ? coach(client.assigned_coach_id) : null;
+    const coachCell = placedCoach ? esc(placedCoach.name)
+      : assignedCoach ? `<span style="color:var(--muted)" title="Client's assigned coach — visit not placed on the calendar yet">${esc(assignedCoach.name)} <span class="small">(assigned)</span></span>`
+      : '—';
+    return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${coachCell}</td><td>${pill}</td>
+      <td style="white-space:nowrap">${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}${v.cal_week && !v.completed && (canEdit() || (D.user.role==='coach' && client.assigned_coach_id===D.user.coach_id)) ? ` <button class="btn tiny" title="Take this visit off the calendar" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}${v.completed && isAdmin() ? ` <button class="btn tiny danger" title="Admin: undo this completion" onclick="reopenVisit(${v.id})">Mark incomplete</button>` : ''}</td></tr>`;
+  };
+  // Walk visits oldest → newest; a new lap starts whenever the cycle number resets
+  // (k <= previous k) or the program changes. Unparseable labels ride along in the current lap.
+  const laps = [];
+  let cur = null, prevK = Infinity, prevProg = null;
+  for(const v of visits.slice().sort((a,b)=>(a.due||'').localeCompare(b.due||'') || a.id-b.id)){
+    const m = /^(\d+)\s+of\s+(\d+)$/.exec(v.cycle||''); const k = m ? +m[1] : null;
+    if(!cur || (k !== null && k <= prevK) || v.program !== prevProg){ cur = { program: v.program, n: m ? +m[2] : null, visits: [] }; laps.push(cur); }
+    cur.visits.push(v); if(k !== null) prevK = k; prevProg = v.program;
+  }
+  st.vhOpen = st.vhOpen || {};
+  const currentLapIdx = (() => { const i = laps.findIndex(l => l.visits.some(v => !v.completed)); return i < 0 ? laps.length - 1 : i; })();
+  const lapKey = (l, i) => `${client.id}:${i}`;
+  const lapHtml = laps.map((l, i) => {
+    const done = l.visits.filter(v=>v.completed).length, onCal = l.visits.filter(v=>!v.completed && v.cal_week).length, todo = l.visits.length - done - onCal;
+    const first = l.visits[0].due, last = l.visits[l.visits.length-1].due;
+    const isOpen = st.vhOpen[lapKey(l,i)] != null ? st.vhOpen[lapKey(l,i)] : i === currentLapIdx;
+    const tag = i === currentLapIdx ? '<span class="pill p-cal" style="margin-left:8px">current</span>' : (i > currentLapIdx ? '<span class="pill" style="margin-left:8px;background:#f0efee;color:var(--muted)">upcoming</span>' : (done === l.visits.length ? '<span class="pill p-done" style="margin-left:8px">complete</span>' : ''));
+    const summary = [done ? `${done} completed` : '', onCal ? `${onCal} on calendar` : '', todo ? `${todo} to schedule` : ''].filter(Boolean).join(' · ');
+    return `<div style="border:1px solid var(--line);border-radius:8px;margin-bottom:8px;overflow:hidden">
+      <div onclick="st.vhOpen['${lapKey(l,i)}']=${!isOpen};rerenderClientProfile()" style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:${isOpen?'#fff':'#faf9f8'}">
+        <span style="width:14px;color:var(--muted)">${isOpen?'▾':'▸'}</span>
+        <span style="font-family:var(--head);font-size:13px;letter-spacing:.8px;text-transform:uppercase;font-weight:600">Cycle ${laps.length - i} · ${esc(l.program)}${l.n ? ` · ${l.visits.length} of ${l.n} visits` : ''}</span>
+        <span class="small">${fmtW(first)} ${first.slice(0,4)} – ${fmtW(last)} ${last.slice(0,4)}</span>${tag}
+        <span style="flex:1"></span><span class="small">${summary}</span>
+      </div>
+      ${isOpen ? `<table style="margin:0"><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled On</th><th>Coach</th><th>Status</th><th></th></tr>${l.visits.slice().reverse().map(visitRow).join('')}</table>` : ''}
+    </div>`;
+  }).reverse().join('');
+  html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Extend visits</button>`:''}</h2>
+    <p class="small" style="margin-bottom:10px">${visits.length} visit${visits.length===1?'':'s'} across ${laps.length} cycle${laps.length===1?'':'s'} — click a cycle to expand or fold it.</p>
+    ${laps.length ? lapHtml : '<p class="small">No visits recorded yet.</p>'}</div>`;
 
   html += `<div class="panel"><h2>📋 Visit Notes</h2>
     <p class="small" style="margin-bottom:10px">Wins, issues and focus recorded when a visit is completed — one card per visit, grouped by contract. Use the arrows or dots to move between visits.</p>

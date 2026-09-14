@@ -2573,7 +2573,7 @@ function extendRollingSchedule(contract, opts = {}){
     } else {
       // Belt and braces: never create a row that already exists for this client at the
       // same program/cycle/due, whichever contract (or none) it's attached to.
-      const clash = db.prepare('SELECT id FROM visits WHERE client_id=? AND program=? AND cycle=? AND due=? LIMIT 1').get(contract.client_id, contract.program, cycle, nextDue);
+      const clash = db.prepare('SELECT id FROM visits WHERE client_id=? AND program=? AND cycle=? AND abs(julianday(due) - julianday(?)) <= 7 LIMIT 1').get(contract.client_id, contract.program, cycle, nextDue);
       if(clash){ visits.push({ id: clash.id, due: nextDue, cycle, skipped: 'already_exists' }); nextK = (nextK % n) + 1; const d0 = new Date(nextDue + 'T12:00:00'); d0.setMonth(d0.getMonth() + iv); nextDue = d0.toISOString().slice(0, 10); guard++; continue; }
       const result = findOrCreateVisit({
         contractId: contract.id, dueDate: nextDue, cycleLabel: cycle, program: contract.program, team,
@@ -2619,7 +2619,8 @@ function adoptOrphanVisits(){
 function removeRollingDuplicates(){
   const dups = db.prepare(`
     SELECT r.id, r.client, r.cycle, r.due FROM visits r
-    JOIN visits o ON o.client_id=r.client_id AND o.program=r.program AND o.cycle=r.cycle AND o.due=r.due AND o.id<>r.id AND o.source<>'rolling'
+    JOIN visits o ON o.client_id=r.client_id AND o.program=r.program AND o.cycle=r.cycle
+      AND abs(julianday(o.due) - julianday(r.due)) <= 7 AND o.id<>r.id AND o.source<>'rolling'
     WHERE r.source='rolling' AND r.completed=0 AND r.cal_week IS NULL`).all();
   const del = db.prepare('DELETE FROM visits WHERE id=?');
   for(const d of dups) del.run(d.id);
