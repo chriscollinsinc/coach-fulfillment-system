@@ -2817,13 +2817,19 @@ function clientProfileView(data, notes){
   </div>`;
 
   html += `<div class="panel"><h2>Visit history${canEdit()?` <button class="btn tiny" style="float:right" onclick="generateNextCycleDlg(${client.id},${JSON.stringify(liveContracts).replace(/"/g, '&quot;')})">Extend visits</button>`:''}
-    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled On</th><th>Completed By</th><th>Status</th><th></th></tr>` +
+    </h2><table><tr><th>Due</th><th>Program</th><th>Cycle</th><th>Scheduled On</th><th>Coach</th><th>Status</th><th></th></tr>` +
     visits.slice().reverse().map(v=>{
       const pill = v.completed?completedPill(v)
         : v.cal_week?calendarPill(v)
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
-      const completedByCoach = v.cal_coach ? coach(v.cal_coach) : null;
-      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${completedByCoach ? esc(completedByCoach.name) : '—'}</td><td>${pill}</td>
+      // Coach column: the coach the visit is placed under; before it's placed, fall back
+      // to the client's assigned coach (who owns it and will place it), shown muted.
+      const placedCoach = v.cal_coach ? coach(v.cal_coach) : null;
+      const assignedCoach = !placedCoach && client.assigned_coach_id ? coach(client.assigned_coach_id) : null;
+      const coachCell = placedCoach ? esc(placedCoach.name)
+        : assignedCoach ? `<span style="color:var(--muted)" title="Client's assigned coach — visit not placed on the calendar yet">${esc(assignedCoach.name)} <span class="small">(assigned)</span></span>`
+        : '—';
+      return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${coachCell}</td><td>${pill}</td>
         <td style="white-space:nowrap">${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}${v.completed && isAdmin() ? ` <button class="btn tiny danger" title="Admin: undo this completion" onclick="reopenVisit(${v.id})">Mark incomplete</button>` : ''}</td></tr>`;
     }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
