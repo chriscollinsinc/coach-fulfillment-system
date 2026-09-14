@@ -469,6 +469,9 @@ const canEditWeeks = () => ['admin','lead','sales','coach'].includes(D.user.role
 // the server re-derives and enforces this independently, so this never has to be
 // trusted as the real security boundary.
 const ownsVisit = v => D.user.role==='coach' && ((v.cal_coach && v.cal_coach===D.user.coach_id) || (v.client_assigned_coach_id && v.client_assigned_coach_id===D.user.coach_id));
+// Unschedule / Move: server allows admin/lead on their team, and a coach ONLY for a
+// client assigned to them (being the calendar coach isn't enough) — mirror that here.
+const canReschedule = v => canEdit() || (D.user.role==='coach' && !!v.client_assigned_coach_id && v.client_assigned_coach_id===D.user.coach_id);
 const myTeams = () => D.user.role==='admin' ? D.teams : [D.user.team];
 
 /* Helper to render a client name as a clickable link to their profile,
@@ -1160,8 +1163,9 @@ function todayCoachView(t){
       todayRows(list, 10, v=>`<tr><td style="width: 20%;"><b>${clientLink(v.client, v.client_id)}</b></td><td style="width: 25%;">${esc(v.cycle||'')} ${esc(v.program||'')}</td>
         <td style="width: 20%;" class="mono">${fmt(v.due||v.scheduled_week)}</td>
         <td style="width: 20%;">${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
-        <td style="width: 15%;">${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open client</button>`:''}
-        ${!v.scheduled_week?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete</button>`:''}</td></tr>`)+`</table>`
+        <td style="width: 15%;white-space:nowrap">${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open client</button>`:''}
+        ${!v.scheduled_week?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete</button>`:''}
+        ${(()=>{ const full = D.visits.find(x=>x.id===v.id); return full && full.cal_week && !full.completed && canReschedule(full) ? `<button class="btn tiny" title="Take this visit off the calendar" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''; })()}</td></tr>`)+`</table>`
       : `<p class="small">${empty}</p>`;
     return h+`</div>`;
   };
@@ -1320,8 +1324,8 @@ function board(){
         : `<b>${v.store?esc(v.store):'—'}</b>`}</div>` : (v.store?`<div class="small" style="margin-top:6px">Store: <b>${esc(v.store)}</b></div>`:'')}
       <div class="btnrow">
         ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.completed?'Edit notes':'Complete'}</button>` : ''}
-        ${canEdit()||ownsVisit(v) ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>` : ''}
-        ${canEdit()||ownsVisit(v) ? `<button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
+        ${canReschedule(v) ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>` : ''}
+        ${canReschedule(v) ? `<button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
         <button class="btn tiny" onclick="st.detail=null;render()">Close</button>
       </div></div>`;
   }
@@ -1393,7 +1397,8 @@ async function placeHere(cid,w){
   toast(`Scheduled → ${coach(cid).name}, wk of ${fmtW(w)}`, async()=>api('POST',`/api/visits/${id}/unschedule`));
 }
 async function unscheduleV(id){
-  const v=D.visits.find(x=>x.id===id); const old={coach:v.cal_coach,week:v.cal_week};
+  const v=D.visits.find(x=>x.id===id); if(!v) return; const old={coach:v.cal_coach,week:v.cal_week};
+  if(!(await uiConfirm(`Take ${v.client} — ${v.cycle} ${v.program} off the calendar (week of ${fmtW(v.cal_week)})? It goes back to "needs scheduling" and can be placed again.`,'Unschedule'))) return;
   await api('POST',`/api/visits/${id}/unschedule`); st.detail=null; await refresh();
   toast('Unscheduled — back in the to-schedule list', async()=>api('POST',`/api/visits/${id}/place`,old));
 }
@@ -2829,7 +2834,7 @@ function clientProfileView(data, notes){
         : assignedCoach ? `<span style="color:var(--muted)" title="Client's assigned coach — visit not placed on the calendar yet">${esc(assignedCoach.name)} <span class="small">(assigned)</span></span>`
         : '—';
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${coachCell}</td><td>${pill}</td>
-        <td style="white-space:nowrap">${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}${v.completed && isAdmin() ? ` <button class="btn tiny danger" title="Admin: undo this completion" onclick="reopenVisit(${v.id})">Mark incomplete</button>` : ''}</td></tr>`;
+        <td style="white-space:nowrap">${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}${v.cal_week && !v.completed && (canEdit() || (D.user.role==='coach' && client.assigned_coach_id===D.user.coach_id)) ? ` <button class="btn tiny" title="Take this visit off the calendar" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}${v.completed && isAdmin() ? ` <button class="btn tiny danger" title="Admin: undo this completion" onclick="reopenVisit(${v.id})">Mark incomplete</button>` : ''}</td></tr>`;
     }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
