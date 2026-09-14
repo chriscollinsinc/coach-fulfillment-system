@@ -1699,7 +1699,7 @@ function validateCycleSequence(contractId, nextCycleNum, n) {
   
   const sql = `SELECT DISTINCT cycle FROM visits 
                WHERE contract_id = ? 
-               AND completed IS NULL 
+               AND (completed IS NULL OR completed = 0)
                AND cycle NOT LIKE '%carryover%' 
                AND cycle NOT LIKE '%extra%'`;
   
@@ -1729,7 +1729,7 @@ function getNextCycleNumber(contractId, n) {
   
   const sql = `SELECT DISTINCT cycle FROM visits 
                WHERE contract_id = ? 
-               AND completed IS NULL 
+               AND (completed IS NULL OR completed = 0)
                AND cycle NOT LIKE '%carryover%' 
                AND cycle NOT LIKE '%extra%'`;
   
@@ -1773,7 +1773,7 @@ function findOrCreateVisit(opts = {}) {
   //   ...other fields as needed
   // Returns: { created: bool, id: visit_id, reason: string, error?: string }
   
-  const { contractId, dueDate, cycleLabel, program, team, ...otherFields } = opts;
+  const { contractId, dueDate, cycleLabel, program, team, skipSequenceCheck, ...otherFields } = opts;
   
   if (!contractId) {
     return { created: false, id: null, reason: 'missing_contract_id', error: 'contractId required' };
@@ -1790,7 +1790,10 @@ function findOrCreateVisit(opts = {}) {
   }
   
   // If this is a numbered cycle (e.g., "1 of 4"), validate sequence
-  if (cycleLabel && !String(cycleLabel).toLowerCase().includes('carryover') && !String(cycleLabel).toLowerCase().includes('extra')) {
+  // A repeating contract legitimately has many "1 of 4"s over its life, so the
+  // gap check only makes sense when seeding a brand-new cycle from scratch. Callers
+  // continuing an existing sequence (rolling schedule) pass skipSequenceCheck.
+  if (!skipSequenceCheck && cycleLabel && !String(cycleLabel).toLowerCase().includes('carryover') && !String(cycleLabel).toLowerCase().includes('extra')) {
     const parsed = parseCycleLabel(cycleLabel);
     if (parsed) {
       const { k, n } = parsed;
@@ -1836,7 +1839,7 @@ function findOrCreateVisit(opts = {}) {
     
     return {
       created: true,
-      id: result.lastID,
+      id: result.lastInsertRowid,
       reason: 'visit_created'
     };
   } catch (err) {

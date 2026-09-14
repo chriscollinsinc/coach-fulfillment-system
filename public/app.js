@@ -2555,7 +2555,7 @@ async function extendVisitsDlg(contractId){
   const yr = (p.horizon||'').slice(0,4);
   const rows = (p.visits||[]).map(v=>`<tr><td class="mono">${esc(v.cycle)}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('');
   openDlg(`<h3>Extend visits through ${yr}</h3>
-    <p class="small" style="color:var(--muted)"><b>${esc(p.program)}</b> · ${p.visitsPerCycle} visits per cycle. Continues the cycle from the latest visit on this contract, wrapping back to "1 of ${p.visitsPerCycle}" after "${p.visitsPerCycle} of ${p.visitsPerCycle}". Nothing existing is changed.</p>
+    <p class="small" style="color:var(--muted)"><b>${esc(p.program)}</b> · ${p.visitsPerCycle} visits per cycle. Continues from the latest visit on this contract through Dec ${yr}, then finishes the cycle so it always ends on "${p.visitsPerCycle} of ${p.visitsPerCycle}". Nothing existing is changed.</p>
     ${p.created ? `<table style="margin-top:10px"><tr><th>Cycle</th><th>Due</th></tr>${rows}</table>`
                 : `<p style="margin-top:12px">Already covered — this contract has visits through Dec ${yr}. Nothing to add.</p>`}
     <div class="dlgrow" style="margin-top:14px">

@@ -2537,73 +2537,56 @@ function extendRollingSchedule(contract, opts = {}){
   // Coaching Only (visits=0), LID (Purchase) (iv=0, genuinely one-and-done), or
   // any contract with an unrecognized/blank program — nothing to repeat.
   if(!Number.isFinite(n) || n <= 0 || !iv) return { created: 0, visits: [] };
-  
-  // DISCIPLINE: Use getNextCycleNumber to determine correct sequence
-  // instead of reading last visit (which perpetuates disorder)
-  let nextK = getNextCycleNumber(contract.id, n);
-  if (nextK > n) nextK = 1; // wrap to cycle 1 after completing n
-  
-  const last = db.prepare('SELECT due, team FROM visits WHERE contract_id=? ORDER BY due DESC, id DESC LIMIT 1').get(contract.id);
-  let nextDue, team;
-  
+
+  // The blueprint is the LATEST visit on the contract by due date (completed or not):
+  // the next visit is one interval later and the next number in the cycle, wrapping
+  // "n of n" → "1 of n". If the latest label doesn't parse ("Carryover", blank, or a
+  // different n), we still extend from its date but restart at 1 and flag it so the
+  // nightly summary lists the client for a human look.
+  const last = getLastVisitForContract(contract.id);
+  let nextK = 1, nextDue, team = null, irregular = null;
   if(last && last.due){
-    const d = new Date(last.due + 'T12:00:00'); 
-    d.setMonth(d.getMonth() + iv);
+    const parsed = parseCycleLabel(last.cycle);
+    if(parsed && parsed.n === n) nextK = (parsed.k % n) + 1;
+    else irregular = `latest visit "${last.cycle || '(blank)'}" due ${last.due} doesn't fit a ${n}-visit cycle — restarted at 1 of ${n}`;
+    const d = new Date(last.due + 'T12:00:00'); d.setMonth(d.getMonth() + iv);
     nextDue = d.toISOString().slice(0, 10);
     team = last.team || null;
   } else {
-    // No visits at all yet under this contract (shouldn't normally happen —
-    // create/regenerate always seed at least one — but don't skip silently).
     nextDue = contract.start_date || new Date().toISOString().slice(0, 10);
-    team = null;
+    irregular = 'no visits on this contract yet — seeded from the contract start date';
   }
-  
   if(!team){
-    const teamRow = db.prepare('SELECT team FROM visits WHERE contract_id=? ORDER BY id LIMIT 1').get(contract.id);
+    const teamRow = db.prepare('SELECT team FROM visits WHERE contract_id=? AND team IS NOT NULL AND team<>\'\' ORDER BY id DESC LIMIT 1').get(contract.id);
     team = (teamRow && teamRow.team) || null;
   }
-  
+
+  // Run to the horizon, then keep going until the cycle closes on "n of n" — an
+  // extension that stops at "2 of 4" reads as unfinished (Mike, 2026-09-14).
   const horizonStr = rollingHorizon();
-  
   const visits = [];
   let guard = 0; // safety valve, not a real cap
-  
-  while(nextDue <= horizonStr && guard < 60){
+  while((nextDue <= horizonStr || nextK !== 1) && guard < 60){
     const cycle = `${nextK} of ${n}`;
-    
     if(dryRun){
       visits.push({ due: nextDue, cycle });
     } else {
-      // DISCIPLINE: Use findOrCreateVisit for validated creation
-      // This prevents duplicates and orphan cycles
       const result = findOrCreateVisit({
-        contractId: contract.id,
-        dueDate: nextDue,
-        cycleLabel: cycle,
-        program: contract.program,
-        team: team
+        contractId: contract.id, dueDate: nextDue, cycleLabel: cycle, program: contract.program, team,
+        client: contract.client_name, client_id: contract.client_id, source: 'rolling', completed: 0,
+        skipSequenceCheck: true
       });
-      
-      if(result.created){
-        visits.push({ id: result.id, due: nextDue, cycle });
-      } else if(result.reason === 'existing_visit_found'){
-        // Visit already exists at this due date/cycle, skip silently
-        visits.push({ id: result.id, due: nextDue, cycle, skipped: 'already_exists' });
-      } else {
-        // Validation failed (cycle sequence violation), stop extending
-        console.error(`extendRollingSchedule: Cannot create ${cycle} for contract ${contract.id}: ${result.error}`);
-        break;
-      }
+      if(result.created) visits.push({ id: result.id, due: nextDue, cycle });
+      else if(result.reason === 'existing_visit_found') visits.push({ id: result.id, due: nextDue, cycle, skipped: 'already_exists' });
+      else { console.error(`extendRollingSchedule: contract ${contract.id} ${cycle} ${nextDue}: ${result.error}`); irregular = irregular || `create failed: ${result.error}`; break; }
     }
-    
     nextK = (nextK % n) + 1;
-    const d = new Date(nextDue + 'T12:00:00'); 
-    d.setMonth(d.getMonth() + iv);
+    const d = new Date(nextDue + 'T12:00:00'); d.setMonth(d.getMonth() + iv);
     nextDue = d.toISOString().slice(0, 10);
     guard++;
   }
-  
-  return { created: visits.length, visits, cappedAt60: guard >= 60 };
+  const created = visits.filter(v => !v.skipped).length;
+  return { created, visits, irregular, cappedAt60: guard >= 60 };
 }
 
 function sweepRollingSchedule(opts = {}){
@@ -2624,12 +2607,14 @@ function sweepRollingSchedule(opts = {}){
   let totalCreated = 0;
   const perClient = [];
   const capped = [];
+  const irregular = [];
   for(const c of contracts){
     const r = extendRollingSchedule(c, opts);
     if(r.created){ totalCreated += r.created; perClient.push({ client: c.client_name, clientId: c.client_id, contractId: c.id, program: c.program, created: r.created, visits: r.visits }); }
     if(r.cappedAt60) capped.push(`${c.client_name} (contract #${c.id})`);
+    if(r.irregular) irregular.push(`${c.client_name} [${c.program}]: ${r.irregular}`);
   }
-  return { dryRun: !!opts.dryRun, contractsChecked: contracts.length, totalCreated, perClient, capped };
+  return { dryRun: !!opts.dryRun, contractsChecked: contracts.length, totalCreated, perClient, capped, irregular };
 }
 // Preview: computes the full list without writing anything — review this before
 // ever applying it, and before relying on it to judge whether a coach's manual
@@ -2695,6 +2680,9 @@ async function runNightlyMaintenance(actorEmail){
           .concat(summary.cadence.changes.length > 15 ? [`  …and ${summary.cadence.changes.length - 15} more`] : [])
         : []),
       `Rolling schedule: ${summary.rollingSchedule.error ? 'FAILED — ' + summary.rollingSchedule.error : `added ${summary.rollingSchedule.totalCreated} visit(s) across ${summary.rollingSchedule.perClient.length} contract(s) so every active client has visits through ${rollingHorizon().slice(0,4)} (${summary.rollingSchedule.contractsChecked} active contract(s) checked)`}`,
+      ...(summary.rollingSchedule.irregular && summary.rollingSchedule.irregular.length
+        ? [`  ⚠ Irregular history (review by hand): `].concat(summary.rollingSchedule.irregular.slice(0,15).map(x => `  - ${x}`))
+        : []),
       ...(summary.rollingSchedule.perClient && summary.rollingSchedule.perClient.length
         ? summary.rollingSchedule.perClient.slice(0,15).map(p => `  - ${p.client} [${p.program}]: +${p.created} (${p.visits[0].cycle} due ${p.visits[0].due}${p.created>1 ? ` … ${p.visits[p.visits.length-1].cycle} due ${p.visits[p.visits.length-1].due}` : ''})`)
           .concat(summary.rollingSchedule.perClient.length > 15 ? [`  …and ${summary.rollingSchedule.perClient.length - 15} more`] : [])
