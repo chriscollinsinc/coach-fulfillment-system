@@ -3086,7 +3086,7 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
         v.id, COALESCE(v.completed_date, v.due, CURRENT_DATE) as note_date, 'Visit Note' as note_type,
         v.notes_wins as wins, v.notes_issues as issues, v.notes_focus as focus,
         v.completed_by_email as author_email, v.completed_by_coach_id as author_name,
-        COALESCE(v.completed_date, v.due, CURRENT_DATE) as created, v.completed_date as scheduled_on, v.cycle, v.program, v.contract_id,
+        COALESCE(v.completed_date, v.due, CURRENT_DATE) as created, v.cal_week as scheduled_on, v.cycle, v.program, v.contract_id,
         c.start_date, c.status
       FROM visits v
       LEFT JOIN contracts c ON v.contract_id = c.id
