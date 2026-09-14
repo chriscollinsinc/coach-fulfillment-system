@@ -448,6 +448,7 @@ function completedPill(v){
   return `<span class="pill p-done" title="${esc(tip)}">completed</span>`;
 }
 const canEdit = () => ['admin','lead'].includes(D.user.role);
+const isAdmin = () => D.user.role === 'admin';
 // Broader than canEdit(): sales/coach can see the Schedule Board and set/clear a
 // coach's open-week label (Home/Off/Training/etc.), but never place, move, or
 // unschedule an actual visit card — that stays canEdit()-only (admin/lead), and is
@@ -1614,7 +1615,12 @@ function toggleInvAll(on){
   st.invSel = on ? new Set(rows.slice(0,400).map(v=>v.id)) : new Set();
   render();
 }
-async function reopenVisit(id){ await api('POST',`/api/visits/${id}/reopen`); await refresh(); toast('Marked incomplete — the visit is active again and can be rescheduled'); }
+async function reopenVisit(id){
+  const v = D.visits.find(x=>x.id===id);
+  const who = v ? `${v.client} — ${v.cycle} ${v.program}` : 'this visit';
+  if(!(await uiConfirm(`Mark ${who} as INCOMPLETE? It goes back to active status and can be completed again. Any notes logged on it are kept.`,'Mark incomplete'))) return;
+  await api('POST',`/api/visits/${id}/reopen`); await refresh(); toast('Marked incomplete — the visit is active again');
+}
 async function bulkCompleteVisits(){
   const ids=[...st.invSel];
   if(!(await uiConfirm(`Mark ${ids.length} visit(s) completed? Use this for cleanup of old already-done work — no notes get attached.`,'Mark completed'))) return;
@@ -1736,7 +1742,7 @@ async function saveContract(){
 }
 function visitDlg(id){
   const v=D.visits.find(x=>x.id===id)||{client:'',program:'Quarterly',cycle:'1 of 1',due:TODAY,team:D.user.team||D.teams[0]};
-  const actions = id ? (v.completed ? `<button class="btn tiny" onclick="closeDlg();reopenVisit(${id})">Mark incomplete</button>` : '') + `<button class="btn tiny danger" onclick="closeDlg();delVisit(${id})">Delete visit</button>` : '';
+  const actions = id ? (v.completed && isAdmin() ? `<button class="btn tiny" onclick="closeDlg();reopenVisit(${id})">Mark incomplete</button>` : '') + `<button class="btn tiny danger" onclick="closeDlg();delVisit(${id})">Delete visit</button>` : '';
   openDlg(`<h3>${id?'Edit visit':'Add single visit'}</h3>
     <label>Client</label><input id="vName" value="${esc(v.client)}" list="cl"><datalist id="cl">${clientNames().map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
     <label>Program</label><select id="vProg">${progOpts(v.program)}</select>
@@ -2804,7 +2810,7 @@ function clientProfileView(data, notes){
         : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
       const completedByCoach = v.cal_coach ? coach(v.cal_coach) : null;
       return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${completedByCoach ? esc(completedByCoach.name) : '—'}</td><td>${pill}</td>
-        <td>${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}</td></tr>`;
+        <td style="white-space:nowrap">${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}${v.completed && isAdmin() ? ` <button class="btn tiny danger" title="Admin: undo this completion" onclick="reopenVisit(${v.id})">Mark incomplete</button>` : ''}</td></tr>`;
     }).join('') +
     `</table>${visits.length?'':'<p class="small">No visits recorded yet.</p>'}</div>`;
 
@@ -3177,7 +3183,7 @@ const FAQ = [
   { cat: 'Visits & completion', roles: ['admin','lead','sales','coach'], items: [
     { q: 'Who can mark a visit complete?', a: `Only the coach who scheduled it (they're listed as the calendar coach for that slot) or the coach permanently assigned to that client. An admin or lead can complete any visit on their team. This is checked on the server every time — a coach can't complete a visit for a store that isn't theirs, even by editing the request.` },
     { q: 'What happens to the note I add when completing a visit?', a: `It's saved to that client's Notes tab and tagged to the specific visit it documents — you'll see the visit's due date and program show up next to it automatically. That link is set only by the complete step itself, so it can't be edited onto a different visit later.` },
-    { q: 'I completed a visit by mistake — can I undo it?', a: `Admins and leads can reopen a completed visit from either the client's profile (Edit dialog) or the Inventory page. Click 'Mark incomplete' to clear its completed status. The note you logged (if any) stays on the client's record either way.` },
+    { q: 'I completed a visit by mistake — can I undo it?', a: `Admins can undo a completion from the client's Visit History (the red 'Mark incomplete' button on the row) or from the visit's Edit dialog. Leads and coaches can't — ask an admin. The note you logged (if any) stays on the client's record either way.` },
   ]},
   { cat: 'Availability & soft pencil holds', roles: ['admin','lead','sales'], items: [
     { q: 'What is a soft pencil hold?', a: `A tentative reservation of specific weeks on a coach's schedule for a prospect who hasn't signed yet, placed from the Availability page's "Preview calendar." It records the prospect's name, program, who placed it and when — and it blocks those weeks from being double-booked. It never creates a client, contract, or anything Keap sees. Every hold has an expiry date (30 days after its last held week by default): if the deal goes quiet, the nightly job warns admins a week ahead, then auto-releases the weeks so they don't rot on the calendar.` },

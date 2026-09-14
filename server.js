@@ -612,10 +612,12 @@ route('POST', /^\/api\/admin\/confirm-completed$/, ['admin','lead'], (req, res, 
   log(user.email, 'admin.confirm_completed_bulk', { requested: ids.length, completed, skipped });
   send(res, 200, { ok:true, completed, skipped });
 });
-route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin','lead'], (req, res, m, body, user) => {
+// Admin-only: undo a completion. Clears the completed flag and the completion snapshot
+// (who/when) but keeps the visit's notes and calendar placement intact.
+route('POST', /^\/api\/visits\/(\d+)\/reopen$/, ['admin'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
-  if(!canEditTeam(user, v.team)) return err(res, 403, 'Not your team');
-  db.prepare('UPDATE visits SET completed=0, scheduled_week=NULL WHERE id=?').run(v.id);
+  if(!v.completed) return err(res, 400, 'Visit is not marked completed');
+  db.prepare('UPDATE visits SET completed=0, scheduled_week=NULL, completed_date=NULL, completed_by_coach_id=NULL, completed_by_email=NULL WHERE id=?').run(v.id);
   log(user.email, 'visit.reopen', { id: v.id, client: v.client });
   send(res, 200, { ok: true });
 });
