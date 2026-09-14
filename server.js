@@ -2571,6 +2571,10 @@ function extendRollingSchedule(contract, opts = {}){
     if(dryRun){
       visits.push({ due: nextDue, cycle });
     } else {
+      // Belt and braces: never create a row that already exists for this client at the
+      // same program/cycle/due, whichever contract (or none) it's attached to.
+      const clash = db.prepare('SELECT id FROM visits WHERE client_id=? AND program=? AND cycle=? AND due=? LIMIT 1').get(contract.client_id, contract.program, cycle, nextDue);
+      if(clash){ visits.push({ id: clash.id, due: nextDue, cycle, skipped: 'already_exists' }); nextK = (nextK % n) + 1; const d0 = new Date(nextDue + 'T12:00:00'); d0.setMonth(d0.getMonth() + iv); nextDue = d0.toISOString().slice(0, 10); guard++; continue; }
       const result = findOrCreateVisit({
         contractId: contract.id, dueDate: nextDue, cycleLabel: cycle, program: contract.program, team,
         client: contract.client_name, client_id: contract.client_id, source: 'rolling', completed: 0,
@@ -2589,7 +2593,47 @@ function extendRollingSchedule(contract, opts = {}){
   return { created, visits, irregular, cappedAt60: guard >= 60 };
 }
 
+/* Repair steps that run before/after each sweep so the generator sees the whole picture:
+ *  1. adoptOrphanVisits — the retired "Generate next cycle" button created visits with
+ *     no contract_id (found 2026-09-15: 24 rows, e.g. Easterns 2–12 of 12). The rolling
+ *     generator only reads a contract's own visits, so it re-created those cycles.
+ *     Link each orphan to the client's single active contract for the same program.
+ *  2. removeRollingDuplicates — delete rolling-created, still-unscheduled, not-completed
+ *     visits that collide with a non-rolling visit on the same client/program/cycle/due.
+ * Both are safe to run every night: adoption only fires when exactly one active contract
+ * matches, and deletion only ever touches rows this generator itself created. */
+function adoptOrphanVisits(){
+  const rows = db.prepare(`SELECT id, client_id, program, completed, due FROM visits WHERE contract_id IS NULL AND client_id IS NOT NULL`).all();
+  const findC = db.prepare(`SELECT id, start_date FROM contracts WHERE client_id=? AND program=? AND status='active'`);
+  const upd = db.prepare('UPDATE visits SET contract_id=? WHERE id=?');
+  let linked = 0;
+  for(const r of rows){
+    const cs = findC.all(r.client_id, r.program);
+    if(cs.length !== 1) continue;
+    // Completed history from before this contract started stays where it is.
+    if(r.completed && cs[0].start_date && r.due && r.due < cs[0].start_date) continue;
+    upd.run(cs[0].id, r.id); linked++;
+  }
+  return linked;
+}
+function removeRollingDuplicates(){
+  const dups = db.prepare(`
+    SELECT r.id, r.client, r.cycle, r.due FROM visits r
+    JOIN visits o ON o.client_id=r.client_id AND o.program=r.program AND o.cycle=r.cycle AND o.due=r.due AND o.id<>r.id AND o.source<>'rolling'
+    WHERE r.source='rolling' AND r.completed=0 AND r.cal_week IS NULL`).all();
+  const del = db.prepare('DELETE FROM visits WHERE id=?');
+  for(const d of dups) del.run(d.id);
+  return dups;
+}
+route('POST', /^\/api\/admin\/rolling-schedule\/repair$/, ['admin'], (req, res, m, body, user) => {
+  const linked = adoptOrphanVisits();
+  const removed = removeRollingDuplicates();
+  log(user.email, 'admin.rolling_schedule_repair', { linked, removed: removed.length });
+  send(res, 200, { ok: true, linked, removed: removed.length, removedRows: removed });
+});
+
 function sweepRollingSchedule(opts = {}){
+  const repaired = opts.dryRun ? null : { linked: adoptOrphanVisits() };
   // notice_given_date IS NULL: a client who has given notice is on their way out —
   // entering notice deliberately deletes their open future visits (see the notice
   // endpoint), so rolling them forward would resurrect a full year of visits for a
@@ -2614,7 +2658,8 @@ function sweepRollingSchedule(opts = {}){
     if(r.cappedAt60) capped.push(`${c.client_name} (contract #${c.id})`);
     if(r.irregular) irregular.push(`${c.client_name} [${c.program}]: ${r.irregular}`);
   }
-  return { dryRun: !!opts.dryRun, contractsChecked: contracts.length, totalCreated, perClient, capped, irregular };
+  if(repaired) repaired.removedDuplicates = removeRollingDuplicates().length;
+  return { dryRun: !!opts.dryRun, contractsChecked: contracts.length, totalCreated, perClient, capped, irregular, repaired };
 }
 // Preview: computes the full list without writing anything — review this before
 // ever applying it, and before relying on it to judge whether a coach's manual
@@ -2679,7 +2724,7 @@ async function runNightlyMaintenance(actorEmail){
         ? summary.cadence.changes.slice(0,15).map(ch => `  - ${ch.client}: ${ch.currentProgram} → ${ch.suggestedProgram} (per ${ch.basis})`)
           .concat(summary.cadence.changes.length > 15 ? [`  …and ${summary.cadence.changes.length - 15} more`] : [])
         : []),
-      `Rolling schedule: ${summary.rollingSchedule.error ? 'FAILED — ' + summary.rollingSchedule.error : `added ${summary.rollingSchedule.totalCreated} visit(s) across ${summary.rollingSchedule.perClient.length} contract(s) so every active client has visits through ${rollingHorizon().slice(0,4)} (${summary.rollingSchedule.contractsChecked} active contract(s) checked)`}`,
+      `Rolling schedule: ${summary.rollingSchedule.error ? 'FAILED — ' + summary.rollingSchedule.error : `${summary.rollingSchedule.repaired && (summary.rollingSchedule.repaired.linked || summary.rollingSchedule.repaired.removedDuplicates) ? `repaired ${summary.rollingSchedule.repaired.linked} orphan visit(s) / removed ${summary.rollingSchedule.repaired.removedDuplicates} duplicate(s); ` : ''}added ${summary.rollingSchedule.totalCreated} visit(s) across ${summary.rollingSchedule.perClient.length} contract(s) so every active client has visits through ${rollingHorizon().slice(0,4)} (${summary.rollingSchedule.contractsChecked} active contract(s) checked)`}`,
       ...(summary.rollingSchedule.irregular && summary.rollingSchedule.irregular.length
         ? [`  ⚠ Irregular history (review by hand): `].concat(summary.rollingSchedule.irregular.slice(0,15).map(x => `  - ${x}`))
         : []),
