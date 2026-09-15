@@ -227,7 +227,9 @@ async function api(method, url, body){
       : r.status===403 ? "You don't have permission to do that"
       : r.status>=500 ? 'Something went wrong on the server — try again in a moment'
       : 'That didn\'t work — check the form and try again');
-    toast(msg); throw new Error(msg);
+    const err = new Error(msg); err.body = j; err.status = r.status;
+    if(!(r.status===409 && j.code==='out_of_order')) toast(msg); // out-of-order is handled by the caller
+    throw err;
   }
   return j;
 }
@@ -304,6 +306,33 @@ const canEditWeeks = () => ['admin','lead','sales','coach'].includes(D.user.role
 const ownsVisit = v => D.user.role==='coach' && ((v.cal_coach && v.cal_coach===D.user.coach_id) || (v.client_assigned_coach_id && v.client_assigned_coach_id===D.user.coach_id));
 // Unschedule / Move: server allows admin/lead on their team, and a coach ONLY for a
 // client assigned to them (being the calendar coach isn't enough) — mirror that here.
+/* Cycle-order helpers — mirror of the server's placementProblem, used to grey out Place
+ * buttons and explain why. The server is the authority; this just saves a failed click. */
+const parseCycle = c => { const m=/^(\d+)\s+of\s+(\d+)$/.exec(c||''); return m?{k:+m[1],n:+m[2]}:null; };
+function cycleLapOf(v){
+  if(!v || !v.contract_id || !parseCycle(v.cycle)) return null;
+  const rows = D.visits.filter(x=>x.contract_id===v.contract_id && x.program===v.program && parseCycle(x.cycle)).sort((a,b)=>(a.due||'').localeCompare(b.due||'')||a.id-b.id);
+  const laps=[]; let lap=[], prevK=Infinity;
+  for(const r of rows){ const k=parseCycle(r.cycle).k; if(k<=prevK && lap.length){ laps.push(lap); lap=[]; } lap.push({...r,k}); prevK=k; }
+  if(lap.length) laps.push(lap);
+  return laps.find(L=>L.some(x=>x.id===v.id))||null;
+}
+function placeBlockReason(v){
+  const lap = cycleLapOf(v); if(!lap) return null;
+  const me = lap.find(x=>x.id===v.id); if(!me) return null;
+  const earlier = lap.filter(x=>x.k<me.k && !x.completed && !x.cal_week);
+  return earlier.length ? `Place ${earlier.map(x=>x.cycle).join(' and ')} first — visits go on the calendar in order` : null;
+}
+function orderProblem(v){ // for a PLACED, not-completed visit: is it out of order right now?
+  if(!v || v.completed || !v.cal_week) return null;
+  const lap = cycleLapOf(v); if(!lap) return null;
+  const me = lap.find(x=>x.id===v.id); if(!me) return null;
+  const wk = x => x.completed ? (x.scheduled_week||x.cal_week) : x.cal_week;
+  const a = lap.find(x=>x.k<me.k && !x.completed && !x.cal_week); if(a) return `${a.cycle} is still unscheduled`;
+  const b = lap.find(x=>x.k<me.k && wk(x) && wk(x) > v.cal_week); if(b) return `placed before ${b.cycle} (wk of ${fmtW(wk(b))})`;
+  const c = lap.find(x=>x.k>me.k && wk(x) && wk(x) < v.cal_week); if(c) return `placed after ${c.cycle} (wk of ${fmtW(wk(c))})`;
+  return null;
+}
 const canReschedule = v => canEdit() || (D.user.role==='coach' && !!v.client_assigned_coach_id && v.client_assigned_coach_id===D.user.coach_id);
 const myTeams = () => D.user.role==='admin' ? D.teams : [D.user.team];
 
@@ -668,7 +697,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -1027,7 +1056,7 @@ function todayCoachView(t){
     const can = canReschedule(f);
     return `<div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap">
       ${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open</button>`:''}
-      ${!f.cal_week && can ? `<button class="btn tiny" title="Pick a week on your calendar" onclick="${placeJump(f)}">Place</button>` : ''}
+      ${!f.cal_week && can ? (placeBlockReason(f) ? `<button class="btn tiny" disabled title="${esc(placeBlockReason(f))}" style="opacity:.55;cursor:not-allowed">Place</button>` : `<button class="btn tiny" title="Pick a week on your calendar" onclick="${placeJump(f)}">Place</button>`) : ''}
       ${f.cal_week && !f.completed && can ? `<button class="btn tiny" style="color:var(--muted)" title="Take it off the calendar" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
       ${!f.completed ? `<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete</button>` : ''}
     </div>`;
@@ -1204,7 +1233,7 @@ function board(){
     list.slice(0,40).forEach(v=>{
       h+=`<div class="duecard ${v.due&&v.due<TODAY?'over':''}"><b>${healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b>
         <div class="meta">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</div>
-        ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="st.placing=${v.id};st.detail=null;render()">Place on calendar</button>` : ''}</div>`;
+        ${(canEdit()||ownsVisit(v)) ? (placeBlockReason(v) ? `<button class="btn tiny" disabled title="${esc(placeBlockReason(v))}" style="opacity:.55;cursor:not-allowed">Place on calendar</button><div class="small" style="color:var(--warn);margin-top:4px">⚠ ${esc(placeBlockReason(v))}</div>` : `<button class="btn tiny primary" onclick="st.placing=${v.id};st.detail=null;render()">Place on calendar</button>`) : ''}</div>`;
     });
     return h;
   };
@@ -1279,9 +1308,22 @@ function calendarSwitcher(){
   return h + `</div>`;
 }
 function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.detail=null; render(); }
-async function placeHere(cid,w){
+async function placeHere(cid,w,force){
   const id=st.placing; if(!id) return;
-  await api('POST',`/api/visits/${id}/place`,{coach:cid,week:w});
+  try{
+    await api('POST',`/api/visits/${id}/place`,{coach:cid,week:w,force:!!force,reason:force?'admin override from calendar':undefined});
+  }catch(e){
+    const b = e.body || {};
+    if(b.code==='out_of_order'){
+      if(b.canOverride){
+        if(await uiConfirm(`Out of order — ${b.problem.message}\n\nPlace it here anyway? This is logged as an admin override.`,'Place anyway')) return placeHere(cid,w,true);
+      } else {
+        uiAlert(`Out of order — ${b.problem.message}`);
+      }
+      return;
+    }
+    return;
+  }
   st.placing=null;
   await refresh();
   toast(`Scheduled → ${coach(cid).name}, wk of ${fmtW(w)}`, async()=>api('POST',`/api/visits/${id}/unschedule`));
@@ -2802,7 +2844,8 @@ function clientProfileView(data, notes){
     const coachCell = placedCoach ? esc(placedCoach.name)
       : assignedCoach ? `<span style="color:var(--muted)" title="Client's assigned coach — visit not placed on the calendar yet">${esc(assignedCoach.name)} <span class="small">(assigned)</span></span>`
       : '—';
-    return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${coachCell}</td><td>${pill}</td>
+    const oo = orderProblem(v);
+    return `<tr><td class="mono">${fmt(v.due)}</td><td>${esc(v.program)}</td><td class="mono">${esc(v.cycle)}</td><td class="mono">${v.cal_week ? fmt(v.cal_week) : '—'}</td><td>${coachCell}</td><td>${pill}${oo ? ` <span class="pill p-due" title="${esc(oo)}">⚠ out of order</span>` : ''}</td>
       <td style="white-space:nowrap">${canEdit() ? `<button class="btn tiny" onclick="visitDlg(${v.id})">Edit</button>` : ''}${v.cal_week && !v.completed && (canEdit() || (D.user.role==='coach' && client.assigned_coach_id===D.user.coach_id)) ? ` <button class="btn tiny" title="Take this visit off the calendar" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}${v.completed && isAdmin() ? ` <button class="btn tiny danger" title="Admin: undo this completion" onclick="reopenVisit(${v.id})">Mark incomplete</button>` : ''}</td></tr>`;
   };
   // Walk visits oldest → newest; a new lap starts whenever the cycle number resets
@@ -3401,6 +3444,10 @@ function adminDataView(){
   <div class="panel"><h2>Revenue history</h2>
   <p class="small" style="margin-bottom:12px">One row per day, captured by the nightly job — total active revenue and client count, so drift (toward or away from Keap) shows as a trend.</p>
   <div id="revenueHistoryOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Cycle order</h2>
+  <p class="small" style="margin-bottom:12px">Visits go on the calendar in cycle order — "3 of 12" can't be placed while "2 of 12" is unscheduled, and weeks can't leapfrog. The server blocks it for everyone (admins can override with a logged reason). This lists anything already on the calendar that breaks the rule, so you can unschedule and re-place it.</p>
+  <div class="controls"><button class="btn" onclick="loadOutOfOrder()">Refresh</button></div>
+  <div id="outOfOrderOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Archived clients</h2>
   <p class="small" style="margin-bottom:12px">Clients who've left. Archiving happens automatically when Keap reports their last contract cancelled, and nightly for any client with <b>no active contract</b> who is marked cancelled or inactive or whose 30-day notice has lapsed — a client with a live contract is never archived automatically, whatever their status says. Or by hand from a profile. History is kept; open visits were removed. Reactivate if Keap was wrong or they come back.</p>
   <div id="archivedOut" class="small">Loading…</div></div>
@@ -4017,6 +4064,16 @@ async function loadRevenueHistory(){
       rows.slice(0,30).map(r=>`<tr><td class="mono">${esc(r.date)}</td><td class="num">${fmtMoney(r.total_revenue)}</td><td class="num">${r.active_clients}</td><td class="num">${r.keap_linked_contracts}</td></tr>`).join('') +
       `</table>`;
   }catch(e){ $('#revenueHistoryOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function loadOutOfOrder(){
+  const el = $('#outOfOrderOut'); if(!el) return;
+  try{
+    const rows = await api('GET','/api/admin/out-of-order');
+    el.innerHTML = rows.length ? `<table><tr><th>Client</th><th>Visit</th><th>On calendar</th><th>Coach</th><th>Problem</th><th></th></tr>` +
+      rows.map(r=>`<tr><td>${clientLink(r.client, r.client_id)}</td><td class="mono">${esc(r.cycle)} ${esc(r.program)}</td><td class="mono">wk of ${fmtW(r.cal_week)}</td><td>${esc(coach(r.cal_coach)?.name||'—')}</td><td class="small">${esc(r.message)}</td>
+        <td style="white-space:nowrap"><button class="btn tiny" onclick="jumpToCalendar(${r.id})">Calendar</button> <button class="btn tiny danger" onclick="unscheduleV(${r.id}).then(loadOutOfOrder)">Unschedule</button></td></tr>`).join('') + `</table>`
+      : `<p style="color:var(--ok)">Every placed visit is in cycle order. ✔</p>`;
+  }catch(e){ el.innerHTML = '<p>Could not load.</p>'; }
 }
 async function loadArchivedClients(){
   const el = $('#archivedOut'); if(!el) return;

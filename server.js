@@ -436,6 +436,52 @@ route('DELETE', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, 
   log(user.email, 'visit.delete', { id: v.id, client: v.client, cycle: v.cycle });
   send(res, 200, { ok: true });
 });
+/* ---------- cycle order (Mike, 2026-09-15) ----------
+ * Visits in a cycle lap are placed in order: "3 of 12" can't go on the calendar while
+ * "2 of 12" is still unscheduled, and its week can't leapfrog a neighbour (before a
+ * lower number's week, or after a higher number's). Enforced here for every caller;
+ * admins may pass force:true with a reason for the rare legitimate exception. */
+function cycleLapOf(v){
+  const m = /^(\d+)\s+of\s+(\d+)$/.exec(v.cycle || ''); if(!m || !v.contract_id) return null;
+  const rows = db.prepare('SELECT id, cycle, due, completed, cal_week, scheduled_week FROM visits WHERE contract_id=? AND program=? ORDER BY due, id').all(v.contract_id, v.program);
+  const laps = []; let lap = [], prevK = Infinity;
+  for(const r of rows){
+    const pm = /^(\d+)\s+of\s+(\d+)$/.exec(r.cycle || ''); if(!pm) continue;
+    const k = +pm[1]; if(k <= prevK && lap.length){ laps.push(lap); lap = []; }
+    lap.push({ ...r, k }); prevK = k;
+  }
+  if(lap.length) laps.push(lap);
+  return laps.find(L => L.some(x => x.id === v.id)) || null;
+}
+const weekOfVisit = x => x.completed ? (x.scheduled_week || x.cal_week) : x.cal_week;
+function placementProblem(v, week){
+  const lap = cycleLapOf(v); if(!lap) return null;
+  const me = lap.find(x => x.id === v.id); if(!me) return null;
+  const others = lap.filter(x => x.id !== v.id);
+  const earlierUnscheduled = others.filter(x => x.k < me.k && !x.completed && !x.cal_week);
+  if(earlierUnscheduled.length) return { code: 'earlier_unscheduled', message: `${earlierUnscheduled.map(x => x.cycle).join(' and ')} ${earlierUnscheduled.length===1?'hasn\'t':'haven\'t'} been placed yet — place ${earlierUnscheduled.length===1?'it':'them'} first.`, visits: earlierUnscheduled.map(x => x.id) };
+  if(week){
+    const earlierLater = others.filter(x => x.k < me.k && weekOfVisit(x) && weekOfVisit(x) > week);
+    if(earlierLater.length) return { code: 'before_earlier', message: `${earlierLater[0].cycle} is scheduled for the week of ${earlierLater[0].cal_week || earlierLater[0].scheduled_week}; ${me.cycle} can't go before it.`, visits: earlierLater.map(x => x.id) };
+    const laterEarlier = others.filter(x => x.k > me.k && weekOfVisit(x) && weekOfVisit(x) < week);
+    if(laterEarlier.length) return { code: 'after_later', message: `${laterEarlier[0].cycle} is already scheduled for the week of ${laterEarlier[0].cal_week || laterEarlier[0].scheduled_week}; ${me.cycle} can't go after it.`, visits: laterEarlier.map(x => x.id) };
+  }
+  return null;
+}
+/* Every currently-placed, not-completed visit that breaks the rule — for the admin
+ * review list and the nightly summary. Read-only. */
+function outOfOrderPlacements(){
+  const placed = db.prepare(`SELECT v.*, cl.name AS client_name FROM visits v JOIN clients cl ON cl.id=v.client_id
+    WHERE v.completed=0 AND v.cal_week IS NOT NULL AND v.contract_id IS NOT NULL AND cl.deleted_at IS NULL AND cl.archived_at IS NULL`).all();
+  const out = [];
+  for(const v of placed){
+    const p = placementProblem(v, v.cal_week);
+    if(p) out.push({ id: v.id, client: v.client_name, client_id: v.client_id, contract_id: v.contract_id, cycle: v.cycle, program: v.program, cal_week: v.cal_week, cal_coach: v.cal_coach, team: v.team, code: p.code, message: p.message, related: p.visits });
+  }
+  return out;
+}
+route('GET', /^\/api\/admin\/out-of-order$/, ['admin','lead'], (req, res) => send(res, 200, outOfOrderPlacements()));
+
 route('POST', /^\/api\/visits\/(\d+)\/place$/, ['admin','lead','coach'], (req, res, m, body, user) => {
   const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
   const c = getCoach(body.coach); if(!c) return err(res, 400, 'unknown coach');
@@ -454,6 +500,13 @@ route('POST', /^\/api\/visits\/(\d+)\/place$/, ['admin','lead','coach'], (req, r
   if(!/^\d{4}-\d{2}-\d{2}$/.test(body.week || '')) return err(res, 400, 'bad week');
   body.week = snapMonday(body.week);
   if(!cellFree(body.coach, body.week, v.id)) return err(res, 409, 'That week is no longer open');
+  // Cycle order: enforced for everyone; admin may override with force + reason.
+  const problem = placementProblem(v, body.week);
+  if(problem){
+    const override = user.role === 'admin' && body.force === true;
+    if(!override) return send(res, 409, { error: `Out of order — ${problem.message}`, code: 'out_of_order', problem, canOverride: user.role === 'admin' });
+    log(user.email, 'visit.place_out_of_order_override', { id: v.id, client: v.client, cycle: v.cycle, week: body.week, problem: problem.code, reason: String(body.reason || '').slice(0, 200) });
+  }
   db.prepare('UPDATE visits SET cal_coach=?, cal_week=? WHERE id=?').run(body.coach, body.week, v.id);
   log(user.email, 'visit.place', { id: v.id, client: v.client, coach: body.coach, week: body.week });
   send(res, 200, { ok: true });
@@ -2701,6 +2754,8 @@ async function runNightlyMaintenance(actorEmail){
   catch(e){ summary.holds = { error: String(e && e.message || e) }; }
   try{ summary.archive = archiveCancelledClients(); }
   catch(e){ summary.archive = { error: String(e && e.message || e) }; }
+  try{ summary.outOfOrder = outOfOrderPlacements(); }
+  catch(e){ summary.outOfOrder = { error: String(e && e.message || e) }; }
   try{ summary.health = snapshotClientHealth(); }
   catch(e){ summary.health = { error: String(e && e.message || e) }; }
   try{ summary.backup = await takeBackupAndEmail(actorEmail); }
@@ -2737,6 +2792,7 @@ async function runNightlyMaintenance(actorEmail){
         ? summary.rollingSchedule.perClient.slice(0,15).map(p => `  - ${p.client} [${p.program}]: +${p.created} (${p.visits[0].cycle} due ${p.visits[0].due}${p.created>1 ? ` … ${p.visits[p.visits.length-1].cycle} due ${p.visits[p.visits.length-1].due}` : ''})`)
           .concat(summary.rollingSchedule.perClient.length > 15 ? [`  …and ${summary.rollingSchedule.perClient.length - 15} more`] : [])
         : []),
+      `Out-of-order placements: ${!summary.outOfOrder ? 'n/a' : summary.outOfOrder.error ? 'FAILED — ' + summary.outOfOrder.error : summary.outOfOrder.length ? `${summary.outOfOrder.length} on the calendar (review at Admin → Data → Cycle order): ${summary.outOfOrder.slice(0,8).map(o => `${o.client} ${o.cycle}`).join(', ')}${summary.outOfOrder.length>8?'…':''}` : 'none'}`,
       `Archived: ${!summary.archive ? 'n/a' : summary.archive.error ? 'FAILED — ' + summary.archive.error : summary.archive.archived ? `${summary.archive.archived} cancelled client(s) moved to the archive: ${summary.archive.clients.map(c => `${c.client} — ${c.why}${c.visitsDeleted ? `, ${c.visitsDeleted} open visit${c.visitsDeleted===1?'':'s'} removed` : ''}`).join('; ')}` : 'nothing new'}`,
       `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
       `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
