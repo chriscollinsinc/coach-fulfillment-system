@@ -2135,9 +2135,17 @@ async function loadPending(){
       : `<p class="small">Nothing waiting — you're all caught up.</p>`;
   }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
 }
-function coachOptsFor(team){
-  const list = D.coaches.filter(c=>!team||c.team===team);
-  return `<option value="">— select —</option>` + list.map(c=>`<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`).join('');
+function coachOptsFor(team, placeholder, selectedId){
+  const list = D.coaches.filter(c=>c.active && (!team||c.team===team));
+  return `<option value="">${esc(placeholder || '— select —')}</option>` +
+    list.map(c=>`<option value="${c.id}" data-team="${c.team}" ${selectedId===c.id?'selected':''}>${esc(c.name)} (${c.team})</option>`).join('');
+}
+/* The team select drives which coaches are offered — keep them in step, and hold the
+ * current pick if that coach is on the newly chosen team. */
+function onPendingTeamChange(){
+  const sel = $('#pVisitCoach'); if(!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = coachOptsFor($('#pTeam').value, '— decide later —', keep);
 }
 function assignPendingDlg(id, holdId, succeedsContractId){
   const r = (st.pendingList||[]).find(x=>x.id===id); if(!r) return;
@@ -2159,7 +2167,9 @@ function assignPendingDlg(id, holdId, succeedsContractId){
     <div id="pVisitFields">
       <label>Number of visits</label><input id="pN" type="number" value="${CYCLE_LEN[guessed]||4}">
       <label>First visit due</label><input id="pFirst" type="date" value="${(hm&&hm.weeks[0])||r.start_date||TODAY}">
-      <label>Team</label><select id="pTeam">${teamOpts(hm?hm.team:undefined)}</select>
+      <label>Team</label><select id="pTeam" onchange="onPendingTeamChange()">${teamOpts(pcm&&pcm.team?pcm.team:(hm?hm.team:undefined))}</select>
+      <label>Assigned coach <span class="small" style="font-weight:400;text-transform:none;letter-spacing:0">— optional, but they'll own these visits</span></label>
+      <select id="pVisitCoach">${coachOptsFor(pcm&&pcm.team?pcm.team:(hm?hm.team:undefined), '— decide later —', pcm?pcm.assignedCoachId:null)}</select>
     </div>
     <div id="pCoachFields" style="display:none">
       <label>Assigned coach</label><select id="pCoach" onchange="onPendingCoachChange()">${coachOptsFor()}</select>
@@ -2203,13 +2213,15 @@ async function saveAssignPending(id){
   }
   const n=+$('#pN').value, first=$('#pFirst').value, team=$('#pTeam').value;
   if(!first||!(n>0)||!team){uiAlert('Program visit count, first due date and team are required');return;}
-  const res = await api('POST',`/api/pending-clients/${id}/assign`,{client,program,n,first,team, succeedsContractId: st._pendingSucceeds || undefined});
+  const coachId = (($('#pVisitCoach')||{}).value) || undefined;
+  const res = await api('POST',`/api/pending-clients/${id}/assign`,{client,program,n,first,team, coachId, succeedsContractId: st._pendingSucceeds || undefined});
   const extra = await finishPendingHold();
+  const coachTxt = coachId ? ` · assigned to ${esc((D.coaches.find(c=>c.id===coachId)||{}).name||'coach')}` : '';
   const sx = res && res.succession
     ? ` — replaced the previous contract${res.succession.carried.length?`, ${res.succession.carried.length} booked week(s) carried over`:''}${res.succession.droppedPlaced?`, ${res.succession.droppedPlaced} booked week(s) had no slot in the shorter cycle and were cleared`:''}`
     : ' — contract created';
   st._pendingSucceeds = null;
-  closeDlg(); await refresh(); toast(client+' added'+sx+extra);
+  closeDlg(); await refresh(); toast(client+' added'+sx+coachTxt+extra);
 }
 async function ignorePending(id){
   if(!(await uiConfirm("Ignore this subscription? It won't be added to the LID Inventory.","Ignore"))) return;

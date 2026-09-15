@@ -1148,8 +1148,14 @@ function matchProgramChangeForPending(pc){
     ORDER BY COALESCE(start_date,'') DESC, id DESC LIMIT 1`).get(cl.id);
   if(!prev) return null;
   const open = db.prepare('SELECT id, cycle, due, cal_week, cal_coach FROM visits WHERE contract_id=? AND completed=0 ORDER BY COALESCE(cal_week, due), id').all(prev.id);
+  // Carry the dealership's current coach + team so the assign form can default to the
+  // people already serving them — a program change rarely changes who visits.
+  const teamRow = db.prepare("SELECT team FROM visits WHERE contract_id=? AND team IS NOT NULL AND team<>'' ORDER BY id DESC LIMIT 1").get(prev.id);
+  const coachRow = cl.assigned_coach_id ? db.prepare('SELECT id, name, team FROM coaches WHERE id=?').get(cl.assigned_coach_id) : null;
   return {
     clientId: cl.id, clientName: cl.name, archived: !!cl.archived_at,
+    assignedCoachId: coachRow ? coachRow.id : null, assignedCoachName: coachRow ? coachRow.name : null,
+    team: (teamRow && teamRow.team) || (coachRow && coachRow.team) || null,
     contractId: prev.id, program: prev.program, visits: prev.visits, startDate: prev.start_date,
     keapSubscriptionId: prev.keap_subscription_id || null, price: prev.price,
     completedVisits: db.prepare('SELECT COUNT(*) c FROM visits WHERE contract_id=? AND completed=1').get(prev.id).c,
