@@ -2111,6 +2111,13 @@ async function loadPending(){
     st.pendingList = rows;
     $('#pendingOut').innerHTML = rows.length ? `<div style="overflow-x:auto"><table><tr><th>Company</th><th>Contact</th><th class="num">Amount</th><th>Billing</th><th>Started</th><th style="white-space:nowrap">Actions</th></tr>` +
       rows.map(r=>{
+        const pcm = r.program_change_match;
+        const pcmRow = pcm ? `<tr><td colspan="6" style="background:#e9f0fb;border-left:4px solid #1d4f91;padding:8px 12px">
+          <b>Looks like a program change for ${esc(pcm.clientName)}</b> — their ${esc(pcm.program)} contract${pcm.keapSubscriptionId?` (Keap ${esc(pcm.keapSubscriptionId)})`:''} is cancelled,
+          with ${pcm.completedVisits} completed visit(s)${pcm.placed.length?`, ${pcm.placed.length} still on a calendar`:''}${pcm.unplaced?` and ${pcm.unplaced} unscheduled`:''}.
+          Assigning it as the replacement keeps that history, carries the booked week(s) into the new cycle${pcm.archived?', and brings the client back out of the archive':''}.
+          <button class="btn tiny primary" style="margin-left:8px" onclick="assignPendingDlg(${r.id}, null, ${pcm.contractId})">Program change</button>
+        </td></tr>` : '';
         const hm = r.hold_match;
         const matchRow = hm ? `<tr><td colspan="6" style="background:#fdf6e3;border-left:4px solid var(--gold);padding:8px 12px">
           <b>Looks like your soft-pencil hold:</b> "${esc(hm.name)}" with ${esc(hm.coachName)}${hm.team?` (Team ${esc(hm.team)})`:''} —
@@ -2123,7 +2130,7 @@ async function loadPending(){
         <td class="small">${esc(r.start_date||'—')}${future?' <span class="pill p-fut">upcoming</span>':''}</td>
         <td style="white-space:nowrap"><button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
         <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button>
-        ${D.user.role==='admin'?`<button class="btn tiny" onclick="debugPendingClient(${r.id})">Debug</button>`:''}</td></tr>` + matchRow;
+        ${D.user.role==='admin'?`<button class="btn tiny" onclick="debugPendingClient(${r.id})">Debug</button>`:''}</td></tr>` + pcmRow + matchRow;
       }).join('') + `</table></div>`
       : `<p class="small">Nothing waiting — you're all caught up.</p>`;
   }catch(e){ $('#pendingOut').innerHTML = `<p class="small">Could not load.</p>`; }
@@ -2132,12 +2139,20 @@ function coachOptsFor(team){
   const list = D.coaches.filter(c=>!team||c.team===team);
   return `<option value="">— select —</option>` + list.map(c=>`<option value="${c.id}" data-team="${c.team}">${esc(c.name)} (${c.team})</option>`).join('');
 }
-function assignPendingDlg(id, holdId){
+function assignPendingDlg(id, holdId, succeedsContractId){
   const r = (st.pendingList||[]).find(x=>x.id===id); if(!r) return;
   const hm = holdId && r.hold_match && r.hold_match.id===holdId ? r.hold_match : null;
+  const pcm = succeedsContractId && r.program_change_match && r.program_change_match.contractId===succeedsContractId ? r.program_change_match : null;
   st._pendingHoldId = hm ? hm.id : null;
+  st._pendingSucceeds = pcm ? pcm.contractId : null;
   const guessed = hm && PROGRAMS.includes(hm.program) ? hm.program : guessProgram(r.billing_cycle, r.billing_frequency);
-  openDlg(`<h3>Assign — ${esc(r.company_name||'(unknown)')}</h3>
+  openDlg(`<h3>${pcm ? 'Program change' : 'Assign'} — ${esc(r.company_name||'(unknown)')}</h3>
+    ${pcm ? `<div class="small" style="background:#e9f0fb;padding:8px 10px;border-left:4px solid #1d4f91;margin-bottom:8px">
+      Replaces <b>${esc(pcm.program)}</b> for <b>${esc(pcm.clientName)}</b>. Their ${pcm.completedVisits} completed visit(s) and notes stay on the old contract.
+      ${pcm.placed.length ? `The ${pcm.placed.length} week(s) already booked (${pcm.placed.map(v=>fmtW(v.cal_week)).join(', ')}) carry into the new cycle in order.` : ''}
+      ${pcm.unplaced ? `${pcm.unplaced} unscheduled visit(s) on the old contract are removed.` : ''}
+      ${pcm.archived ? 'The client comes back out of the archive.' : ''}
+    </div>` : ''}
     ${hm ? `<p class="small" style="background:#fdf6e3;padding:6px 10px;border-left:4px solid var(--gold)">Pre-filled from your hold "${esc(hm.name)}" — creating this contract will release the ${hm.weeks.length} reserved week(s) on ${esc(hm.coachName)}'s calendar so you can place the real visits there.</p>` : ''}
     <label>Client name</label><input id="pClient" value="${esc(r.company_name||r.contact_name||'')}">
     <label>Program</label><select id="pProg" onchange="onPendingProgramChange()">${PROGRAMS.map(p=>`<option ${p===guessed?'selected':''}>${p}</option>`).join('')}</select>
@@ -2181,16 +2196,20 @@ async function saveAssignPending(id){
     const coachId = $('#pCoach').value;
     if(!coachId){ uiAlert('Pick a coach'); return; }
     const coach = D.coaches.find(c=>c.id===coachId);
-    await api('POST',`/api/pending-clients/${id}/assign`,{client, program, n:0, first:null, team:coach.team, coachId});
+    await api('POST',`/api/pending-clients/${id}/assign`,{client, program, n:0, first:null, team:coach.team, coachId, succeedsContractId: st._pendingSucceeds || undefined});
     const extra = await finishPendingHold();
     closeDlg(); await refresh(); toast(client+' added — Coaching Only, assigned to '+coach.name+extra);
     return;
   }
   const n=+$('#pN').value, first=$('#pFirst').value, team=$('#pTeam').value;
   if(!first||!(n>0)||!team){uiAlert('Program visit count, first due date and team are required');return;}
-  await api('POST',`/api/pending-clients/${id}/assign`,{client,program,n,first,team});
+  const res = await api('POST',`/api/pending-clients/${id}/assign`,{client,program,n,first,team, succeedsContractId: st._pendingSucceeds || undefined});
   const extra = await finishPendingHold();
-  closeDlg(); await refresh(); toast(client+' added — contract created'+extra);
+  const sx = res && res.succession
+    ? ` — replaced the previous contract${res.succession.carried.length?`, ${res.succession.carried.length} booked week(s) carried over`:''}${res.succession.droppedPlaced?`, ${res.succession.droppedPlaced} booked week(s) had no slot in the shorter cycle and were cleared`:''}`
+    : ' — contract created';
+  st._pendingSucceeds = null;
+  closeDlg(); await refresh(); toast(client+' added'+sx+extra);
 }
 async function ignorePending(id){
   if(!(await uiConfirm("Ignore this subscription? It won't be added to the LID Inventory.","Ignore"))) return;
@@ -2507,6 +2526,16 @@ async function programChangeApply(contractId){
     await refresh();
   }catch(e){ uiAlert(e.message||'Change failed'); }
 }
+/* A program change is a new contract that took over from a cancelled one, so show the
+ * link both ways — otherwise a client's contracts read as unrelated rows. */
+function contractLineage(c, all){
+  const prev = c.succeeds_contract_id ? (all||[]).find(x=>x.id===c.succeeds_contract_id) : null;
+  const next = (all||[]).find(x=>x.succeeds_contract_id===c.id);
+  const bits = [];
+  if(prev) bits.push(`replaced ${esc(prev.program||'a previous contract')}${prev.start_date?` from ${fmt(prev.start_date)}`:''}`);
+  if(next) bits.push(`replaced by ${esc(next.program||'a later contract')}${next.start_date?` from ${fmt(next.start_date)}`:''}`);
+  return bits.length ? `<div class="small" style="color:var(--muted);margin-top:2px">↳ ${bits.join(' · ')}</div>` : '';
+}
 function cadenceBanner(contracts){
   const flagged = (contracts||[]).filter(c => c.cadence_flag && c.status === 'active');
   if(!flagged.length || D.user.role !== 'admin') return '';
@@ -2818,7 +2847,7 @@ function clientProfileView(data, notes){
   }
 
   html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
-    liveContracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Change program / cadence (with schedule follow-through)" onclick="programChangeDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
+    liveContracts.map(c=>`<tr><td>${esc(c.program||'—')}${contractLineage(c, contracts)}${D.user.role==='admin'?` <button class="btn tiny" title="Change program / cadence (with schedule follow-through)" onclick="programChangeDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
       <td class="num">${c.price?'$'+c.price:'—'}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">completed</span>'}</td>
       <td class="small">${esc(c.source||'—')}</td>

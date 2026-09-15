@@ -148,6 +148,14 @@ ensureColumn('contracts', 'merged_at', 'TEXT');
  * Never written back to Keap — the LID stays on this one parent contract; the store
  * is purely an in-app scheduling label (see visits.store). */
 ensureColumn('contracts', 'stores', 'TEXT');
+/* Program change (2026-09-15): CCI cancels the old Keap subscription and creates a new
+ * one rather than editing the existing contract, so each cadence change is a NEW contract
+ * row. This points the replacement at the contract it took over from, so a client's
+ * history reads as one continuous story instead of unrelated contracts. */
+ensureColumn('contracts', 'succeeds_contract_id', 'INTEGER');
+/* When a contract's Keap subscription lapsed, so the nightly archive can tell a churn
+ * from a program change still in flight (the replacement is uploaded the same day). */
+ensureColumn('contracts', 'cancelled_at', 'TEXT');
 ensureColumn('clients', 'assigned_coach_id', 'TEXT');
 /* For cases like Castle (one Keap invoice covering multiple separately-visited
    locations): the linked client's own contract price stays $0, and this field

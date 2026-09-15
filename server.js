@@ -1125,6 +1125,60 @@ route('PATCH', /^\/api\/users\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
    to convert the hold instead of making someone connect the dots by memory.
    Token-overlap on normalized names: every meaningful word of the shorter name
    appearing in the longer one counts as a match. */
+/* ---------- program change / successor contracts (Mike, 2026-09-15) ----------
+ * A cadence change is never an edit to a contract: CCI cancels the Keap subscription and
+ * uploads a new one the same day, so the app sees a cancelled contract and then a brand
+ * new subscription in Unassigned Clients. Left alone that reads as a churn followed by a
+ * stranger. This matches the incoming subscription back to the dealership it belongs to
+ * so it can be assigned as a SUCCESSOR: the old contract keeps its history, the new one
+ * records what it took over from, and the coach keeps the weeks they had already booked. */
+function matchProgramChangeForPending(pc){
+  let cl = null;
+  if(pc.keap_company_id) cl = db.prepare('SELECT * FROM clients WHERE keap_id=? AND deleted_at IS NULL').get(String(pc.keap_company_id));
+  if(!cl){
+    const key = normName(pc.company_name || '');
+    if(key) cl = db.prepare('SELECT * FROM clients WHERE norm=? AND deleted_at IS NULL').get(key);
+  }
+  if(!cl) return null;
+  // Only a dealership with nothing live right now — if they still have an active
+  // contract this is an additional subscription, not a replacement.
+  const active = db.prepare("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'").get(cl.id).c;
+  if(active) return null;
+  const prev = db.prepare(`SELECT * FROM contracts WHERE client_id=? AND status='cancelled'
+    ORDER BY COALESCE(start_date,'') DESC, id DESC LIMIT 1`).get(cl.id);
+  if(!prev) return null;
+  const open = db.prepare('SELECT id, cycle, due, cal_week, cal_coach FROM visits WHERE contract_id=? AND completed=0 ORDER BY COALESCE(cal_week, due), id').all(prev.id);
+  return {
+    clientId: cl.id, clientName: cl.name, archived: !!cl.archived_at,
+    contractId: prev.id, program: prev.program, visits: prev.visits, startDate: prev.start_date,
+    keapSubscriptionId: prev.keap_subscription_id || null, price: prev.price,
+    completedVisits: db.prepare('SELECT COUNT(*) c FROM visits WHERE contract_id=? AND completed=1').get(prev.id).c,
+    placed: open.filter(v => v.cal_week).map(v => ({ id: v.id, cycle: v.cycle, cal_week: v.cal_week, cal_coach: v.cal_coach })),
+    unplaced: open.filter(v => !v.cal_week).length,
+  };
+}
+/* Hand the old contract's open work over to its replacement. Completed visits are never
+ * touched — they stay on the old contract, which is the whole point of keeping it.
+ * Placed visits hand their week to the new cycle's visits in order, so a coach who has
+ * already booked Nov 9 keeps Nov 9; it is simply "1 of 4 Quarterly" now instead of
+ * "8 of 12 Monthly". Anything left over (a downgrade has fewer slots than it had booked)
+ * is removed and reported. */
+function migrateToSuccessorContract(oldContractId, newContractId, actorEmail){
+  const open = db.prepare('SELECT * FROM visits WHERE contract_id=? AND completed=0 ORDER BY COALESCE(cal_week, due), id').all(oldContractId);
+  const placed = open.filter(v => v.cal_week);
+  const fresh = db.prepare('SELECT * FROM visits WHERE contract_id=? AND completed=0 ORDER BY due, id').all(newContractId);
+  const carried = [];
+  const take = db.prepare('UPDATE visits SET cal_week=?, cal_coach=?, team=COALESCE(?, team) WHERE id=?');
+  for(let i = 0; i < Math.min(placed.length, fresh.length); i++){
+    take.run(placed[i].cal_week, placed[i].cal_coach, placed[i].team || null, fresh[i].id);
+    carried.push({ week: placed[i].cal_week, from: placed[i].cycle, to: fresh[i].cycle });
+  }
+  const droppedPlaced = Math.max(0, placed.length - fresh.length);
+  const del = db.prepare('DELETE FROM visits WHERE id=?');
+  for(const v of open) del.run(v.id);
+  log(actorEmail || 'system', 'contract.succession', { oldContractId, newContractId, carried: carried.length, droppedPlaced, removedUnplaced: open.length - placed.length });
+  return { carried, droppedPlaced, removedUnplaced: open.length - placed.length };
+}
 function matchHoldForName(name){
   const target = normName(name);
   if(!target) return null;
@@ -1150,7 +1204,9 @@ function matchHoldForName(name){
 }
 route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, user) => {
   const rows = db.prepare("SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all();
-  send(res, 200, rows.map(r => ({ ...r, hold_match: matchHoldForName(r.company_name || r.contact_name || '') })));
+  send(res, 200, rows.map(r => ({ ...r,
+    hold_match: matchHoldForName(r.company_name || r.contact_name || ''),
+    program_change_match: matchProgramChangeForPending(r) })));
 });
 /* Diagnostic for "(unknown)" rows — re-fetches this pending item's subscription and
  * contact straight from Keap right now and returns the raw JSON, so a field-name
@@ -1338,16 +1394,28 @@ route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req,
   if(!isCoachingOnly && (!first || !(n > 0))) return err(res, 400, 'program visit count and first due date required');
   if(!canEditTeam(user, team)) return err(res, 403, 'You can only assign to your own team');
   if(coachId && !getCoach(coachId)) return err(res, 400, 'unknown coach');
+  // Successor: this subscription replaces a cancelled contract for the same dealership.
+  // Validated server-side rather than trusted from the form — it must be a cancelled
+  // contract belonging to the client this assignment resolves to.
+  const succeedsId = body.succeedsContractId ? +body.succeedsContractId : null;
   const { clientId, contractId, ids } = createContractAndVisits({
     clientName: client, program, n: isCoachingOnly ? 0 : n, first: first || null, team, source: 'keap',
     keapSubscriptionId: pc.keap_subscription_id, price: pc.billing_amount, keapCompanyId: pc.keap_company_id, company_id: pc.keap_company_id,
     actorEmail: user.email,
   });
+  let succession = null;
+  if(succeedsId){
+    const prev = db.prepare("SELECT * FROM contracts WHERE id=? AND client_id=? AND status='cancelled'").get(succeedsId, clientId);
+    if(prev){
+      db.prepare('UPDATE contracts SET succeeds_contract_id=? WHERE id=?').run(prev.id, contractId);
+      succession = migrateToSuccessorContract(prev.id, contractId, user.email);
+    }
+  }
   if(coachId) db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(coachId, clientId);
   db.prepare("UPDATE pending_clients SET status='assigned', resolved_client_id=?, resolved_contract_id=? WHERE id=?")
     .run(clientId, contractId, pc.id);
-  log(user.email, 'pendingclient.assign', { pendingId: pc.id, client, team, contractId, coachId });
-  send(res, 200, { ok: true, clientId, contractId, ids });
+  log(user.email, 'pendingclient.assign', { pendingId: pc.id, client, team, contractId, coachId, succeedsContractId: succeedsId || undefined });
+  send(res, 200, { ok: true, clientId, contractId, ids, succession });
 });
 route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req, res, m, body, user) => {
   const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
@@ -2815,7 +2883,7 @@ async function runNightlyMaintenance(actorEmail){
           .concat(summary.rollingSchedule.perClient.length > 15 ? [`  …and ${summary.rollingSchedule.perClient.length - 15} more`] : [])
         : []),
       `Out-of-order placements: ${!summary.outOfOrder ? 'n/a' : summary.outOfOrder.error ? 'FAILED — ' + summary.outOfOrder.error : summary.outOfOrder.length ? `${summary.outOfOrder.length} on the calendar (review at Admin → Data → Cycle order): ${summary.outOfOrder.slice(0,8).map(o => `${o.client} ${o.cycle}`).join(', ')}${summary.outOfOrder.length>8?'…':''}` : 'none'}`,
-      `Archived: ${!summary.archive ? 'n/a' : summary.archive.error ? 'FAILED — ' + summary.archive.error : summary.archive.archived ? `${summary.archive.archived} cancelled client(s) moved to the archive: ${summary.archive.clients.map(c => `${c.client} — ${c.why}${c.visitsDeleted ? `, ${c.visitsDeleted} open visit${c.visitsDeleted===1?'':'s'} removed` : ''}`).join('; ')}` : 'nothing new'}`,
+      `Archived: ${!summary.archive ? 'n/a' : summary.archive.error ? 'FAILED — ' + summary.archive.error : summary.archive.archived ? `${summary.archive.archived} cancelled client(s) moved to the archive: ${summary.archive.clients.map(c => `${c.client} — ${c.why}${c.visitsDeleted ? `, ${c.visitsDeleted} open visit${c.visitsDeleted===1?'':'s'} removed` : ''}`).join('; ')}` : 'nothing new'}${summary.archive.held && summary.archive.held.length ? ` | held back: ${summary.archive.held.map(h => `${h.client} (${h.why})`).join('; ')}` : ''}`,
       `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
       `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
       `Database backup: ${summary.backup.ok ? `sent (${Math.round((summary.backup.sizeBytes||0)/1024)} KB)` : 'FAILED — ' + (summary.backup.error || 'see results')}`,
@@ -3173,6 +3241,7 @@ function reactivateClient(cl, actor){
  * 30-day notice that has lapsed. Visit counts play no part (a Coaching Only client has
  * no visits by design and must never be archived for that). A client with an active
  * contract is never touched here, whatever their status field says. */
+const ARCHIVE_GRACE_DAYS = 3; // a program change is same-day; this covers a missed webhook too
 function archiveCancelledClients(){
   const cutoff = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
   const rows = db.prepare(`
@@ -3180,13 +3249,31 @@ function archiveCancelledClients(){
     WHERE cl.deleted_at IS NULL AND cl.archived_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active')
       AND (cl.status IN ('cancelled','inactive') OR (cl.notice_given_date IS NOT NULL AND cl.notice_given_date <= ?))`).all(cutoff);
-  const done = [];
+  // A replacement subscription sitting unassigned means this dealership is mid program
+  // change, not gone — never archive them out from under it.
+  const pending = db.prepare("SELECT keap_company_id, company_name FROM pending_clients WHERE status='pending'").all();
+  const pendingCompanies = new Set(pending.map(p => String(p.keap_company_id || '')).filter(Boolean));
+  const pendingNames = new Set(pending.map(p => normName(p.company_name || '')).filter(Boolean));
+  const graceIso = new Date(Date.now() - ARCHIVE_GRACE_DAYS * 864e5).toISOString();
+  const done = [], held = [];
   for(const cl of rows){
+    if((cl.keap_id && pendingCompanies.has(String(cl.keap_id))) || pendingNames.has(cl.norm)){
+      held.push({ client: cl.name, why: 'a replacement subscription is waiting in Unassigned Clients' });
+      continue;
+    }
+    // Only ever hold back a FRESH cancellation — a NULL cancelled_at is old data and
+    // must not keep the backlog alive forever.
+    const recent = db.prepare(`SELECT 1 FROM contracts WHERE client_id=? AND status='cancelled'
+      AND cancelled_at IS NOT NULL AND cancelled_at > ? LIMIT 1`).get(cl.id, graceIso);
+    if(recent){
+      held.push({ client: cl.name, why: `cancelled in the last ${ARCHIVE_GRACE_DAYS} days — waiting to see if a replacement arrives` });
+      continue;
+    }
     const why = cl.status === 'cancelled' ? 'client cancelled' : cl.status === 'inactive' ? 'client inactive' : `30-day notice given ${cl.notice_given_date} has lapsed`;
     const r = archiveClient(cl, `Nightly: ${why}, no active contract`, 'system.nightly');
     done.push({ client: cl.name, why, visitsDeleted: r.visitsDeleted });
   }
-  return { archived: done.length, clients: done };
+  return { archived: done.length, clients: done, held };
 }
 route('POST', /^\/api\/clients\/(\d+)\/archive$/, ['admin','lead'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
@@ -3829,7 +3916,8 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
   let statusChanged = false, priceChanged = false, dateChanged = false;
   const newStatus = stillActive ? 'active' : 'cancelled';
   if(contract.status !== newStatus){
-    db.prepare('UPDATE contracts SET status=? WHERE id=?').run(newStatus, contract.id);
+    db.prepare('UPDATE contracts SET status=?, cancelled_at=? WHERE id=?')
+      .run(newStatus, newStatus === 'cancelled' ? new Date().toISOString() : null, contract.id);
     log(source, 'contract.status', { contractId: contract.id, subId, status: newStatus });
     statusChanged = true;
   }
@@ -3857,10 +3945,12 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
       db.prepare('UPDATE clients SET status=? WHERE id=?').run(newClientStatus, client.id);
       log(source, 'client.status', { clientId: client.id, name: client.name, status: newClientStatus });
     }
-    // Keap-first archive: last contract cancelled → the client leaves the working
-    // surfaces tonight (Admin → Data → Recently archived lists it, with Reactivate).
-    if(!anyActive && !client.archived_at) archiveClient({ ...client, status: newClientStatus }, `Keap: subscription ${subId} cancelled`, source);
-    else if(anyActive && client.archived_at) reactivateClient(client, source);
+    // Deliberately NOT archived here (2026-09-15): a cadence change cancels the old
+    // subscription and uploads a new one the same day, so at this instant a downgrade
+    // and a churn look identical. Archiving is left to the nightly job, which by then
+    // can see whether a replacement arrived. Going the other way is safe immediately —
+    // a contract coming back to life should un-hide the client at once.
+    if(anyActive && client.archived_at) reactivateClient(client, source);
   }
   // Note: we deliberately do NOT auto-delete future scheduled visits on churn — a lead
   // reviews the Inventory screen (now flagged via the client's cancelled status) and
