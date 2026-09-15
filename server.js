@@ -540,13 +540,15 @@ route('POST', /^\/api\/visits\/(\d+)\/complete$/, ['admin','lead','coach'], (req
   // body for search + backward compat; plus the commitment loop — new action items this
   // visit created, and prior open ones the coach checked off as done.
   if(v.client_id && body){
-    const noteDate = new Date().toISOString().slice(0,10), nowTs = new Date().toISOString();
-    const wins=String(body.wins||'').trim(), issues=String(body.issues||'').trim(), focus=String(body.focus||'').trim(), free=String(body.note||'').trim();
-    const parts=[]; if(wins)parts.push('Wins: '+wins); if(issues)parts.push('Issues: '+issues); if(focus)parts.push('Focus next: '+focus); if(free)parts.push(free);
-    if(parts.length){
-      db.prepare(`INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,wins,issues,focus,visit_id,created)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(v.client_id, noteDate, 'LID', user.email, user.name, parts.join('\n'), wins||null, issues||null, focus||null, v.id, nowTs);
+    const nowTs = new Date().toISOString();
+    // Visit notes live ON the visit row (that's what Visit Notes, 'You owe a note' and the
+    // carousel read). One Complete call saves them — no separate Save step needed. The
+    // legacy 'LID' client_notes copy is no longer written (type retired 2026-09-14).
+    const wins=String(body.wins||'').trim(), issues=String(body.issues||'').trim(), focus=String(body.focus||'').trim();
+    const commitsText = Array.isArray(body.commitments) ? body.commitments.map(s=>String(s||'').trim()).filter(Boolean).join('\n') : String(body.notes_commitments||'').trim();
+    if(wins || issues || focus || commitsText || body.wins !== undefined){
+      db.prepare('UPDATE visits SET notes_wins=?, notes_issues=?, notes_focus=?, notes_commitments=? WHERE id=?')
+        .run(wins||null, issues||null, focus||null, commitsText||null, v.id);
     }
     const resolved = Array.isArray(body.resolvedCommitmentIds) ? body.resolvedCommitmentIds.map(Number).filter(Boolean) : [];
     if(resolved.length){

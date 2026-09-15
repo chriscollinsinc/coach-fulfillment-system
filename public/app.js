@@ -39,330 +39,163 @@ function mondaysRange(fromIso,toIso){ const out=[]; let w=mondayOf(new Date(from
 /* ========== CONTRACT/LID DETAIL MODAL ========== */
 
 /* Opens the full-screen modal with visits + notes */
+/* ---------- Visit modal (complete a visit / edit its notes) ----------
+ * One screen, one action: everything typed here is saved by "Complete visit" (or by
+ * "Save draft" if the visit isn't happening yet). Left: what this visit is, where it sits
+ * in the cycle, what the client promised last time (check off what got done), and last
+ * visit's notes for reference. Right: the four note fields, each dictatable. */
 async function openVisitModal(id) {
   const v = D.visits.find(x => x.id === id);
   if (!v) return;
-
-  // Render modal shell
   const modal = document.createElement('div');
   modal.id = 'visitModal';
-  modal.style.cssText = `
-    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-    background: rgba(0,0,0,0.5); display: flex; align-items: center;
-    justify-content: center; z-index: 10000; padding: 20px;
-  `;
-
-  modal.innerHTML = `
-    <div style="width: 1400px; height: 840px; background: #fff; border-radius: 12px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3); display: flex; flex-direction: column;
-                overflow: hidden;">
-
-      <!-- HEADER -->
-      <div style="padding: 24px 32px; border-bottom: 2px solid #f0f0f0; background: #fafafa;
-                  flex-shrink: 0;">
-        <div style="display: flex; align-items: center; justify-content: space-between;">
-          <div>
-            <div style="font-size: 22px; font-weight: 700; color: #1a1a1a; margin-bottom: 8px;">
-              ${esc(v.client)}
-            </div>
-            <div style="font-size: 13px; color: #666;">
-              ${esc(v.program)} · Team ${esc(v.team || '?')} · 
-              ${getStatusLabel(v)}${v.cal_week ? ` · Scheduled ${fmtFull(v.cal_week)}` : ''}
-            </div>
-          </div>
-          <button onclick="closeVisitModal()" style="background: none; border: none; font-size: 28px;
-                  cursor: pointer; color: #999; padding: 0; width: 40px; height: 40px;
-                  display: flex; align-items: center; justify-content: center; hover: color: #333;">×</button>
-        </div>
+  modal.className = 'vm-backdrop';
+  modal.innerHTML = `<div class="vm">
+    <div class="vm-head">
+      <div style="flex:1;min-width:0">
+        <div class="vm-title">${esc(v.client)}</div>
+        <div class="vm-chips" id="vmChips"></div>
       </div>
-
-      <div style="display: flex; flex: 1; overflow: hidden;">
-
-        <!-- LEFT SIDEBAR: FIXED INFO & CURRENT VISIT -->
-        <div style="width: 320px; border-right: 1px solid #e5e5e5; background: #f9f9f9;
-                    display: flex; flex-direction: column; overflow: hidden;">
-          
-          <!-- Current Visit Quick Info (Fixed) -->
-          <div style="padding: 20px; border-bottom: 1px solid #e5e5e5; flex-shrink: 0;">
-            <div style="font-size: 11px; font-weight: 700; text-transform: uppercase;
-                        color: #999; margin-bottom: 12px;">Current Visit</div>
-            <div style="font-size: 13px; font-weight: 600; color: #1a1a1a; margin-bottom: 8px;">
-              ${v.cal_week ? fmtFull(v.cal_week) : 'Needs scheduling'}
-            </div>
-            <div style="font-size: 12px; color: #666; margin-bottom: 12px;">
-              Coach: ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}
-            </div>
-            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-              ${v.completed ? 
-                `<div style="padding: 6px 12px; font-size: 11px; font-weight: 600;
-                        background: #2e7d32; color: #fff; border-radius: 4px;">
-                  ✓ Completed</div>` :
-                `<button onclick="completeVisit(${v.id})" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
-                        border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
-                        cursor: pointer;">Complete</button>`}
-              ${!v.cal_coach && !v.completed ? `<button onclick="assignClientCoachDlg('${esc(v.client).replace(/'/g, "\\'")}')" style="padding: 6px 12px; font-size: 11px; font-weight: 600;
-                        border: 1px solid #1d4f91; background: #1d4f91; color: #fff; border-radius: 4px;
-                        cursor: pointer;">Assign</button>` : ''}
-            </div>
-          </div>
-
-          <!-- Visits List (Scrollable) -->
-          <div id="vmVisitsPanel" style="flex: 1; overflow-y: auto; padding: 16px; font-size: 12px;">
-            <!-- filled by renderVisitsList -->
-          </div>
-        </div>
-
-        <!-- RIGHT PANEL: NOTES (Scrollable) -->
-        <div id="vmNotesPanel" style="flex: 1; overflow-y: auto; padding: 32px 36px;
-                  background: #fff; display: flex; flex-direction: column;">
-          <!-- filled by renderNotesPanel -->
-        </div>
-
-      </div>
-
-      <!-- FOOTER -->
-      <div style="padding: 20px 32px; border-top: 1px solid #e5e5e5; background: #fafafa;
-                  display: flex; justify-content: flex-end; gap: 12px; flex-shrink: 0;">
-        <button onclick="closeVisitModal()" style="padding: 10px 24px; font-size: 13px; font-weight: 600;
-                border: 1px solid #ddd; background: #fff; color: #333; border-radius: 4px;
-                cursor: pointer;">Cancel</button>
-        <button onclick="saveVisitNotes(${v.id})" style="padding: 10px 24px; font-size: 13px; font-weight: 600;
-                border: none; background: #1d4f91; color: #fff; border-radius: 4px;
-                cursor: pointer;">Save notes</button>
-      </div>
+      <button class="vm-x" onclick="closeVisitModal()" title="Close">×</button>
     </div>
-  `;
-
+    <div class="vm-body">
+      <aside class="vm-side" id="vmSide"><p class="small">Loading…</p></aside>
+      <section class="vm-main" id="vmNotesPanel"></section>
+    </div>
+    <div class="vm-foot">
+      <div class="small" id="vmFootNote" style="flex:1"></div>
+      <button class="btn" onclick="closeVisitModal()">Cancel</button>
+      ${v.completed
+        ? `<button class="btn primary" onclick="saveVisitNotes(${v.id})">Save notes</button>`
+        : `<button class="btn" onclick="saveVisitNotes(${v.id}, true)" title="Keep what you've typed without marking the visit done">Save draft</button>
+           <button class="btn primary" onclick="completeVisitFromModal(${v.id})">✓ Complete visit</button>`}
+    </div>
+  </div>`;
   document.body.appendChild(modal);
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) closeVisitModal();
-  });
-
-  // Load data
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeVisitModal(); });
+  document.addEventListener('keydown', vmEsc);
   await loadVisitModalData(id);
 }
-
+function vmEsc(e){ if(e.key === 'Escape') closeVisitModal(); }
 function closeVisitModal() {
+  if(window._rec){ try{ window._rec.stop(); }catch(e){} window._rec = null; }
+  document.removeEventListener('keydown', vmEsc);
   const modal = document.getElementById('visitModal');
   if (modal) modal.remove();
 }
-
-function togglePrevCycle() {
-  const list = document.getElementById('prevCycleList');
-  const arrow = document.getElementById('prevCycleArrow');
-  if (list.style.display === 'none') {
-    list.style.display = 'block';
-    arrow.style.transform = 'rotate(90deg)';
-  } else {
-    list.style.display = 'none';
-    arrow.style.transform = 'rotate(0deg)';
-  }
+function vmPayload(){
+  const val = id => (($('#'+id)||{}).value || '').trim();
+  const commitments = val('visit_commitments').split('\n').map(s=>s.replace(/^[-•*]\s*/,'').trim()).filter(Boolean);
+  const resolved = [...document.querySelectorAll('.vm-commit:checked')].map(el => +el.value);
+  return { wins: val('visit_wins'), issues: val('visit_issues'), focus: val('visit_focus'), commitments, resolvedCommitmentIds: resolved,
+    completed_date: val('visit_date') || undefined, store: ($('#visit_store') ? $('#visit_store').value : undefined) };
 }
-
-async function completeVisit(id) {
-  const r = await api('POST', `/api/visits/${id}/complete`, {});
-  if(r && r.ok) {
-    toast('Visit marked complete');
-    await refresh();
-    closeVisitModal();
-  }
+async function saveVisitNotes(id, draft) {
+  const p = vmPayload();
+  try{
+    await api('PATCH', `/api/visits/${id}`, { notes_wins: p.wins, notes_issues: p.issues, notes_focus: p.focus, notes_commitments: p.commitments.join('\n') });
+    toast(draft ? 'Draft saved — visit still open' : 'Notes saved');
+    closeVisitModal(); await refresh();
+  }catch(e){ uiAlert(e.message || 'Could not save'); }
 }
-
-async function saveVisitNotes(id) {
-  const notes = {
-    notes_wins: document.getElementById('visit_wins')?.value || '',
-    notes_issues: document.getElementById('visit_issues')?.value || '',
-    notes_focus: document.getElementById('visit_focus')?.value || '',
-    notes_commitments: document.getElementById('visit_commitments')?.value || ''
-  };
-  
-  const r = await api('PATCH', `/api/visits/${id}`, notes);
-  if(r) {
-    toast('Notes saved');
-    await refresh();
-    closeVisitModal();
+async function completeVisitFromModal(id) {
+  const p = vmPayload();
+  if(!p.wins && !p.issues && !p.focus){
+    if(!(await uiConfirm('No notes yet — complete the visit anyway? It will show up under "You owe a note" until you add them.', 'Complete without notes'))) return;
   }
+  try{
+    const r = await api('POST', `/api/visits/${id}/complete`, p);
+    if(r && r.ok){ toast('Visit completed'); closeVisitModal(); await refresh(); }
+  }catch(e){ uiAlert(e.message || 'Could not complete'); }
 }
-
 async function loadVisitModalData(visitId) {
   try {
-    // Fetch visit details, cycle visits, and previous visit notes
-    const [visitData, cycleData, prevNotes] = await Promise.all([
-      api('GET', `/api/visits/${visitId}`),
-      api('GET', `/api/visits/${visitId}/cycle`),
-      api('GET', `/api/visits/${visitId}/prep`),
+    const [visit, cycleData, prep] = await Promise.all([
+      api('GET', `/api/visits/${visitId}`), api('GET', `/api/visits/${visitId}/cycle`), api('GET', `/api/visits/${visitId}/prep`),
     ]);
-
-    const v = visitData;
-    const visits = cycleData.visits || [];
-    const prep = prevNotes || {};
-
-    // Render visits panel
-    renderVisitsList(visits, v);
-
-    // Render notes panel
-    renderNotesPanel(v, prep);
+    renderVisitChips(visit);
+    renderVisitSide(visit, cycleData.visits || [], prep || {});
+    renderNotesPanel(visit, prep || {});
   } catch (e) {
     uiAlert('Could not load visit details: ' + (e.message || 'unknown error'));
     closeVisitModal();
   }
 }
-
-function renderVisitsList(visits, currentVisit) {
-  const panel = document.getElementById('vmVisitsPanel');
-  if (!panel) return;
-
-  const previous = visits.filter(v => v.completed);
-  
-  let html = '';
-
-  // Previous cycle (collapsed by default)
-  if (previous.length) {
-    html += `<div>
-      <button id="prevCycleBtn" onclick="togglePrevCycle()" 
-              style="width: 100%; padding: 10px; font-size: 11px; font-weight: 700; 
-                      text-transform: uppercase; color: #999; text-align: left; background: none;
-                      border: none; cursor: pointer; letter-spacing: 1px; display: flex; align-items: center; gap: 8px;">
-        <span id="prevCycleArrow" style="display: inline-block; transition: transform 0.2s;">▸</span>
-        Previous Cycle (${previous.length} completed)
-      </button>
-      <div id="prevCycleList" style="display: none; padding-top: 8px;">`;
-
-    previous.forEach((v, idx) => {
-      html += `<div style="background: #fff; border: 1px solid #e5e5e5; border-radius: 6px;
-                          padding: 10px; margin-bottom: 8px; cursor: pointer; font-size: 12px;
-                          transition: background 0.2s;" 
-                    onmouseover="this.style.background='#f5f5f5'" 
-                    onmouseout="this.style.background='#fff'"
-                    onclick="closeVisitModal(); openVisitModal(${v.id})">
-        <div style="font-weight: 600; color: #333; margin-bottom: 4px;">
-          Visit ${idx + 1} of ${previous.length}
-        </div>
-        <div style="font-size: 11px; color: #666;">
-          Completed: ${v.completed_date ? fmtFull(v.completed_date) : '—'}
-        </div>
-        <div style="font-size: 11px; color: #666;">
-          Coach: ${v.cal_coach ? esc(coach(v.cal_coach)?.name || '') : '—'}
-        </div>
-      </div>`;
-    });
-
-    html += '</div></div>';
-  }
-
-  panel.innerHTML = html;
+function renderVisitChips(v){
+  const el = $('#vmChips'); if(!el) return;
+  const chip = (t, cls='') => `<span class="vm-chip ${cls}">${t}</span>`;
+  const status = v.completed ? chip('✓ Completed','ok') : v.cal_week ? (weekEndOf(v.cal_week) < TODAY ? chip('Notes missing','bad') : chip('On calendar','cal')) : (v.due && v.due < TODAY ? chip('Overdue — not scheduled','bad') : chip('Needs scheduling','warn'));
+  el.innerHTML = [chip(`${esc(v.cycle||'')} ${esc(v.program||'')}`), v.team ? chip(`Team ${esc(v.team)}`) : '', status, v.cal_week ? chip(`Week of ${fmtW(v.cal_week)}`) : '', v.due ? chip(`Due ${fmt(v.due)}`) : ''].filter(Boolean).join('');
 }
-
+function renderVisitSide(v, cycleVisits, prep){
+  const el = $('#vmSide'); if(!el) return;
+  const coachName = v.cal_coach ? (coach(v.cal_coach)?.name || '') : (D.user.coach_id && D.user.role==='coach' ? (coach(D.user.coach_id)?.name || '') : '');
+  const stores = storeList(v);
+  const defaultDate = v.completed_date || v.cal_week || TODAY;
+  // Cycle strip: one dot per visit in this lap, oldest → newest; click opens that visit read-only.
+  const lap = cycleVisits.filter(x => x.program === v.program).sort((a,b)=>(a.due||'').localeCompare(b.due||''));
+  const idx = lap.findIndex(x => x.id === v.id);
+  const cm = /(\d+)\s+of\s+(\d+)/.exec(v.cycle||'');
+  const k = cm ? +cm[1] : 1, n = cm ? +cm[2] : lap.length;
+  const start = Math.max(0, idx - (k - 1));
+  const lapVisits = cm ? lap.slice(start, start + n) : lap;
+  const dots = lapVisits.map(x => {
+    const cls = x.id === v.id ? 'cur' : x.completed ? 'done' : x.cal_week ? 'cal' : 'todo';
+    const title = `${x.cycle} · due ${fmt(x.due)}${x.completed ? ' · completed' : x.cal_week ? ' · wk of '+fmtW(x.cal_week) : ' · not scheduled'}${(x.notes_wins||x.notes_issues||x.notes_focus) ? ' · has notes' : ''}`;
+    return `<button class="vm-dot ${cls}" title="${esc(title)}" ${x.id===v.id?'':`onclick="closeVisitModal();openVisitModal(${x.id})"`}>${(x.cycle||'').split(' ')[0]}</button>`;
+  }).join('');
+  const commits = prep.openCommitments || [];
+  const last = (prep.lastNotes || [])[0];
+  el.innerHTML = `
+    <div class="vm-block">
+      <div class="vm-label">This visit</div>
+      <div class="vm-kv"><span>Coach</span><b>${esc(coachName || '—')}</b></div>
+      ${v.completed ? `<div class="vm-kv"><span>Visited</span><b>${fmt(v.completed_date || v.scheduled_week || v.cal_week)}</b></div>`
+        : `<div class="vm-kv"><span>Visit date</span><input type="date" id="visit_date" value="${defaultDate}" style="width:140px"></div>`}
+      ${stores.length ? `<div class="vm-kv"><span>Store</span><select id="visit_store"><option value="">— pick —</option>${stores.map(s=>`<option ${v.store===s?'selected':''}>${esc(s)}</option>`).join('')}</select></div>`
+        : (v.store ? `<div class="vm-kv"><span>Store</span><b>${esc(v.store)}</b></div>` : '')}
+    </div>
+    <div class="vm-block">
+      <div class="vm-label">This cycle</div>
+      <div class="vm-dots">${dots || '<span class="small">—</span>'}</div>
+      <div class="small" style="margin-top:6px">Click a visit to read its notes.</div>
+    </div>
+    <div class="vm-block">
+      <div class="vm-label">Promised last time ${commits.length ? `<span class="pill p-due" style="margin-left:6px">${commits.length} open</span>` : ''}</div>
+      ${commits.length ? `<div class="small" style="margin-bottom:6px">Tick what the dealer actually did — the rest carries forward.</div>` +
+        commits.map(c => `<label class="vm-commit-row"><input type="checkbox" class="vm-commit" value="${c.id}" ${v.completed?'disabled':''}><span>${esc(c.text)}<br><span class="small">from visit ${c.from_due ? 'due '+fmt(c.from_due) : ''}</span></span></label>`).join('')
+        : `<div class="small">No open commitments from previous visits.</div>`}
+    </div>
+    ${last ? `<details class="vm-block"><summary class="vm-label" style="cursor:pointer">Last visit's notes · ${fmt(last.note_date)}</summary>
+      ${last.wins ? `<div class="vm-ref"><b>Wins</b>${esc(last.wins)}</div>` : ''}
+      ${last.issues ? `<div class="vm-ref"><b>Issues</b>${esc(last.issues)}</div>` : ''}
+      ${last.focus ? `<div class="vm-ref"><b>Focus was</b>${esc(last.focus)}</div>` : ''}
+    </details>` : ''}`;
+  const foot = $('#vmFootNote');
+  if(foot) foot.textContent = v.completed ? 'Editing notes on a completed visit.' : 'Complete visit saves your notes, logs new commitments and checks off the ones you ticked.';
+}
 function renderNotesPanel(visit, prep) {
-  const panel = document.getElementById('vmNotesPanel');
-  if (!panel) return;
-
-  const lastNotes = (prep.lastNotes || [])[0];
-
-  let html = `
-    <div style="margin-bottom: 28px;">
-      <div style="font-size: 16px; font-weight: 700; color: #1a1a1a; margin-bottom: 4px;">Visit Notes</div>
-      <div style="font-size: 12px; color: #999;">Document what happened, what to focus on next, and any new commitments.</div>
-    </div>
-
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
-      <!-- WINS -->
-      <div style="background: #f0f7ff; border: 1px solid #cfe9ff; border-radius: 8px; padding: 16px;">
-        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
-                    color: #1d4f91; letter-spacing: 0.5px; margin-bottom: 10px;">
-          ✓ What went well
-        </div>
-        <textarea id="visit_wins" style="width: 100%; height: 120px; padding: 10px; border: 2px solid #cfe9ff;
-                                         border-radius: 4px; font-size: 13px; font-family: -apple-system;
-                                         resize: none; box-sizing: border-box;"
-                  placeholder="Momentum, breakthroughs, quick wins..."
-                  onfocus="this.style.borderColor='#1d4f91'; this.style.boxShadow='0 0 0 3px rgba(29, 79, 145, 0.1)'"
-                  onblur="this.style.borderColor='#cfe9ff'; this.style.boxShadow='none'">${esc(visit.notes_wins || '')}</textarea>
-      </div>
-
-      <!-- ISSUES / ROADBLOCKS -->
-      <div style="background: #fff5f5; border: 1px solid #ffcccc; border-radius: 8px; padding: 16px;">
-        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
-                    color: #c71c1c; letter-spacing: 0.5px; margin-bottom: 10px;">
-          ⚠️ Issues & blockers
-        </div>
-        <textarea id="visit_issues" style="width: 100%; height: 120px; padding: 10px; border: 2px solid #ffcccc;
-                                          border-radius: 4px; font-size: 13px; font-family: -apple-system;
-                                          resize: none; box-sizing: border-box;"
-                  placeholder="What's stuck or needs attention..."
-                  onfocus="this.style.borderColor='#c71c1c'; this.style.boxShadow='0 0 0 3px rgba(199, 28, 28, 0.1)'"
-                  onblur="this.style.borderColor='#ffcccc'; this.style.boxShadow='none'">${esc(visit.notes_issues || '')}</textarea>
-      </div>
-    </div>
-
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
-      <!-- FOCUS FOR NEXT VISIT -->
-      <div style="background: #fffaf0; border: 1px solid #ffe5b4; border-radius: 8px; padding: 16px;">
-        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
-                    color: #b8860b; letter-spacing: 0.5px; margin-bottom: 10px;">
-          🎯 Focus for next visit
-        </div>
-        <textarea id="visit_focus" style="width: 100%; height: 120px; padding: 10px; border: 2px solid #ffe5b4;
-                                         border-radius: 4px; font-size: 13px; font-family: -apple-system;
-                                         resize: none; box-sizing: border-box;"
-                  placeholder="Where you'll pick up next time..."
-                  onfocus="this.style.borderColor='#b8860b'; this.style.boxShadow='0 0 0 3px rgba(184, 134, 11, 0.1)'"
-                  onblur="this.style.borderColor='#ffe5b4'; this.style.boxShadow='none'">${esc(visit.notes_focus || '')}</textarea>
-      </div>
-
-      <!-- NEW COMMITMENTS -->
-      <div style="background: #f5faf5; border: 1px solid #d4e5d4; border-radius: 8px; padding: 16px;">
-        <div style="font-size: 12px; font-weight: 700; text-transform: uppercase;
-                    color: #2e7d32; letter-spacing: 0.5px; margin-bottom: 10px;">
-          📋 New commitments
-        </div>
-        <textarea id="visit_commitments" style="width: 100%; height: 120px; padding: 10px; border: 2px solid #d4e5d4;
-                                               border-radius: 4px; font-size: 13px; font-family: -apple-system;
-                                               resize: none; box-sizing: border-box;"
-                  placeholder="e.g. Post walkaround videos daily, Run Saturday cave session..."
-                  onfocus="this.style.borderColor='#2e7d32'; this.style.boxShadow='0 0 0 3px rgba(46, 125, 50, 0.1)'"
-                  onblur="this.style.borderColor='#d4e5d4'; this.style.boxShadow='none'">${esc(visit.notes_commitments || '')}</textarea>
-      </div>
+  const panel = $('#vmNotesPanel'); if (!panel) return;
+  const last = (prep.lastNotes || [])[0];
+  const card = (id, title, icon, tone, ph, val, hint) => `<div class="vm-card" style="--tone:${tone.fg};--tint:${tone.bg}">
+      <div class="vm-card-h"><span class="vm-ico">${icon}</span><span>${title}</span><span style="flex:1"></span>${micBtn(id)}</div>
+      <textarea id="${id}" placeholder="${esc(ph)}">${esc(val || '')}</textarea>
+      ${hint ? `<div class="vm-hint">${hint}</div>` : ''}
     </div>`;
-
-  // Previous visit reference
-  if (lastNotes) {
-    html += `
-      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e5e5;">
-        <div style="font-size: 10px; font-weight: 700; text-transform: uppercase;
-                    color: #999; letter-spacing: 0.5px; margin-bottom: 10px;">
-          Previous Visit (reference)
-        </div>
-        <div style="background: #f9f9f9; border: 1px solid #e5e5e5; border-radius: 6px;
-                    padding: 12px; font-size: 11px;">
-          <div style="color: #999; margin-bottom: 8px;">
-            ${lastNotes.visit_num || 'Previous visit'} · ${fmt(lastNotes.created_at || lastNotes.date)}
-          </div>
-          ${lastNotes.wins ? `<div style="margin-bottom: 8px;">
-            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Wins</div>
-            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.wins)}</div>
-          </div>` : ''}
-          ${lastNotes.issues ? `<div style="margin-bottom: 8px;">
-            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Issues / Roadblocks</div>
-            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.issues)}</div>
-          </div>` : ''}
-          ${lastNotes.focus ? `<div>
-            <div style="font-weight: 600; color: #666; margin-bottom: 3px;">Focus for Next Visit</div>
-            <div style="color: #333; line-height: 1.4;">${esc(lastNotes.focus)}</div>
-          </div>` : ''}
-        </div>
-      </div>
-    `;
-  }
-
-
-  panel.innerHTML = html;
+  const T = { win:{fg:'#1e8e5a',bg:'#eef8f2'}, issue:{fg:'#c23b3b',bg:'#fbeeee'}, focus:{fg:'#1d4f91',bg:'#e9f0fb'}, commit:{fg:'#c77d0a',bg:'#fdf4e3'} };
+  panel.innerHTML = `
+    <div class="vm-main-h"><div>
+      <div style="font-family:var(--head);font-size:18px;letter-spacing:.5px;text-transform:uppercase;font-weight:600">Visit notes</div>
+      <div class="small">What happened, what's stuck, where you'll pick up — tap 🎤 on any box to dictate.</div></div></div>
+    <div class="vm-grid">
+      ${card('visit_wins', 'What went well', '✓', T.win, 'Momentum, breakthroughs, quick wins…', visit.notes_wins)}
+      ${card('visit_issues', 'Issues & blockers', '!', T.issue, "What's stuck or needs attention…", visit.notes_issues)}
+      ${card('visit_focus', 'Focus for next visit', '→', T.focus, "Where you'll pick up next time…", visit.notes_focus, last && last.focus ? `Last time you said: <i>${esc(last.focus)}</i>` : '')}
+      ${card('visit_commitments', 'New commitments', '☐', T.commit, 'One per line — e.g. Post walkaround videos daily', visit.notes_commitments, 'Each line becomes a commitment the dealer owns; it shows up here next visit to be checked off.')}
+    </div>`;
 }
-
 function getStatusLabel(v) {
-  return v.completed ? 'Completed' :
-         v.cal_week ? 'On calendar' :
-         (v.due && v.due < TODAY) ? 'Overdue' : 'Needs scheduling';
+  return v.completed ? 'Completed' : v.cal_week ? 'On calendar' : (v.due && v.due < TODAY) ? 'Overdue' : 'Needs scheduling';
 }
 
 /* ---------- app state ---------- */
