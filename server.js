@@ -1209,7 +1209,10 @@ function matchHoldForName(name){
     coachId: best.hold.coach_id, coachName: c ? c.name : best.hold.coach_id, team: c ? c.team : null };
 }
 route('GET', /^\/api\/pending-clients$/, ['admin','lead'], (req, res, m, body, user) => {
-  const rows = db.prepare("SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all();
+  const includeIgnored = new URL(req.url, 'http://x').searchParams.get('includeIgnored') === '1';
+  const rows = db.prepare(includeIgnored
+    ? "SELECT * FROM pending_clients WHERE status IN ('pending','ignored') ORDER BY status='pending' DESC, created DESC"
+    : "SELECT * FROM pending_clients WHERE status='pending' ORDER BY created DESC").all();
   send(res, 200, rows.map(r => ({ ...r,
     hold_match: matchHoldForName(r.company_name || r.contact_name || ''),
     program_change_match: matchProgramChangeForPending(r) })));
@@ -1422,6 +1425,18 @@ route('POST', /^\/api\/pending-clients\/(\d+)\/assign$/, ['admin','lead'], (req,
     .run(clientId, contractId, pc.id);
   log(user.email, 'pendingclient.assign', { pendingId: pc.id, client, team, contractId, coachId, succeedsContractId: succeedsId || undefined });
   send(res, 200, { ok: true, clientId, contractId, ids, succession });
+});
+/* Put an ignored subscription back in the queue. Ignore is otherwise permanent by
+ * design (the row blocks the webhook and the backfill from resurfacing it), which is
+ * right for genuine noise but a dead end when something was ignored by mistake — the
+ * only other way back was Admin → Keap events → Reprocess, which nobody would guess. */
+route('POST', /^\/api\/pending-clients\/(\d+)\/unignore$/, ['admin','lead'], (req, res, m, body, user) => {
+  const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
+  if(!pc) return err(res, 404, 'not found');
+  if(pc.status === 'assigned') return err(res, 400, 'That subscription already has a contract');
+  db.prepare("UPDATE pending_clients SET status='pending' WHERE id=?").run(pc.id);
+  log(user.email, 'pendingclient.unignore', { pendingId: pc.id, company: pc.company_name, subId: pc.keap_subscription_id });
+  send(res, 200, { ok: true });
 });
 route('POST', /^\/api\/pending-clients\/(\d+)\/ignore$/, ['admin','lead'], (req, res, m, body, user) => {
   const pc = db.prepare('SELECT * FROM pending_clients WHERE id=?').get(+m[1]);
@@ -3637,12 +3652,14 @@ async function queueSubscriptionAsPending(s, opts = {}){
   const subId = String(s.id);
   const existingContract = db.prepare('SELECT id FROM contracts WHERE keap_subscription_id=?').get(subId);
   if(existingContract) return { subId, skipped: true, reason: 'already has a real contract' };
-  const already = db.prepare('SELECT id FROM pending_clients WHERE keap_subscription_id=?').get(subId);
+  const already = db.prepare('SELECT id, status FROM pending_clients WHERE keap_subscription_id=?').get(subId);
   // Normal webhook/backfill delivery: a pending item already queued (even a blank/
   // placeholder one from a past failed lookup) is left alone — don't silently re-run
   // enrichment on every retry. opts.force (used by the admin "Reprocess" button)
   // overrides this on purpose: a human explicitly asked to re-fetch and refresh it.
-  if(already && !opts.force) return { subId, skipped: true, reason: 'already queued' };
+  // An ignored row blocks re-queueing on purpose, but say so distinctly — "nothing
+  // happened" is the single most confusing outcome of a manual backfill.
+  if(already && !opts.force) return { subId, skipped: true, reason: already.status === 'ignored' ? 'previously ignored' : 'already queued' };
 
   // Only real, currently-active Signature Coaching subscriptions belong in Unassigned
   // Clients — anything cancelled, or any other Keap product entirely, is skipped here
@@ -3880,13 +3897,14 @@ route('POST', /^\/api\/admin\/keap-backfill-subscriptions$/, ['admin'], async (r
   if(!KEAP_TOKEN) return err(res, 400, 'KEAP_TOKEN is not configured on this server.');
   const listing = await keapListAllSubscriptions();
   if(!listing.ok) return err(res, 502, listing.error);
-  const summary = { checked: listing.subs.length, queued: [], alreadyTracked: 0, notCoachingProduct: 0, cancelled: 0, errors: [], hitPageCap: !!listing.hitCap };
+  const summary = { checked: listing.subs.length, queued: [], alreadyTracked: 0, previouslyIgnored: 0, notCoachingProduct: 0, cancelled: 0, errors: [], hitPageCap: !!listing.hitCap };
   for(const s of listing.subs){
     try{
       const r = await queueSubscriptionAsPending(s, { force: false });
       if(r.error) summary.errors.push(`sub ${r.subId}: ${r.error}`);
       else if(r.skipped){
         if(r.reason === 'subscription is cancelled/inactive') summary.cancelled++;
+        else if(r.reason === 'previously ignored') summary.previouslyIgnored++;
         else if(r.reason && r.reason.startsWith('product ')) summary.notCoachingProduct++;
         else summary.alreadyTracked++;
       } else summary.queued.push({ subId: r.subId, companyName: r.companyName, contactName: r.contactName, startDate: r.startDate, active: r.active, productName: r.productName });

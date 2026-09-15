@@ -2094,7 +2094,10 @@ function pendingView(){
   return `<div class="panel"><h2>Unassigned clients</h2>
   <p class="small" style="margin-bottom:12px">New subscriptions from Keap land here first. Confirm the client name, program cadence,
   and team, then create the contract — same as adding a contract today, just pre-filled from Keap.</p>
-  ${n>0 ? `<div class="controls" style="margin-bottom:10px"><button class="btn danger" onclick="ignoreAllPending()">Clear all${n?` (${n})`:''}</button></div>` : ''}
+  <div class="controls" style="margin-bottom:10px">
+    ${n>0 ? `<button class="btn danger" onclick="ignoreAllPending()">Clear all${n?` (${n})`:''}</button>` : ''}
+    <label class="small" style="display:flex;align-items:center;gap:6px;margin:0"><input type="checkbox" ${st.pendShowIgnored?'checked':''} onchange="st.pendShowIgnored=this.checked;loadPending()"> Show ignored</label>
+  </div>
   <div id="pendingOut">Loading…</div></div>`;
 }
 async function ignoreAllPending(){
@@ -2107,12 +2110,12 @@ async function ignoreAllPending(){
 }
 async function loadPending(){
   try{
-    const rows = await api('GET','/api/pending-clients');
+    const rows = await api('GET','/api/pending-clients' + (st.pendShowIgnored ? '?includeIgnored=1' : ''));
     st.pendingList = rows;
     $('#pendingOut').innerHTML = rows.length ? `<div style="overflow-x:auto"><table><tr><th>Company</th><th>Contact</th><th class="num">Amount</th><th>Billing</th><th>Started</th><th style="white-space:nowrap">Actions</th></tr>` +
       rows.map(r=>{
         const pcm = r.program_change_match;
-        const pcmRow = pcm ? `<tr><td colspan="6" style="background:#e9f0fb;border-left:4px solid #1d4f91;padding:8px 12px">
+        const pcmRow = (pcm && r.status !== 'ignored') ? `<tr><td colspan="6" style="background:#e9f0fb;border-left:4px solid #1d4f91;padding:8px 12px">
           <b>Looks like a program change for ${esc(pcm.clientName)}</b> — their ${esc(pcm.program)} contract${pcm.keapSubscriptionId?` (Keap ${esc(pcm.keapSubscriptionId)})`:''} is cancelled,
           with ${pcm.completedVisits} completed visit(s)${pcm.placed.length?`, ${pcm.placed.length} still on a calendar`:''}${pcm.unplaced?` and ${pcm.unplaced} unscheduled`:''}.
           Assigning it as the replacement keeps that history, carries the booked week(s) into the new cycle${pcm.archived?', and brings the client back out of the archive':''}.
@@ -2125,11 +2128,14 @@ async function loadPending(){
           <button class="btn tiny primary" style="margin-left:8px" onclick="assignPendingDlg(${r.id}, ${hm.id})">Use this hold</button>
         </td></tr>` : '';
         const future = r.start_date && r.start_date > TODAY;
-        return `<tr><td><b>${esc(r.company_name||'(unknown)')}</b></td><td class="small">${esc(r.contact_name||'—')}</td>
+        const ig = r.status === 'ignored';
+        return `<tr${ig?' style="opacity:.6;background:#faf9f8"':''}><td><b>${esc(r.company_name||'(unknown)')}</b>${ig?' <span class="pill" style="background:#f0efee;color:var(--muted)">ignored</span>':''}</td><td class="small">${esc(r.contact_name||'—')}</td>
         <td class="num">${r.billing_amount?'$'+r.billing_amount:'—'}</td><td class="small">${esc(r.billing_cycle||'—')} ×${r.billing_frequency||1}</td>
         <td class="small">${esc(r.start_date||'—')}${future?' <span class="pill p-fut">upcoming</span>':''}</td>
-        <td style="white-space:nowrap"><button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
-        <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button>
+        <td style="white-space:nowrap">${ig
+          ? `<button class="btn tiny primary" title="Put it back in the queue" onclick="unignorePending(${r.id})">Un-ignore</button>`
+          : `<button class="btn tiny primary" onclick="assignPendingDlg(${r.id})">Assign</button>
+        <button class="btn tiny" onclick="ignorePending(${r.id})">Ignore</button>`}
         ${D.user.role==='admin'?`<button class="btn tiny" onclick="debugPendingClient(${r.id})">Debug</button>`:''}</td></tr>` + pcmRow + matchRow;
       }).join('') + `</table></div>`
       : `<p class="small">Nothing waiting — you're all caught up.</p>`;
@@ -2224,8 +2230,17 @@ async function saveAssignPending(id){
   closeDlg(); await refresh(); toast(client+' added'+sx+coachTxt+extra);
 }
 async function ignorePending(id){
-  if(!(await uiConfirm("Ignore this subscription? It won't be added to the LID Inventory.","Ignore"))) return;
-  await api('POST',`/api/pending-clients/${id}/ignore`,{}); await refresh(); toast('Ignored');
+  const r = (st.pendingList||[]).find(x=>x.id===id);
+  const pcm = r && r.program_change_match;
+  const msg = pcm
+    ? `This looks like a program change for ${pcm.clientName} — their ${pcm.program} contract is cancelled and this would be the replacement.\n\nIgnore it anyway? You can bring it back later with "Show ignored".`
+    : "Ignore this subscription? It won't be added to the LID Inventory. You can bring it back later with \"Show ignored\".";
+  if(!(await uiConfirm(msg, 'Ignore'))) return;
+  await api('POST',`/api/pending-clients/${id}/ignore`,{}); await refresh(); await loadPending(); toast('Ignored');
+}
+async function unignorePending(id){
+  await api('POST',`/api/pending-clients/${id}/unignore`,{});
+  await refresh(); await loadPending(); toast('Back in the queue');
 }
 async function debugPendingClient(id){
   openDlg(`<h3>Keap raw lookup</h3><p class="small">Fetching live from Keap…</p>`);
@@ -4062,7 +4077,7 @@ async function backfillKeapSubscriptions(){
   try{
     const r = await api('POST','/api/admin/keap-backfill-subscriptions',{});
     const rows = r.queued || [];
-    out.innerHTML = `<p class="small">Checked ${r.checked} subscription(s) in Keap — ${rows.length} newly queued, ${r.alreadyTracked} already tracked, ${r.notCoachingProduct} not a Signature Coaching subscription, ${r.cancelled} cancelled/inactive${r.errors.length?`, ${r.errors.length} error(s)`:''}.${r.hitPageCap?' (hit the page cap — there may be more; run it again to keep going.)':''}</p>` +
+    out.innerHTML = `<p class="small">Checked ${r.checked} subscription(s) in Keap — ${rows.length} newly queued, ${r.alreadyTracked} already tracked, ${r.previouslyIgnored?`<b>${r.previouslyIgnored} previously ignored</b> (tick "Show ignored" in Unassigned Clients to bring one back), `:''}${r.notCoachingProduct} not a Signature Coaching subscription, ${r.cancelled} cancelled/inactive${r.errors.length?`, ${r.errors.length} error(s)`:''}.${r.hitPageCap?' (hit the page cap — there may be more; run it again to keep going.)':''}</p>` +
       (rows.length ? `<table><tr><th>Company</th><th>Contact</th><th>Starts</th><th>Active</th></tr>` +
         rows.map(q=>{
           const future = q.startDate && q.startDate > TODAY;
