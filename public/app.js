@@ -2859,7 +2859,7 @@ function clientProfileView(data, notes){
     return `<div style="border:1px solid var(--line);border-radius:8px;margin-bottom:8px;overflow:hidden">
       <div onclick="st.vhOpen['${lapKey(l,i)}']=${!isOpen};rerenderClientProfile()" style="display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;background:${isOpen?'#fff':'#faf9f8'}">
         <span style="width:14px;color:var(--muted)">${isOpen?'▾':'▸'}</span>
-        <span style="font-family:var(--head);font-size:13px;letter-spacing:.8px;text-transform:uppercase;font-weight:600">Cycle ${laps.length - i} · ${esc(l.program)}${l.n ? ` · ${l.visits.length} of ${l.n} visits` : ''}</span>
+        <span style="font-family:var(--head);font-size:13px;letter-spacing:.8px;text-transform:uppercase;font-weight:600">Cycle ${i + 1} · ${esc(l.program)}${l.n ? ` · ${l.visits.length} of ${l.n} visits` : ''}</span>
         <span class="small">${fmtW(first)} ${first.slice(0,4)} – ${fmtW(last)} ${last.slice(0,4)}</span>${tag}
         <span style="flex:1"></span><span class="small">${summary}</span>
       </div>
