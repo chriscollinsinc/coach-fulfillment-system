@@ -146,6 +146,15 @@ function currentUser(req){
   if(age > SESSION_IDLE_MS) return null;
   const u = db.prepare('SELECT id,email,name,role,team,coach_id,active FROM users WHERE id=?').get(+id);
   if(!u || !u.active) return null;
+  // The coach record is the single source of truth for a coach-linked account's team:
+  // that's the field a lead edits when moving someone between teams, and everything
+  // downstream (nav, team overview, to-schedule list, canEditTeam) reads user.team.
+  // Deriving it here means the two can never disagree, even if a row drifted earlier
+  // or some other path writes coaches.team without updating the login.
+  if(u.coach_id){
+    const c = db.prepare('SELECT team FROM coaches WHERE id=?').get(u.coach_id);
+    if(c && c.team) u.team = c.team;
+  }
   u._cookieAge = age;
   return u;
 }
@@ -874,6 +883,9 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
   if(body.team){
     db.prepare('UPDATE coaches SET team=? WHERE id=?').run(body.team, c.id);
     db.prepare('UPDATE visits SET team=? WHERE cal_coach=? AND completed=0').run(body.team, c.id);
+    // Keep their login in step — without this the coach's own nav, team overview and
+    // to-schedule list stay pointed at the team they just left.
+    db.prepare('UPDATE users SET team=? WHERE coach_id=?').run(body.team, c.id);
   }
   if(body.phone !== undefined) db.prepare('UPDATE coaches SET phone=? WHERE id=?').run(String(body.phone||'').trim(), c.id);
   if(body.start_date !== undefined){
@@ -1094,6 +1106,13 @@ route('PATCH', /^\/api\/users\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
     for(const k of ['name','role','team','coach_id']) if(body[k] !== undefined)
       db.prepare(`UPDATE users SET ${k}=? WHERE id=?`).run(body[k], target);
     if(body.active !== undefined) db.prepare('UPDATE users SET active=? WHERE id=?').run(body.active ? 1 : 0, target);
+    // Linked to a coach? The coach record owns the team — adopt it, so linking an
+    // account (or editing its team by hand) can't reintroduce the drift.
+    const linked = db.prepare('SELECT coach_id FROM users WHERE id=?').get(target);
+    if(linked && linked.coach_id){
+      const lc = db.prepare('SELECT team FROM coaches WHERE id=?').get(linked.coach_id);
+      if(lc && lc.team) db.prepare('UPDATE users SET team=? WHERE id=?').run(lc.team, target);
+    }
     log(user.email, 'user.edit', { id: target, ...body, password: undefined });
   }
   send(res, 200, { ok: true });

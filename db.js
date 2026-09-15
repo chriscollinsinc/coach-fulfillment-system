@@ -1926,6 +1926,21 @@ function migrateKeapRevenueSync(){
 
 
 /* Auto-migration: add coach certification levels (Launch Certified, Advisor Only, Handoff-Capable) */
+/* 2026-09-15: a coach-linked login's team must match their coach record. Moving a coach
+ * between teams updated coaches.team (and their open visits) but left users.team stale —
+ * found with Corey Brodeur: coach record said Hogi, login still said Adam, which pointed
+ * his nav, team overview and to-schedule list at the wrong team. Idempotent: only touches
+ * rows that actually disagree, and ignores links to a coach that no longer exists. */
+function syncCoachUserTeams(){
+  try{
+    const n = db.prepare(`UPDATE users SET team=(SELECT c.team FROM coaches c WHERE c.id=users.coach_id)
+      WHERE coach_id IS NOT NULL AND coach_id<>''
+        AND EXISTS(SELECT 1 FROM coaches c WHERE c.id=users.coach_id
+                   AND IFNULL(c.team,'')<>IFNULL(users.team,''))`).run().changes;
+    if(n) console.log(`\u2705 Synced ${n} coach login(s) to their coach record's team`);
+  }catch(e){ console.error('\u26a0\ufe0f  syncCoachUserTeams failed:', e.message); }
+}
+
 function migrateCoachCertifications(){
   if(getMeta('coach_certifications_migrated')) return;
   try {
@@ -2001,5 +2016,6 @@ migrateKeapRevenueSync();
 migrateProspectHolds();
 ensureCurrentMonthSnapshot();
 migrateCoachCertifications();
+syncCoachUserTeams();
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit };
