@@ -1149,36 +1149,77 @@ function todayTeamView(t, orphanedData){
   return html;
 }
 function todayCoachView(t){
+  const me = D.user.coach_id;
+  const full = v => D.visits.find(x=>x.id===v.id) || v;
+  const daysLate = d => Math.max(0, Math.floor(dayDiff(TODAY, d)));
+  const onCal = D.visits.filter(v=>v.cal_coach===me && !v.completed && v.cal_week && v.cal_week>=TODAY).length;
   let html='';
-  html+=`<div class="panel" style="border-left:4px solid var(--primary)"><h2>Your next visit</h2>`;
-  html+= t.nextVisit ? `<p style="font-size:15px"><b>${clientLink(t.nextVisit.client, t.nextVisit.client_id)}</b> — week of ${fmtW(t.nextVisit.cal_week)} · ${esc(t.nextVisit.cycle)} ${esc(t.nextVisit.program)}</p>
-    <div class="btnrow" style="margin-top:8px">
-      ${t.nextVisit.client_id?`<button class="btn tiny" onclick="openClientProfile(${t.nextVisit.client_id})">Client profile &amp; notes</button>`:''}
-      <button class="btn tiny primary" onclick="openVisitModal(${t.nextVisit.id})">Complete it</button></div>`
-    : `<p class="small">Nothing on your calendar yet — open the Calendar tab or ask your lead.</p>`;
+
+  // ---- At-a-glance strip
+  const stat = (n, label, tone, onclick) => `<div class="card" style="border-top-color:${tone};${onclick?'cursor:pointer':''}" ${onclick?`onclick="${onclick}"`:''}>
+    <div class="k" style="color:${n?tone:'var(--muted)'}">${n}</div><div class="l">${label}</div></div>`;
+  html+=`<div class="cards" style="margin-bottom:14px">
+    ${stat(t.overdueMine.length, 'Overdue', 'var(--bad)', "document.getElementById('tdOverdue')?.scrollIntoView({behavior:'smooth'})")}
+    ${stat(t.dueSoonMine.length, 'Due in the next 30 days', 'var(--warn)', "document.getElementById('tdDueSoon')?.scrollIntoView({behavior:'smooth'})")}
+    ${stat(t.missingNotes.length, 'Notes owed', '#1d4f91', "document.getElementById('tdNotes')?.scrollIntoView({behavior:'smooth'})")}
+    ${stat(onCal, 'On your calendar', 'var(--ok)', "go('board')")}
+  </div>`;
+
+  // ---- Next visit hero
+  html+=`<div class="panel" style="border-left:5px solid var(--primary);display:flex;align-items:center;gap:20px;flex-wrap:wrap">`;
+  if(t.nextVisit){
+    const nv = t.nextVisit;
+    html+=`<div style="min-width:120px"><div style="font-family:var(--head);font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Your next visit</div>
+        <div style="font-family:var(--head);font-size:30px;font-weight:600;line-height:1.05;margin-top:2px">wk of ${fmtW(nv.cal_week)}</div></div>
+      <div style="flex:1;min-width:220px"><div style="font-size:17px;font-weight:600">${clientLink(nv.client, nv.client_id)}</div>
+        <div class="small" style="margin-top:2px">${esc(nv.cycle)} ${esc(nv.program)} · due ${fmt(nv.due)}</div></div>
+      <div class="btnrow" style="margin:0">
+        ${nv.client_id?`<button class="btn tiny" onclick="openClientProfile(${nv.client_id})">Profile &amp; notes</button>`:''}
+        <button class="btn tiny primary" onclick="openVisitModal(${nv.id})">Complete it</button></div>`;
+  } else {
+    html+=`<div><div style="font-family:var(--head);font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Your next visit</div>
+      <p class="small" style="margin-top:4px">Nothing on your calendar yet — <a onclick="go('board')" style="cursor:pointer"><b>open the Calendar</b></a> to place your upcoming visits.</p></div>`;
+  }
   html+=`</div>`;
-  const sec=(title,list,empty)=>{
-    let h=`<div class="panel"><h2>${title} (${list.length})</h2>`;
-    h+= list.length ? `<table style="table-layout: fixed; width: 100%;"><tr><th style="width: 20%;">Client</th><th style="width: 25%;">Visit</th><th style="width: 20%;">Due</th><th style="width: 20%;">Scheduled On</th><th style="width: 15%;"></th></tr>`+
-      todayRows(list, 10, v=>`<tr><td style="width: 20%;"><b>${clientLink(v.client, v.client_id)}</b></td><td style="width: 25%;">${esc(v.cycle||'')} ${esc(v.program||'')}</td>
-        <td style="width: 20%;" class="mono">${fmt(v.due||v.scheduled_week)}</td>
-        <td style="width: 20%;">${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
-        <td style="width: 15%;white-space:nowrap">${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open client</button>`:''}
-        ${!v.scheduled_week?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete</button>`:''}
-        ${(()=>{ const full = D.visits.find(x=>x.id===v.id); return full && full.cal_week && !full.completed && canReschedule(full) ? `<button class="btn tiny" title="Take this visit off the calendar" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''; })()}</td></tr>`)+`</table>`
-      : `<p class="small">${empty}</p>`;
+
+  // ---- Work lists: Client · Visit · Due · Status · actions (right-aligned, never wrap)
+  const statusOf = v => {
+    const f = full(v);
+    if(f.completed) return completedPill(f);
+    if(f.cal_week) return calendarPill(f);
+    return f.due && f.due<TODAY ? '<span class="pill p-over">overdue — no plan</span>' : '<span class="pill p-due">needs scheduling</span>';
+  };
+  const actions = v => {
+    const f = full(v);
+    const can = canReschedule(f);
+    return `<div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap">
+      ${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Open</button>`:''}
+      ${!f.cal_week && can ? `<button class="btn tiny" title="Pick a week on your calendar" onclick="${placeJump(f)}">Place</button>` : ''}
+      ${f.cal_week && !f.completed && can ? `<button class="btn tiny" style="color:var(--muted)" title="Take it off the calendar" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
+      ${!f.completed ? `<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete</button>` : ''}
+    </div>`;
+  };
+  const sec=(id,title,list,empty,late)=>{
+    let h=`<div class="panel" id="${id}"><h2>${title}${list.length?` <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${list.length})</span>`:''}</h2>`;
+    h+= list.length ? `<div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Due</th><th>Status</th><th style="text-align:right"></th></tr>`+
+      todayRows(list, 10, v=>`<tr>
+        <td><b>${healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b></td>
+        <td class="small" style="white-space:nowrap">${esc(v.cycle||'')} ${esc(v.program||'')}</td>
+        <td class="mono" style="white-space:nowrap">${fmt(v.due)}${late && v.due && v.due<TODAY ? ` <span class="small" style="color:var(--bad)">${daysLate(v.due)}d late</span>` : ''}</td>
+        <td style="white-space:nowrap">${statusOf(v)}</td>
+        <td style="white-space:nowrap">${actions(v)}</td></tr>`)+`</table></div>`
+      : `<p class="small" style="color:var(--ok)">${empty}</p>`;
     return h+`</div>`;
   };
-  html+=sec('Overdue from you', t.overdueMine, 'Nothing overdue. ✔');
-  html+=sec('Due from you in the next 30 days', t.dueSoonMine, 'Nothing due soon. ✔');
+  html+=sec('tdOverdue', 'Overdue from you', t.overdueMine, 'Nothing overdue. ✔', true);
+  html+=sec('tdDueSoon', 'Due from you in the next 30 days', t.dueSoonMine, 'Nothing due soon. ✔', false);
   if(t.missingNotes.length){
-    html+=`<div class="panel"><h2>You owe a note (${t.missingNotes.length})</h2>
-    <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up.</p>
-    <table style="table-layout: fixed; width: 100%;"><tr><th style="width: 20%;">Client</th><th style="width: 25%;">Visit</th><th style="width: 20%;">Due</th><th style="width: 20%;">Scheduled On</th><th style="width: 15%;"></th></tr>`+
-    t.missingNotes.map(v=>`<tr><td style="width: 20%;"><b>${clientLink(v.client, v.client_id)}</b></td><td style="width: 25%;">${esc(v.cycle||v.program||'Completed visit')}</td>
-      <td style="width: 20%;" class="mono">${fmt(v.due||v.scheduled_week)}</td>
-      <td style="width: 20%;">${v.cal_week ? fmtFull(v.cal_week) : '—'}</td>
-      <td style="width: 15%;">${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</td></tr>`).join('')+`</table></div>`;
+    html+=`<div class="panel" id="tdNotes"><h2>You owe a note <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${t.missingNotes.length})</span></h2>
+    <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up. The client's page can't show wins, issues or focus until you add one.</p>
+    <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Visited</th><th style="text-align:right"></th></tr>`+
+    t.missingNotes.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||v.program||'Completed visit')}</td>
+      <td class="mono">${fmt(v.scheduled_week||v.cal_week||v.due)}</td>
+      <td><div style="display:flex;justify-content:flex-end">${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</div></td></tr>`).join('')+`</table></div></div>`;
   }
   return html;
 }
