@@ -2735,7 +2735,7 @@ async function runNightlyMaintenance(actorEmail){
         ? summary.rollingSchedule.perClient.slice(0,15).map(p => `  - ${p.client} [${p.program}]: +${p.created} (${p.visits[0].cycle} due ${p.visits[0].due}${p.created>1 ? ` … ${p.visits[p.visits.length-1].cycle} due ${p.visits[p.visits.length-1].due}` : ''})`)
           .concat(summary.rollingSchedule.perClient.length > 15 ? [`  …and ${summary.rollingSchedule.perClient.length - 15} more`] : [])
         : []),
-      `Archived: ${!summary.archive ? 'n/a' : summary.archive.error ? 'FAILED — ' + summary.archive.error : summary.archive.archived ? `${summary.archive.archived} cancelled client(s) moved to the archive: ${summary.archive.clients.map(c => `${c.client} (${c.visitsDeleted} open visit${c.visitsDeleted===1?'':'s'} removed)`).join(', ')}` : 'nothing new'}`,
+      `Archived: ${!summary.archive ? 'n/a' : summary.archive.error ? 'FAILED — ' + summary.archive.error : summary.archive.archived ? `${summary.archive.archived} cancelled client(s) moved to the archive: ${summary.archive.clients.map(c => `${c.client} — ${c.why}${c.visitsDeleted ? `, ${c.visitsDeleted} open visit${c.visitsDeleted===1?'':'s'} removed` : ''}`).join('; ')}` : 'nothing new'}`,
       `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
       `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
       `Database backup: ${summary.backup.ok ? `sent (${Math.round((summary.backup.sizeBytes||0)/1024)} KB)` : 'FAILED — ' + (summary.backup.error || 'see results')}`,
@@ -3088,14 +3088,23 @@ function reactivateClient(cl, actor){
 /* Nightly: anyone whose status is already cancelled but who was never archived (clients
  * that churned before this feature existed) gets archived, so they leave the working
  * surfaces without someone having to find them one by one. Reported in the summary. */
+/* Rule (Mike, 2026-09-15): the CONTRACT decides. A client with no active contract is
+ * archived when any of these also hold — status cancelled, status inactive, or a
+ * 30-day notice that has lapsed. Visit counts play no part (a Coaching Only client has
+ * no visits by design and must never be archived for that). A client with an active
+ * contract is never touched here, whatever their status field says. */
 function archiveCancelledClients(){
-  const rows = db.prepare("SELECT * FROM clients WHERE deleted_at IS NULL AND archived_at IS NULL AND status='cancelled'").all();
+  const cutoff = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const rows = db.prepare(`
+    SELECT cl.* FROM clients cl
+    WHERE cl.deleted_at IS NULL AND cl.archived_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active')
+      AND (cl.status IN ('cancelled','inactive') OR (cl.notice_given_date IS NOT NULL AND cl.notice_given_date <= ?))`).all(cutoff);
   const done = [];
   for(const cl of rows){
-    const hasActive = db.prepare("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'").get(cl.id).c > 0;
-    if(hasActive) continue; // status says cancelled but a contract is live — leave for a human
-    const r = archiveClient(cl, 'Backfill: client status cancelled, no active contract', 'system.nightly');
-    done.push({ client: cl.name, visitsDeleted: r.visitsDeleted });
+    const why = cl.status === 'cancelled' ? 'client cancelled' : cl.status === 'inactive' ? 'client inactive' : `30-day notice given ${cl.notice_given_date} has lapsed`;
+    const r = archiveClient(cl, `Nightly: ${why}, no active contract`, 'system.nightly');
+    done.push({ client: cl.name, why, visitsDeleted: r.visitsDeleted });
   }
   return { archived: done.length, clients: done };
 }

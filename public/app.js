@@ -3512,7 +3512,7 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">One row per day, captured by the nightly job — total active revenue and client count, so drift (toward or away from Keap) shows as a trend.</p>
   <div id="revenueHistoryOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Archived clients</h2>
-  <p class="small" style="margin-bottom:12px">Clients who've left. Archiving happens automatically when Keap reports their last contract cancelled (and nightly for anyone already marked cancelled), or by hand from a profile. History is kept; open visits were removed. Reactivate if Keap was wrong or they come back.</p>
+  <p class="small" style="margin-bottom:12px">Clients who've left. Archiving happens automatically when Keap reports their last contract cancelled, and nightly for any client with <b>no active contract</b> who is marked cancelled or inactive or whose 30-day notice has lapsed — a client with a live contract is never archived automatically, whatever their status says. Or by hand from a profile. History is kept; open visits were removed. Reactivate if Keap was wrong or they come back.</p>
   <div id="archivedOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Recently deleted</h2>
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
