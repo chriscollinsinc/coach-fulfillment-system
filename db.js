@@ -526,6 +526,15 @@ function resolveClient(name, opts = {}){
     db.prepare('UPDATE clients SET deleted_at=NULL WHERE id=?').run(row.id);
     log('system', 'client.auto_restore', { clientId: row.id, name: row.name, reason: 'new contract/subscription matched a soft-deleted client' });
   }
+  // Same reasoning for ARCHIVED, and it's the common case on a program change: CCI
+  // cancels the old Keap subscription and creates a new one, so the client is archived
+  // the moment the old one lapses and the replacement contract arrives minutes or days
+  // later. Without this the new contract would attach to a client who stays invisible
+  // in every working list, calendar and capacity view. (2026-09-15)
+  if(row.archived_at){
+    db.prepare("UPDATE clients SET archived_at=NULL, archive_reason=NULL, archived_by=NULL, status='active' WHERE id=?").run(row.id);
+    log('system', 'client.auto_reactivate', { clientId: row.id, name: row.name, reason: 'new contract/subscription matched an archived client' });
+  }
   // keep billing_start as the earliest known
   if(opts.billing_start){
     const bs = minDate(row.billing_start, opts.billing_start);
