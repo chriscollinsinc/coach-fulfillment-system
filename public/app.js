@@ -2468,7 +2468,7 @@ function offerProgramFix(contractId, suggestion){
   openDlg(`<h3>Program cadence looks off</h3>
     <p class="small">Based on ${esc(suggestion.basis||'the billing cycle')}, this subscription looks like <b>${esc(suggestion.guessed)}</b>, but this contract is currently set to <b>${esc(suggestion.current||'—')}</b>. This is only a suggestion — it's never applied automatically. Fix it now?</p>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Leave as-is</button>
-    <button class="btn primary" onclick="closeDlg();editContractProgramDlg(${contractId},'${esc(suggestion.current||'').replace(/'/g,"\\'")}',null,'${esc(suggestion.guessed).replace(/'/g,"\\'")}')">Review &amp; fix</button></div>`);
+    <button class="btn primary" onclick="closeDlg();programChangeDlg(${contractId},'${esc(suggestion.current||'').replace(/'/g,"\\'")}',null,'${esc(suggestion.guessed).replace(/'/g,"\\'")}',null,'keap')">Review &amp; fix</button></div>`);
 }
 /* Manual override of a contract's program/cadence label — the fix for exactly the
  * kind of mismatch offerProgramFix() surfaces, or just a direct correction any time.
@@ -2501,6 +2501,72 @@ async function saveStores(contractId){
   closeDlg(); await refresh();
   toast(stores.length?`Saved ${stores.length} store(s)`:'Stores cleared');
 }
+/* ---------- Change program (cadence change with schedule follow-through) ----------
+ * Keap is changed first; this makes the app follow. Preview shows exactly what will
+ * happen to every open visit before anything is written. See server planProgramChange. */
+function nextOpenDueFor(contractId){
+  const open = D.visits.filter(v => v.contract_id === contractId && !v.completed && v.due >= TODAY).sort((a,b)=>a.due.localeCompare(b.due));
+  return open.length ? open[0].due : TODAY;
+}
+function programChangeDlg(contractId, currentProgram, currentVisits, suggestedProgram, effectiveDate, source){
+  const startProgram = suggestedProgram || currentProgram;
+  const eff = effectiveDate || nextOpenDueFor(contractId);
+  openDlg(`<h3>Change program</h3>
+    <p class="small" style="color:var(--muted)">Currently <b>${esc(currentProgram||'—')}</b> · ${currentVisits ?? '—'} visits per cycle.${suggestedProgram ? ` Keap now bills <b>${esc(suggestedProgram)}</b>.` : ''}</p>
+    <div class="controls" style="align-items:flex-end;margin-top:8px">
+      <div><label style="display:block;margin:0 0 3px">New program</label><select id="pcProg" onchange="$('#pcN').value=CYCLE_LEN[this.value]||0;$('#pcPlan').innerHTML=''">${progOpts(startProgram)}</select></div>
+      <div><label style="display:block;margin:0 0 3px">Visits / cycle</label><input type="number" id="pcN" min="0" max="24" style="width:80px" value="${CYCLE_LEN[startProgram] ?? 0}" oninput="$('#pcPlan').innerHTML=''"></div>
+      <div><label style="display:block;margin:0 0 3px">Effective from</label><input type="date" id="pcEff" value="${eff}" style="width:150px" onchange="$('#pcPlan').innerHTML=''"></div>
+      <button class="btn primary" onclick="programChangePreview(${contractId})">Preview</button>
+    </div>
+    <p class="small" style="margin-top:8px">Completed visits are never touched. Open visits due before the effective date stay as they are. From the effective date, unscheduled visits are replaced by a fresh cycle starting at 1; visits already on a coach's calendar keep their week and are relabelled into the new cycle.</p>
+    <div id="pcPlan" style="margin-top:10px"></div>
+    <div class="dlgrow" style="margin-top:12px">
+      <button class="btn" onclick="closeDlg()">Cancel</button>
+      <span style="flex:1"></span>
+      <a class="small" style="cursor:pointer;color:var(--muted)" onclick="closeDlg();editContractProgramDlg(${contractId},'${esc(currentProgram||'').replace(/'/g,"\\'")}',${currentVisits ?? 'null'})" title="Correct the label only — no visits added, removed or moved">just relabel the contract</a>
+    </div>`, {wide:true});
+  st._pcSource = source || 'manual';
+}
+async function programChangePreview(contractId){
+  const body = { program: $('#pcProg').value, visits: +$('#pcN').value, effective_date: $('#pcEff').value };
+  const out = $('#pcPlan'); out.innerHTML = '<p class="small">Working out the plan…</p>';
+  try{
+    const p = await api('POST', `/api/contracts/${contractId}/program-change/preview`, body);
+    const row = (a,b,c) => `<tr><td class="mono">${a}</td><td>${b}</td><td class="small">${c}</td></tr>`;
+    let h = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:10px">
+      <div class="card"><div class="k">${p.keep}</div><div class="l">left alone (due before ${fmt(p.effective_date)})</div></div>
+      <div class="card"><div class="k" style="color:var(--bad)">${p.remove.length}</div><div class="l">unscheduled, removed</div></div>
+      <div class="card"><div class="k" style="color:#1d4f91">${p.relabel.filter(r=>!r.untouched).length}</div><div class="l">on calendar, relabelled</div></div>
+      <div class="card"><div class="k" style="color:var(--ok)">${p.create.length}</div><div class="l">new ${esc(p.to.program)} visits created</div></div>
+    </div>`;
+    if(p.relabel.length) h += `<h3 style="margin:10px 0 4px">Kept on the calendar</h3><table><tr><th>Week of</th><th>Becomes</th><th></th></tr>${p.relabel.map(r=>row(fmtW(r.cal_week), r.untouched ? `${esc(r.from)} (unchanged — ${esc(p.to.program)} has no cycle)` : `<b>${esc(r.to)} ${esc(p.to.program)}</b> · due ${fmt(r.due)}`, `was ${esc(r.from)}${r.cal_coach?' · '+esc(coach(r.cal_coach)?.name||''):''}`)).join('')}</table>`;
+    if(p.remove.length) h += `<h3 style="margin:10px 0 4px">Removed (never scheduled)</h3><table><tr><th>Due</th><th>Cycle</th><th></th></tr>${p.remove.map(r=>row(fmt(r.due), esc(r.cycle), '')).join('')}</table>`;
+    if(p.create.length) h += `<h3 style="margin:10px 0 4px">New cycle</h3><table><tr><th>Due</th><th>Cycle</th><th></th></tr>${p.create.map(r=>row(fmt(r.due), `${esc(r.cycle)} ${esc(p.to.program)}`, '')).join('')}</table>`;
+    const same = p.from.program === p.to.program && +p.from.visits === +p.to.visits;
+    h += `<div class="dlgrow" style="margin-top:12px">${same ? '<span class="small">That is already the contract\'s program — pick a different one.</span>' : `<button class="btn primary" onclick="programChangeApply(${contractId})">Apply change</button>`}</div>`;
+    out.innerHTML = h;
+  }catch(e){ out.innerHTML = `<p class="small" style="color:var(--bad)">${esc(e.message||'Preview failed')}</p>`; }
+}
+async function programChangeApply(contractId){
+  const body = { program: $('#pcProg').value, visits: +$('#pcN').value, effective_date: $('#pcEff').value, source: st._pcSource || 'manual' };
+  try{
+    const r = await api('POST', `/api/contracts/${contractId}/program-change`, body);
+    closeDlg();
+    toast(`Program changed — ${r.relabelled} kept on calendar, ${r.removed} removed, ${r.created} created`);
+    await refresh();
+  }catch(e){ uiAlert(e.message||'Change failed'); }
+}
+function cadenceBanner(contracts){
+  const flagged = (contracts||[]).filter(c => c.cadence_flag && c.status === 'active');
+  if(!flagged.length || D.user.role !== 'admin') return '';
+  return flagged.map(c => `<div style="background:#fdeecd;border-left:5px solid #c77d0a;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+    <div style="flex:1;min-width:240px"><div style="font-family:var(--head);font-size:14px;letter-spacing:1px;text-transform:uppercase;color:#8a5b06;font-weight:600">Keap billing changed</div>
+      <div style="font-size:13px;margin-top:3px">This contract is stored as <b>${esc(c.program)}</b>, but Keap now bills <b>${esc(c.cadence_flag.suggested_program)}</b> (per ${esc(c.cadence_flag.basis||'the subscription')}, checked ${fmt(c.cadence_flag.detected_at.slice(0,10))}). Review how the visit schedule should follow.</div></div>
+    <button class="btn primary" onclick="programChangeDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits},'${esc(c.cadence_flag.suggested_program).replace(/'/g,"\\'")}',null,'keap')">Review schedule change</button>
+  </div>`).join('');
+}
+
 function editContractProgramDlg(contractId, currentProgram, currentVisits, suggestedProgram){
   const startProgram = suggestedProgram || currentProgram;
   openDlg(`<h3>Edit program &amp; cadence</h3>
@@ -2783,6 +2849,7 @@ function clientProfileView(data, notes){
 
   const archivedContracts = contracts.filter(c=>c.archived_at);
   const liveContracts = contracts.filter(c=>!c.archived_at);
+  html += cadenceBanner(contracts);
   html += `<div class="panel"><h2>Assignment &amp; Keap details</h2>`;
   if(canEdit()){
     html += `<label>Assigned coach</label>
@@ -2795,7 +2862,7 @@ function clientProfileView(data, notes){
   }
 
   html += `<table style="margin-top:10px"><tr><th>Program</th><th>Cadence (visits)</th><th>Started</th><th class="num">Price</th><th>Status</th><th>Source</th><th>Keap link</th>${D.user.role==='admin'?'<th></th>':''}</tr>` +
-    liveContracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Edit program/cadence" onclick="editContractProgramDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
+    liveContracts.map(c=>`<tr><td>${esc(c.program||'—')}${D.user.role==='admin'?` <button class="btn tiny" title="Change program / cadence (with schedule follow-through)" onclick="programChangeDlg(${c.id},'${esc(c.program||'').replace(/'/g,"\\'")}',${c.visits})">✎</button>`:''}${contractStoresHtml(c)}</td><td class="num">${c.visits}</td><td class="mono">${fmt(c.start_date)}</td>
       <td class="num">${c.price?'$'+c.price:'—'}</td>
       <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">completed</span>'}</td>
       <td class="small">${esc(c.source||'—')}</td>
@@ -3672,10 +3739,11 @@ async function loadCadenceChangeAudit(){
     if(r.errors && r.errors.length) h += `<p class="small" style="color:var(--bad,#c23b3b)">${r.errors.length} error(s): ${r.errors.slice(0,5).map(esc).join('; ')}${r.errors.length>5?'…':''}</p>`;
     if(!r.changes.length) h += `<p>Checked ${r.checked} contract(s) — no cadence mismatches. ✔</p>`;
     else h += `<p>Checked ${r.checked} contract(s) — <b>${r.changes.length} mismatch(es):</b></p>
-      <table><tr><th>Client</th><th>Current</th><th>Keap implies</th><th>Basis</th></tr>` +
+      <table><tr><th>Client</th><th>Current</th><th>Keap implies</th><th>Basis</th><th></th></tr>` +
       r.changes.map(c=>`<tr><td>${clientLink(c.client, c.clientId)}</td>
-        <td>${esc(c.currentProgram||'—')}</td><td><b>${esc(c.suggestedProgram)}</b></td><td class="small">${esc(c.basis)}</td></tr>`).join('') +
-      `</table><p class="small" style="color:var(--muted)">Fix from the client's profile with "Regenerate schedule" on that contract.</p>`;
+        <td>${esc(c.currentProgram||'—')}</td><td><b>${esc(c.suggestedProgram)}</b></td><td class="small">${esc(c.basis)}</td>
+        <td><button class="btn tiny primary" onclick="programChangeDlg(${c.contractId},'${esc(c.currentProgram||'').replace(/'/g,"\\'")}',null,'${esc(c.suggestedProgram).replace(/'/g,"\\'")}',null,'keap')">Review schedule change</button></td></tr>`).join('') +
+      `</table><p class="small" style="color:var(--muted)">Each flagged client's profile also shows this as a banner. "Review schedule change" previews exactly which visits are kept, relabelled, removed and created before anything is applied.</p>`;
     $('#cadenceChangeOut').innerHTML = h;
   }catch(e){ $('#cadenceChangeOut').innerHTML = '<p>Could not load.</p>'; }
 }

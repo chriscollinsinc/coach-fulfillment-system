@@ -2720,7 +2720,7 @@ async function runNightlyMaintenance(actorEmail){
       `Coach Fulfillment System — nightly summary for ${new Date().toISOString().slice(0,10)}`,
       '',
       `Keap sync: ${summary.sync.error ? 'FAILED — ' + summary.sync.error : `checked ${summary.sync.checked}, price updated ${summary.sync.priceChanged}, status changed ${summary.sync.statusChanged}, errors ${syncErrors}`}`,
-      `Cadence changes (DETECT ONLY — review at Admin → Data → Cadence changes, re-anchor with Regenerate): ${summary.cadence.error ? 'FAILED — ' + summary.cadence.error : `${summary.cadence.changes.length} of ${summary.cadence.checked} linked contract(s) flagged`}`,
+      `Cadence changes vs Keap (flagged, not applied — each client's profile shows a "Review schedule change" banner): ${summary.cadence.error ? 'FAILED — ' + summary.cadence.error : `${summary.cadence.changes.length} of ${summary.cadence.checked} linked contract(s) flagged`}`,
       ...(summary.cadence && summary.cadence.changes && summary.cadence.changes.length
         ? summary.cadence.changes.slice(0,15).map(ch => `  - ${ch.client}: ${ch.currentProgram} → ${ch.suggestedProgram} (per ${ch.basis})`)
           .concat(summary.cadence.changes.length > 15 ? [`  …and ${summary.cadence.changes.length - 15} more`] : [])
@@ -2907,6 +2907,9 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
     const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
     if(!cl) return err(res, 404, 'not found');
     const contracts = db.prepare('SELECT * FROM contracts WHERE client_id=? ORDER BY created DESC').all(cl.id);
+    const flagQ = db.prepare('SELECT suggested_program, basis, detected_at FROM cadence_flags WHERE contract_id=?');
+    const histQ = db.prepare('SELECT * FROM contract_program_changes WHERE contract_id=? ORDER BY effective_date DESC, id DESC');
+    for(const c of contracts){ c.cadence_flag = flagQ.get(c.id) || null; c.program_changes = histQ.all(c.id); }
     const visits = db.prepare('SELECT * FROM visits WHERE client_id=? ORDER BY due').all(cl.id);
     const year = new Date().getUTCFullYear();
     const visitsThisYear = visits.filter(v => v.due && +v.due.slice(0,4) === year);
@@ -3581,6 +3584,18 @@ async function detectCadenceChanges(){
       await new Promise(r => setTimeout(r, 120)); // stay well under Keap's rate limit
     }catch(e){ out.errors.push(`contract ${c.id}: ${String(e && e.message || e)}`); }
   }
+  // Persist for the client-profile banner: replace the flag set wholesale (only when the
+  // run wasn't a total failure), so a contract that came back into line drops its flag.
+  if(out.checked > 0){
+    const now = new Date().toISOString();
+    db.exec('BEGIN');
+    try{
+      db.exec('DELETE FROM cadence_flags');
+      const ins = db.prepare('INSERT INTO cadence_flags(contract_id, suggested_program, basis, detected_at) VALUES(?,?,?,?)');
+      for(const ch of out.changes) ins.run(ch.contractId, ch.suggestedProgram, ch.basis || '', now);
+      db.exec('COMMIT');
+    }catch(e){ db.exec('ROLLBACK'); }
+  }
   return out;
 }
 route('GET', /^\/api\/admin\/cadence-change-audit$/, ['admin'], async (req, res) => {
@@ -3749,6 +3764,100 @@ route('POST', /^\/api\/contracts\/(\d+)\/extend$/, ['admin','lead'], (req, res, 
   send(res, 200, { ok: true, horizon: rollingHorizon(), ...r });
 });
 
+
+/* ---------- program change (Monthly -> Semi-Monthly etc.) ----------
+ * Workflow (Mike, 2026-09-15): the contract is changed in Keap FIRST; the app follows.
+ * The nightly cadence detector spots the mismatch and stores a flag; the client profile
+ * shows a banner that opens this flow pre-filled. The same flow is also available by
+ * hand from the contract row for the rare case Keap can't express.
+ *
+ * Rules, in order:
+ *  - Completed visits are never touched and keep their old program + cycle label.
+ *  - Not-completed visits due BEFORE the effective date are left alone (still owed
+ *    under the old deal), placed or not.
+ *  - From the effective date: unscheduled visits under the old program are deleted;
+ *    visits already PLACED on a coach's calendar keep their week and are relabelled
+ *    into the first slots of the new cycle.
+ *  - A fresh cycle starts at "1 of n" for the new program (a cycle is per program;
+ *    progress does not carry), generated to the horizon then on to "n of n".
+ *  - Coaching Only / LID (no repeating cadence): future unscheduled visits are removed,
+ *    nothing is generated.
+ * Everything is computed by planProgramChange (pure, no writes) so preview and apply
+ * can never disagree. */
+function planProgramChange(contract, toProgram, toVisits, effectiveDate){
+  const n = +toVisits, iv = INTERVAL[toProgram] ?? 0;
+  const eff = effectiveDate;
+  const open = db.prepare('SELECT * FROM visits WHERE contract_id=? AND completed=0 ORDER BY due, id').all(contract.id);
+  const keep = open.filter(v => (v.due || '') < eff);
+  const after = open.filter(v => (v.due || '') >= eff);
+  const placed = after.filter(v => v.cal_week).sort((a,b) => (a.cal_week||'').localeCompare(b.cal_week||''));
+  const remove = after.filter(v => !v.cal_week);
+  const relabel = [], create = [];
+  if(n > 0 && iv > 0){
+    const horizon = rollingHorizon();
+    const step = iso => { const d = new Date(iso + 'T12:00:00'); d.setMonth(d.getMonth() + iv); return d.toISOString().slice(0, 10); };
+    let k = 1;
+    // Placed visits keep their own due date and week; they simply become 1..m of the new cycle.
+    for(const p of placed){ relabel.push({ id: p.id, from: p.cycle, to: `${k} of ${n}`, due: p.due, cal_week: p.cal_week, cal_coach: p.cal_coach }); k = (k % n) + 1; }
+    // New visits continue the cadence from the last kept visit (or from the effective date).
+    let due = placed.length ? step(placed[placed.length - 1].due) : eff, guard = 0;
+    while((due <= horizon || k !== 1) && guard < 60){
+      create.push({ cycle: `${k} of ${n}`, due });
+      k = (k % n) + 1; due = step(due); guard++;
+    }
+  } else {
+    // No cadence to generate — placed future visits can't be relabelled into anything;
+    // leave them for the admin to decide and just report them.
+    placed.forEach(p => relabel.push({ id: p.id, from: p.cycle, to: p.cycle, due: p.due, cal_week: p.cal_week, cal_coach: p.cal_coach, untouched: true }));
+  }
+  return { keep, remove, relabel, create };
+}
+function contractForChange(id){
+  return db.prepare(`SELECT c.*, cl.name AS client_name FROM contracts c JOIN clients cl ON cl.id=c.client_id WHERE c.id=?`).get(+id);
+}
+function parseChangeBody(body){
+  const program = String(body.program || '');
+  if(!PROGRAM_NAMES.includes(program)) return { error: 'unknown program' };
+  const visits = body.visits != null ? +body.visits : (CYCLE_LEN[program] ?? 0);
+  if(!Number.isFinite(visits) || visits < 0) return { error: 'bad visit count' };
+  const effective = /^\d{4}-\d{2}-\d{2}$/.test(body.effective_date || '') ? body.effective_date : null;
+  if(!effective) return { error: 'effective_date (YYYY-MM-DD) required' };
+  return { program, visits, effective };
+}
+route('POST', /^\/api\/contracts\/(\d+)\/program-change\/preview$/, ['admin'], (req, res, m, body) => {
+  const c = contractForChange(m[1]); if(!c) return err(res, 404, 'contract not found');
+  const p = parseChangeBody(body || {}); if(p.error) return err(res, 400, p.error);
+  const plan = planProgramChange(c, p.program, p.visits, p.effective);
+  send(res, 200, { ok: true, from: { program: c.program, visits: c.visits }, to: { program: p.program, visits: p.visits }, effective_date: p.effective, horizon: rollingHorizon(),
+    keep: plan.keep.length, remove: plan.remove.map(v => ({ id: v.id, cycle: v.cycle, due: v.due })), relabel: plan.relabel, create: plan.create });
+});
+route('POST', /^\/api\/contracts\/(\d+)\/program-change$/, ['admin'], (req, res, m, body, user) => {
+  const c = contractForChange(m[1]); if(!c) return err(res, 404, 'contract not found');
+  if(c.status !== 'active') return err(res, 400, 'Contract is not active');
+  const p = parseChangeBody(body || {}); if(p.error) return err(res, 400, p.error);
+  if(p.program === c.program && p.visits === +c.visits) return err(res, 400, 'That is already the contract\'s program');
+  const plan = planProgramChange(c, p.program, p.visits, p.effective);
+  const team = (db.prepare('SELECT team FROM visits WHERE contract_id=? AND team IS NOT NULL AND team<>\'\' ORDER BY id DESC LIMIT 1').get(c.id) || {}).team || null;
+  db.exec('BEGIN');
+  try{
+    db.prepare('UPDATE contracts SET program=?, visits=? WHERE id=?').run(p.program, p.visits, c.id);
+    const del = db.prepare('DELETE FROM visits WHERE id=?');
+    for(const v of plan.remove) del.run(v.id);
+    const rel = db.prepare('UPDATE visits SET program=?, cycle=?, due=? WHERE id=?');
+    for(const r of plan.relabel) if(!r.untouched) rel.run(p.program, r.to, r.due, r.id);
+    const ins = db.prepare(`INSERT INTO visits(client, client_id, contract_id, program, cycle, due, completed, team, source) VALUES(?,?,?,?,?,?,0,?,'program-change')`);
+    for(const v of plan.create) ins.run(c.client_name, c.client_id, c.id, p.program, v.cycle, v.due, team);
+    db.prepare(`INSERT INTO contract_program_changes(contract_id, from_program, from_visits, to_program, to_visits, effective_date, changed_by, source, created)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(c.id, c.program, c.visits, p.program, p.visits, p.effective, user.email, body.source === 'keap' ? 'keap' : 'manual', new Date().toISOString());
+    db.prepare('DELETE FROM cadence_flags WHERE contract_id=?').run(c.id);
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); return err(res, 500, String(e && e.message || e)); }
+  log(user.email, 'contract.program_change', { contractId: c.id, client: c.client_name, from: c.program, to: p.program, effective: p.effective, removed: plan.remove.length, relabelled: plan.relabel.filter(r=>!r.untouched).length, created: plan.create.length });
+  send(res, 200, { ok: true, removed: plan.remove.length, relabelled: plan.relabel.filter(r=>!r.untouched).length, created: plan.create.length });
+});
+route('GET', /^\/api\/contracts\/(\d+)\/program-changes$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  send(res, 200, db.prepare('SELECT * FROM contract_program_changes WHERE contract_id=? ORDER BY effective_date DESC, id DESC').all(+m[1]));
+});
 
 /* ================= server ================= */
 const server = http.createServer((req, res) => {

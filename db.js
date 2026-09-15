@@ -209,6 +209,24 @@ ensureColumn('client_notes', 'visit_id', 'INTEGER');
 ensureColumn('client_notes', 'source', "TEXT NOT NULL DEFAULT 'app'");
 ensureColumn('client_notes', 'keap_note_id', 'TEXT');
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ucn_keap_note ON client_notes(keap_note_id) WHERE keap_note_id IS NOT NULL;`);
+/* Program changes (2026-09-15): one row per cadence change applied to a contract, so
+ * Visit History can say "Monthly until Feb 2027, Semi-Monthly from Mar 2027". */
+db.exec(`CREATE TABLE IF NOT EXISTS contract_program_changes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  contract_id INTEGER NOT NULL,
+  from_program TEXT, from_visits INTEGER,
+  to_program TEXT NOT NULL, to_visits INTEGER NOT NULL,
+  effective_date TEXT NOT NULL,
+  changed_by TEXT, source TEXT DEFAULT 'manual',
+  created TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS icpc_contract ON contract_program_changes(contract_id);
+/* What the nightly Keap cadence check last found: contracts whose billing now implies a
+ * different program than stored. Refreshed each night; cleared when a change is applied. */
+CREATE TABLE IF NOT EXISTS cadence_flags(
+  contract_id INTEGER PRIMARY KEY,
+  suggested_program TEXT NOT NULL,
+  basis TEXT DEFAULT '',
+  detected_at TEXT NOT NULL);`);
 /* 2026-09-14: notes split into Coaching Calls (monthly, counted for coverage), Visit
  * Notes (live on the visit row), and General (anything else). Older databases carry a
  * CHECK that only allows 'Coaching Call'/'LID'; SQLite can't alter a CHECK in place,
