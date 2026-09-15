@@ -333,6 +333,20 @@ function orderProblem(v){ // for a PLACED, not-completed visit: is it out of ord
   const c = lap.find(x=>x.k>me.k && wk(x) && wk(x) < v.cal_week); if(c) return `placed after ${c.cycle} (wk of ${fmtW(wk(c))})`;
   return null;
 }
+/* "Needs scheduling" / "Overdue — no plan" as a link into the calendar: placement mode for
+ * anyone allowed to place this visit (unless a lower-numbered visit must go first), else
+ * just the calendar at the due month. */
+function unscheduledPill(v, extra=''){
+  const over = v.due && v.due < TODAY;
+  const text = over ? `Overdue — no plan${extra}` : `Needs scheduling${extra}`;
+  const cls = over ? 'p-over' : 'p-due';
+  const can = canEdit() || ownsVisit(v);
+  const blocked = can ? placeBlockReason(v) : null;
+  const dateCmd = v.due ? `st.boardY=${+v.due.slice(0,4)};st.boardM=${+v.due.slice(5,7)-1};` : '';
+  const onclick = can && !blocked ? placeJump(v) : `st.view='board';${v.team?`st.boardTeam='${esc(v.team)}';`:''}${dateCmd}st.placing=null;render()`;
+  const title = blocked ? blocked : can ? 'Open the calendar and pick a week for this visit' : 'Open the calendar at this visit\'s due month';
+  return `<span class="pill ${cls}" style="cursor:pointer" title="${esc(title)}" onclick="event.stopPropagation();${onclick}">${text} ↗</span>`;
+}
 const canReschedule = v => canEdit() || (D.user.role==='coach' && !!v.client_assigned_coach_id && v.client_assigned_coach_id===D.user.coach_id);
 const myTeams = () => D.user.role==='admin' ? D.teams : [D.user.team];
 
@@ -1049,7 +1063,7 @@ function todayCoachView(t){
     const f = full(v);
     if(f.completed) return completedPill(f);
     if(f.cal_week) return calendarPill(f);
-    return f.due && f.due<TODAY ? '<span class="pill p-over">overdue — no plan</span>' : '<span class="pill p-due">needs scheduling</span>';
+    return unscheduledPill(f);
   };
   const actions = v => {
     const f = full(v);
@@ -1502,9 +1516,9 @@ function inventory(){
     const sched=v.completed?(v.sched_hist||(v.cal_week?'wk of '+fmtW(v.cal_week):'—'))
       : v.cal_week?`wk of ${fmtW(v.cal_week)} — ${esc(coach(v.cal_coach)?.name||'')}`:'—';
     const pill=v.completed?'<span class="pill p-done">Completed</span>'
-      :s==='overdue'?`<span class="pill p-over">Overdue — no plan${od>=30?` · ${od}d`:''}</span>`
+      :s==='overdue'?unscheduledPill(v, od>=30?` · ${od}d`:'')
       :s==='on_calendar'?calendarPill(v)
-      :s==='needs_scheduling'?'<span class="pill p-due">Needs scheduling</span>':'<span class="pill p-fut">—</span>';
+      :s==='needs_scheduling'?unscheduledPill(v):'<span class="pill p-fut">—</span>';
     // Row styling for orphaned visits
     let rowBg = '';
     if(isOrphaned(v)){
@@ -2838,7 +2852,7 @@ function clientProfileView(data, notes){
   const visitRow = v => {
     const pill = v.completed?completedPill(v)
       : v.cal_week?calendarPill(v)
-      : (v.due&&v.due<TODAY?'<span class="pill p-over">overdue — no plan</span>':'<span class="pill p-due">needs scheduling</span>');
+      : unscheduledPill(v);
     const placedCoach = v.cal_coach ? coach(v.cal_coach) : null;
     const assignedCoach = !placedCoach && client.assigned_coach_id ? coach(client.assigned_coach_id) : null;
     const coachCell = placedCoach ? esc(placedCoach.name)
@@ -3445,7 +3459,7 @@ function adminDataView(){
   <p class="small" style="margin-bottom:12px">One row per day, captured by the nightly job — total active revenue and client count, so drift (toward or away from Keap) shows as a trend.</p>
   <div id="revenueHistoryOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Cycle order</h2>
-  <p class="small" style="margin-bottom:12px">Visits go on the calendar in cycle order — "3 of 12" can't be placed while "2 of 12" is unscheduled, and weeks can't leapfrog. The server blocks it for everyone (admins can override with a logged reason). This lists anything already on the calendar that breaks the rule, so you can unschedule and re-place it.</p>
+  <p class="small" style="margin-bottom:12px">One hard rule: "3 of 12" can't be placed while "2 of 12" is still unscheduled (admins can override with a logged reason). A visit is never tied to its due month — any week is allowed. Weeks that leapfrog a neighbour (a later visit placed in an earlier week) are allowed but listed here as advisory, alongside anything that slipped past the hard rule, so you can review and re-place if you want to.</p>
   <div class="controls"><button class="btn" onclick="loadOutOfOrder()">Refresh</button></div>
   <div id="outOfOrderOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Archived clients</h2>

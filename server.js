@@ -500,9 +500,12 @@ route('POST', /^\/api\/visits\/(\d+)\/place$/, ['admin','lead','coach'], (req, r
   if(!/^\d{4}-\d{2}-\d{2}$/.test(body.week || '')) return err(res, 400, 'bad week');
   body.week = snapMonday(body.week);
   if(!cellFree(body.coach, body.week, v.id)) return err(res, 409, 'That week is no longer open');
-  // Cycle order: enforced for everyone; admin may override with force + reason.
+  // Cycle order — the HARD rule is only "a lower-numbered visit is still unscheduled"
+  // (Mike, 2026-09-15: any week is fine; a visit is never tied to its due month, and
+  // weeks may leapfrog for all sorts of real reasons — those are advisory only and show
+  // in Admin → Data → Cycle order). Admin may override the hard rule with force + reason.
   const problem = placementProblem(v, body.week);
-  if(problem){
+  if(problem && problem.code === 'earlier_unscheduled'){
     const override = user.role === 'admin' && body.force === true;
     if(!override) return send(res, 409, { error: `Out of order — ${problem.message}`, code: 'out_of_order', problem, canOverride: user.role === 'admin' });
     log(user.email, 'visit.place_out_of_order_override', { id: v.id, client: v.client, cycle: v.cycle, week: body.week, problem: problem.code, reason: String(body.reason || '').slice(0, 200) });
