@@ -915,7 +915,7 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
   const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
   if(user.role === 'coach' && user.coach_id !== c.id) return err(res, 403, 'You can only view your own profile');
   if(user.role === 'lead' && !canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
-  const assignedClients = db.prepare(`SELECT id, name, status FROM clients WHERE assigned_coach_id=? AND deleted_at IS NULL ORDER BY name`).all(c.id);
+  const assignedClients = db.prepare(`SELECT id, name, status FROM clients WHERE assigned_coach_id=? AND deleted_at IS NULL AND archived_at IS NULL ORDER BY name`).all(c.id);
   const yr = new Date().getFullYear();
   const visitHistory = db.prepare(`
     SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.scheduled_week, v.completed_by_email
@@ -2647,7 +2647,7 @@ function sweepRollingSchedule(opts = {}){
     SELECT c.*, cl.name AS client_name FROM contracts c
     JOIN clients cl ON cl.id = c.client_id
     WHERE c.status='active' AND cl.deleted_at IS NULL AND cl.status != 'cancelled'
-      AND cl.notice_given_date IS NULL
+      AND cl.archived_at IS NULL AND cl.notice_given_date IS NULL
   `).all();
   let totalCreated = 0;
   const perClient = [];
@@ -2697,6 +2697,8 @@ async function runNightlyMaintenance(actorEmail){
   catch(e){ summary.purge = { error: String(e && e.message || e) }; }
   try{ summary.holds = sweepProspectHolds(); }
   catch(e){ summary.holds = { error: String(e && e.message || e) }; }
+  try{ summary.archive = archiveCancelledClients(); }
+  catch(e){ summary.archive = { error: String(e && e.message || e) }; }
   try{ summary.health = snapshotClientHealth(); }
   catch(e){ summary.health = { error: String(e && e.message || e) }; }
   try{ summary.backup = await takeBackupAndEmail(actorEmail); }
@@ -2733,6 +2735,7 @@ async function runNightlyMaintenance(actorEmail){
         ? summary.rollingSchedule.perClient.slice(0,15).map(p => `  - ${p.client} [${p.program}]: +${p.created} (${p.visits[0].cycle} due ${p.visits[0].due}${p.created>1 ? ` … ${p.visits[p.visits.length-1].cycle} due ${p.visits[p.visits.length-1].due}` : ''})`)
           .concat(summary.rollingSchedule.perClient.length > 15 ? [`  …and ${summary.rollingSchedule.perClient.length - 15} more`] : [])
         : []),
+      `Archived: ${!summary.archive ? 'n/a' : summary.archive.error ? 'FAILED — ' + summary.archive.error : summary.archive.archived ? `${summary.archive.archived} cancelled client(s) moved to the archive: ${summary.archive.clients.map(c => `${c.client} (${c.visitsDeleted} open visit${c.visitsDeleted===1?'':'s'} removed)`).join(', ')}` : 'nothing new'}`,
       `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
       `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
       `Database backup: ${summary.backup.ok ? `sent (${Math.round((summary.backup.sizeBytes||0)/1024)} KB)` : 'FAILED — ' + (summary.backup.error || 'see results')}`,
@@ -2826,7 +2829,7 @@ route('GET', /^\/api\/clients\/export\.csv$/, ['admin','lead'], (req, res) => {
     FROM clients cl
     LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
     WHERE cl.deleted_at IS NULL
-    ORDER BY cl.status='active' DESC, cl.name`).all();
+    ORDER BY cl.archived_at IS NULL DESC, cl.status='active' DESC, cl.name`).all();
   const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active'").all();
   const byClient = {};
   for(const c of activeContracts) (byClient[c.client_id] ||= []).push(c);
@@ -3053,6 +3056,71 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], async (req, res, m, 
   }
   send(res, 200, result);
 });
+/* ----- archive / reactivate -----
+ * Archiving hides a departed client from every working surface while keeping all of
+ * their history: completed visits, visit notes, coaching calls, general notes,
+ * contracts and Keap links stay untouched. Not-completed visits are deleted (a future
+ * visit for a client who left isn't data worth keeping — Mike, 2026-09-15); Reactivate
+ * flips them back and the schedule is rebuilt with Extend visits. Triggered by the Keap
+ * sync when the last contract cancels, by the nightly backfill for anyone already
+ * cancelled, or by hand from the profile. */
+function archiveClient(cl, reason, actor){
+  if(cl.archived_at) return { alreadyArchived: true, visitsDeleted: 0 };
+  const now = new Date().toISOString();
+  db.exec('BEGIN');
+  let visitsDeleted = 0;
+  try{
+    visitsDeleted = db.prepare('DELETE FROM visits WHERE client_id=? AND completed=0').run(cl.id).changes;
+    db.prepare("UPDATE clients SET archived_at=?, archive_reason=?, archived_by=?, notice_given_date=NULL, status=CASE WHEN status='active' THEN 'cancelled' ELSE status END WHERE id=?")
+      .run(now, String(reason || '').slice(0, 200), actor || 'system', cl.id);
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); throw e; }
+  log(actor || 'system', 'client.archive', { clientId: cl.id, name: cl.name, reason, visitsDeleted });
+  return { alreadyArchived: false, visitsDeleted };
+}
+function reactivateClient(cl, actor){
+  db.prepare("UPDATE clients SET archived_at=NULL, archive_reason=NULL, archived_by=NULL, status='active' WHERE id=?").run(cl.id);
+  // If Keap still shows no active contract this will flip back on the next sync — that's
+  // the point: reactivation is for "Keap was wrong" or "they came back and the new
+  // contract is on its way".
+  log(actor || 'system', 'client.reactivate', { clientId: cl.id, name: cl.name, wasArchivedAt: cl.archived_at, wasReason: cl.archive_reason });
+}
+/* Nightly: anyone whose status is already cancelled but who was never archived (clients
+ * that churned before this feature existed) gets archived, so they leave the working
+ * surfaces without someone having to find them one by one. Reported in the summary. */
+function archiveCancelledClients(){
+  const rows = db.prepare("SELECT * FROM clients WHERE deleted_at IS NULL AND archived_at IS NULL AND status='cancelled'").all();
+  const done = [];
+  for(const cl of rows){
+    const hasActive = db.prepare("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'").get(cl.id).c > 0;
+    if(hasActive) continue; // status says cancelled but a contract is live — leave for a human
+    const r = archiveClient(cl, 'Backfill: client status cancelled, no active contract', 'system.nightly');
+    done.push({ client: cl.name, visitsDeleted: r.visitsDeleted });
+  }
+  return { archived: done.length, clients: done };
+}
+route('POST', /^\/api\/clients\/(\d+)\/archive$/, ['admin','lead'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  if(cl.archived_at) return err(res, 400, 'Already archived');
+  const r = archiveClient(cl, body && body.reason ? body.reason : 'Archived by hand', user.email);
+  send(res, 200, { ok: true, visitsDeleted: r.visitsDeleted });
+});
+route('POST', /^\/api\/clients\/(\d+)\/reactivate$/, ['admin','lead'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  if(!cl.archived_at) return err(res, 400, 'Not archived');
+  reactivateClient(cl, user.email);
+  send(res, 200, { ok: true });
+});
+route('GET', /^\/api\/clients\/archived$/, ['admin','lead'], (req, res) => {
+  send(res, 200, db.prepare(`SELECT cl.id, cl.name, cl.status, cl.archived_at, cl.archive_reason, cl.archived_by, co.name AS assigned_coach_name,
+      (SELECT COUNT(*) FROM visits v WHERE v.client_id=cl.id AND v.completed=1) AS completed_visits,
+      (SELECT MAX(COALESCE(scheduled_week,due)) FROM visits v WHERE v.client_id=cl.id AND v.completed=1) AS last_visit
+    FROM clients cl LEFT JOIN coaches co ON co.id=cl.assigned_coach_id
+    WHERE cl.deleted_at IS NULL AND cl.archived_at IS NOT NULL ORDER BY cl.archived_at DESC`).all());
+});
+
 /* ----- 30-day cancellation notice -----
    Purely a manual marker: someone read an email saying a dealership is quitting, with
    a 30-day notice — Keap itself keeps showing the subscription as active until the
@@ -3700,6 +3768,10 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
       db.prepare('UPDATE clients SET status=? WHERE id=?').run(newClientStatus, client.id);
       log(source, 'client.status', { clientId: client.id, name: client.name, status: newClientStatus });
     }
+    // Keap-first archive: last contract cancelled → the client leaves the working
+    // surfaces tonight (Admin → Data → Recently archived lists it, with Reactivate).
+    if(!anyActive && !client.archived_at) archiveClient({ ...client, status: newClientStatus }, `Keap: subscription ${subId} cancelled`, source);
+    else if(anyActive && client.archived_at) reactivateClient(client, source);
   }
   // Note: we deliberately do NOT auto-delete future scheduled visits on churn — a lead
   // reviews the Inventory screen (now flagged via the client's cancelled status) and

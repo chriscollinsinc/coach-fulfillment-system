@@ -835,7 +835,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -886,7 +886,7 @@ async function globalSearch(q){
   const coachHits = canSeeCoaches ? D.coaches.filter(c=>norm(c.name).includes(q)).slice(0,4) : [];
   if(!clientHits.length && !coachHits.length){ out.innerHTML = `<div class="gs-empty">No matches</div>`; return; }
   out.innerHTML =
-    clientHits.map(c=>`<a onclick="gsGo('client',${c.id})"><b>${esc(c.name)}</b><span class="small"> · client${c.status==='active'?'':' · '+esc(c.status)}</span></a>`).join('') +
+    clientHits.map(c=>`<a onclick="gsGo('client',${c.id})"><b>${esc(c.name)}</b><span class="small"> · client${c.archived_at?' · archived':c.status==='active'?'':' · '+esc(c.status)}</span></a>`).join('') +
     coachHits.map(c=>`<a onclick="gsGo('coach','${c.id}')">${avatarHtml(c.name,c.team,18)} <b>${esc(c.name)}</b><span class="small"> · coach · ${esc(c.team)}</span></a>`).join('');
 }
 function gsGo(kind, id){
@@ -2296,6 +2296,7 @@ function clientsView(){
   return `<div class="panel"><h2>Clients</h2>
   <p class="small" style="margin-bottom:12px">Every dealership we've coached — with who's assigned, Keap-imported details, and a running notes history. Click a column header to sort.</p>
   <div class="controls"><input placeholder="Search client…" id="cliSearch" value="${esc(st.cliSearch||'')}" oninput="st.cliSearch=this.value;renderClientTable()" style="width:260px">
+    <label class="small" style="display:flex;align-items:center;gap:6px;margin:0"><input type="checkbox" ${st.cliShowArchived?'checked':''} onchange="st.cliShowArchived=this.checked;renderClientTable()"> Show archived <span id="cliArchivedN"></span></label>
     ${['admin','lead'].includes(D.user.role) ? `<a class="btn tiny" href="/api/clients/export.csv">Export CSV</a>` : ''}
     ${D.user.role==='admin' ? `<button class="btn tiny" id="keapSyncBtn" onclick="syncWithKeap()">Sync with Keap</button>` : ''}
   </div>
@@ -2350,6 +2351,9 @@ function renderClientTable(){
   const sel = st.cliSel || (st.cliSel = new Set());
   const q = norm(st.cliSearch||'');
   let rows = (st.clientsList||[]).slice();
+  const archivedN = rows.filter(c=>c.archived_at).length;
+  const nEl = $('#cliArchivedN'); if(nEl) nEl.textContent = archivedN ? `(${archivedN})` : '';
+  if(!st.cliShowArchived) rows = rows.filter(c=>!c.archived_at);
   if(q) rows = rows.filter(c=>norm(c.name).includes(q));
   const { key, dir } = st.cliSort;
   const col = CLIENT_COLS.find(c=>c.key===key);
@@ -2822,10 +2826,16 @@ function clientProfileView(data, notes){
       <button class="btn tiny" onclick="go('clients')">← All clients</button>
       <span style="flex:1"></span>
       ${canEdit() && client.notice_given_date && client.status!=='cancelled' ? `<button class="btn tiny" onclick="clearClientNotice(${client.id})">Clear notice</button>` : ''}
+      ${canEdit() && !client.archived_at ? `<button class="btn tiny" title="Move to the archive: history kept, open visits removed, hidden from working lists" onclick="archiveClientDlg(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Archive client</button>` : ''}
+      ${canEdit() && client.archived_at ? `<button class="btn tiny primary" onclick="reactivateClient(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Reactivate</button>` : ''}
       ${D.user.role==='admin' ? `<button class="btn tiny danger" onclick="deleteClientDlg(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Delete client</button>` : ''}
     </div>
+    ${client.archived_at ? `<div style="background:#f0f0f1;border-left:5px solid #9a9aa2;padding:12px 16px;margin:10px 0 4px">
+      <div style="font-family:var(--head);font-size:14px;letter-spacing:1px;text-transform:uppercase;color:#55555c;font-weight:600">Archived</div>
+      <div style="font-size:13px;margin-top:3px">Since ${fmt(client.archived_at.slice(0,10))}${client.archive_reason ? ` — ${esc(client.archive_reason)}` : ''}. History below is intact; this client no longer appears in working lists, calendars or capacity. Reactivate to bring them back, then use Extend visits to rebuild the schedule.</div>
+    </div>` : ''}
     <h2 style="margin-top:8px">${esc(client.name)}
-      ${client.status==='active'?'<span class="pill p-done">active</span>':client.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}${noticePill(client)}
+      ${client.archived_at?'<span class="pill" style="background:#e8e8ea;color:#55555c">archived</span>':client.status==='active'?'<span class="pill p-done">active</span>':client.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}${noticePill(client)}
     </h2>
     ${client.notice_given_date ? `<p class="small" style="color:var(--muted)">30-day notice given ${fmt(client.notice_given_date)}${client.status!=='cancelled'?' — no open visits are scheduled for them':''}</p>` : ''}
     <div class="cards" style="margin-top:12px">
@@ -3383,6 +3393,7 @@ const FAQ = [
     { q: 'What does "Sync with Keap" do on the Clients page?', a: `Re-checks every contract that already has a Keap subscription ID against Keap's live record and updates price/status if they've drifted. It never touches a contract that isn't already Keap-linked, and if Keap can't be reached it reports an error for that item and changes nothing — a failed check never gets misread as "cancelled" or "$0."` },
   ]},
   { cat: 'Clients', roles: ['admin','lead','sales'], items: [
+    { q: 'A client cancelled — do I delete them?', a: `No — archive them (or let the app do it). When Keap reports their last contract cancelled, the client is archived that night: they drop out of the Clients list, Visit List, Today, calendars and capacity, and their open visits are removed. Everything they've done — completed visits, visit notes, coaching calls, general notes, contracts — stays on their profile, which you can still open from search or Admin → Data → Archived clients. Admins and leads can also archive by hand from the profile, and Reactivate if Keap was wrong or they come back. Delete is only for records that should never have existed.` },
     { q: 'I deleted a client by mistake — is it gone for good?', a: `No — deleting a client is a soft delete. It disappears from every normal list immediately, but it's fully recoverable for 30 days from Admin → Recently deleted. After 30 days a nightly job purges it permanently, along with its contracts, visits, and notes.` },
     { q: 'What happens if a new contract or subscription comes in for a client I soft-deleted?', a: `The app auto-restores the client the moment a new contract or Keap subscription matches their name — it never silently attaches new work to a hidden record. You'll see an audit log entry ("client.auto_restore") when this happens.` },
     { q: 'One Keap invoice covers multiple stores I visit separately — how should revenue be tracked?', a: `Pick one client as the "revenue owner" — it carries the real Keap subscription ID and full price. Every other client covered by that same invoice keeps its own visits and coach assignment, but its contract price is set to $0 with a pointer back to the revenue owner, so the $0 reads as "billed elsewhere" rather than "worth nothing." Revenue totals stay accurate with no manual splitting. See the SOP doc for the full Castle example.` },
@@ -3500,6 +3511,9 @@ function adminDataView(){
   <div class="panel"><h2>Revenue history</h2>
   <p class="small" style="margin-bottom:12px">One row per day, captured by the nightly job — total active revenue and client count, so drift (toward or away from Keap) shows as a trend.</p>
   <div id="revenueHistoryOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Archived clients</h2>
+  <p class="small" style="margin-bottom:12px">Clients who've left. Archiving happens automatically when Keap reports their last contract cancelled (and nightly for anyone already marked cancelled), or by hand from a profile. History is kept; open visits were removed. Reactivate if Keap was wrong or they come back.</p>
+  <div id="archivedOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Recently deleted</h2>
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
   <div id="deletedOut" class="small">Loading…</div></div>
@@ -4113,6 +4127,33 @@ async function loadRevenueHistory(){
       rows.slice(0,30).map(r=>`<tr><td class="mono">${esc(r.date)}</td><td class="num">${fmtMoney(r.total_revenue)}</td><td class="num">${r.active_clients}</td><td class="num">${r.keap_linked_contracts}</td></tr>`).join('') +
       `</table>`;
   }catch(e){ $('#revenueHistoryOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function loadArchivedClients(){
+  const el = $('#archivedOut'); if(!el) return;
+  try{
+    const rows = await api('GET','/api/clients/archived');
+    el.innerHTML = rows.length ? `<table><tr><th>Client</th><th>Archived</th><th>Why</th><th>Coach was</th><th>Completed visits</th><th>Last visit</th><th></th></tr>` +
+      rows.map(r=>`<tr><td>${clientLink(r.name, r.id)}</td><td class="mono">${fmt(r.archived_at.slice(0,10))}</td><td class="small">${esc(r.archive_reason||'')}</td><td>${esc(r.assigned_coach_name||'—')}</td><td class="num">${r.completed_visits}</td><td class="mono">${r.last_visit?fmt(r.last_visit):'—'}</td>
+        <td><button class="btn tiny" onclick="reactivateClient(${r.id},'${esc(r.name).replace(/'/g,"\\'")}')">Reactivate</button></td></tr>`).join('') + `</table>`
+      : `<p>No archived clients.</p>`;
+  }catch(e){ el.innerHTML = '<p>Could not load.</p>'; }
+}
+function archiveClientDlg(id, name){
+  openDlg(`<h3>Archive ${esc(name)}?</h3>
+    <p class="small">They leave the Clients list, Visit List, Today, calendars and capacity. Completed visits, notes and contracts are kept. <b>Open (not completed) visits are removed</b>, including any already on a coach's calendar.</p>
+    <label>Reason</label><input id="arcReason" placeholder="e.g. Cancelled — moved to in-house training" style="width:100%;box-sizing:border-box">
+    <div class="dlgrow" style="margin-top:12px"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="archiveClientGo(${id})">Archive</button></div>`);
+}
+async function archiveClientGo(id){
+  const reason = (($('#arcReason')||{}).value||'').trim() || 'Archived by hand';
+  try{ const r = await api('POST',`/api/clients/${id}/archive`,{ reason }); closeDlg(); toast(`Archived — ${r.visitsDeleted} open visit${r.visitsDeleted===1?'':'s'} removed`); await refresh(); }
+  catch(e){ uiAlert(e.message||'Archive failed'); }
+}
+async function reactivateClient(id, name){
+  if(!(await uiConfirm(`Reactivate ${name}? They return to the working lists as active. Use Extend visits on their contract afterwards to rebuild the schedule.`,'Reactivate'))) return;
+  try{ await api('POST',`/api/clients/${id}/reactivate`,{}); toast('Reactivated'); await refresh(); if($('#archivedOut')) loadArchivedClients(); }
+  catch(e){ uiAlert(e.message||'Reactivate failed'); }
 }
 async function loadDeletedClients(){
   try{

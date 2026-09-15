@@ -291,6 +291,12 @@ ensureColumn('keap_events', 'company_name', "TEXT DEFAULT ''");
  * that Keap still hasn't confirmed as cancelled). Client status itself is untouched —
  * they're still a real, paying, active client through their last month. */
 ensureColumn('clients', 'notice_given_date', 'TEXT');
+/* Archive (2026-09-15): a departed client keeps every byte of history but leaves every
+ * working surface (Clients list, Visit List, Today, calendars, capacity, health).
+ * Set automatically when Keap reports the last contract cancelled, or by hand. */
+ensureColumn('clients', 'archived_at', 'TEXT');
+ensureColumn('clients', 'archive_reason', 'TEXT');
+ensureColumn('clients', 'archived_by', 'TEXT');
 /* Company ID and synced name for direct Keap company lookups (when available,
    used to auto-populate company info in client profiles). */
 ensureColumn('clients', 'company_id', 'TEXT');
