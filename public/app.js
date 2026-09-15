@@ -1240,12 +1240,7 @@ function board(){
       Click any open week — <b>including past weeks</b>, to backfill a visit that already happened. <button class="btn tiny" onclick="st.placing=null;render()">Cancel</button></div>`;
   }
   html+=`<div class="controls">
-    ${global?`<span class="btn primary" style="cursor:default" title="All teams shown together">All teams</span>`:''}
-    ${myTeams().map(x=>`<button class="btn ${(!global&&x===t)?'primary':''}" onclick="st.view='board';st.boardTeam='${x}';st.placing=null;render()">${x}</button>`).join('')}
-    ${(!global&&myTeams().length>1)?`<button class="btn" onclick="st.view='global';st.placing=null;render()">All teams ▦</button>`:''}
-    ${(D.user.role === 'coach' && myTeams().length === 1)?`<button class="btn ${global?'primary':''}" onclick="st.view='${global?'board':'global'}';st.placing=null;render()">${global?'My Calendar':'Team Overview'}</button>`:''}
-    ${(canEditWeeks() && D.user.role !== 'coach')?`<button class="btn ${st.view==='formercoaches'?'primary':''}" onclick="st.view='formercoaches';st.placing=null;render()">Former Coaches</button>`:""}
-    ${D.user.coach_id?`<button class="btn" title="Your next 16 weeks as a list" onclick="st.view='mysched';st.placing=null;render()">☰ List view</button>`:''}
+    ${calendarSwitcher()}
     <span style="flex:1"></span>
     <div class="calsearch">
       <input id="calSearchBox" placeholder="🔍 Search a client's visits…" autocomplete="off" value="${esc(st.calSearch||'')}"
@@ -1387,6 +1382,27 @@ function calSearchJump(id){
   if(st.view!=='global'){ st.view='board'; if(v.team) st.boardTeam=v.team; }
   st.detail = (v.cal_week && v.cal_coach) ? v.id : null;
   st.placing=null; render();
+}
+/* One switcher for every calendar-shaped view, so the current view is always visible
+ * and the options read as choices, not as commands. Coaches (one team): My calendar ·
+ * Team <name> · List. Admin/lead/sales: one segment per team · All teams · Former
+ * coaches, plus List when the user is linked to a coach. */
+function calendarSwitcher(){
+  const v = st.view, teams = myTeams(), single = D.user.role === 'coach' && teams.length === 1;
+  const go = (view, extra='') => `st.view='${view}';st.placing=null;${extra}render()`;
+  const b = (label, on, onclick, title='') => `<button class="${on?'on':''}" ${on?'':`onclick="${onclick}"`} ${title?`title="${esc(title)}"`:''}>${label}</button>`;
+  let h = `<div class="seg">`;
+  if(single){
+    h += b('My calendar', v==='board', go('board'), 'Just your row, week by week');
+    h += b(`Team ${esc(teams[0])}`, v==='global', go('global'), `Everyone on team ${teams[0]}`);
+  } else {
+    if(teams.length > 1) h += `<span class="segl">Team</span>`;
+    for(const t of teams) h += b(esc(t), v==='board' && st.boardTeam===t, go('board', `st.boardTeam='${t}';`), `Team ${t}'s calendar`);
+    if(teams.length > 1) h += b('All teams', v==='global', go('global'), 'Every team on one board');
+    if(canEditWeeks() && D.user.role !== 'coach') h += b('Former coaches', v==='formercoaches', go('formercoaches'));
+  }
+  if(D.user.coach_id) h += b('☰ List', v==='mysched', go('mysched'), 'Your next 16 weeks as a list');
+  return h + `</div>`;
 }
 function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.detail=null; render(); }
 async function placeHere(cid,w){
@@ -3361,7 +3377,7 @@ function mySchedule(){
   const c=coach(cid);
   if(!c) return `<div class="panel"><h2>My schedule</h2><p class="small">Your account isn't linked to a coach yet — ask an admin to set it in Admin → Users.</p></div>`;
   const weeks=mondaysRange(TODAY,addDays(TODAY,7*16));
-  let html=`<div class="panel"><div class="controls" style="margin-bottom:8px"><button class="btn primary" style="cursor:default">☰ List view</button><button class="btn" onclick="st.view='board';render()">▦ Calendar</button></div>
+  let html=`<div class="panel"><div class="controls" style="margin-bottom:8px">${calendarSwitcher()}</div>
     <h2>${esc(c.name)} — next 16 weeks</h2><table><tr><th>Week of</th><th>Assignment</th><th>Details</th></tr>`;
   for(const w of weeks){
     const o=occ[cid+'|'+w];

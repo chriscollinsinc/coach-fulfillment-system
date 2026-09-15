@@ -455,3 +455,12 @@ table.recon-tbl tr:hover td{background:#faf6f0}
   background: currentColor;
   transform: scale(1.2);
 }
+
+/* Segmented view switcher (calendar: My calendar / Team / All teams / List) */
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+.seg button{font-family:var(--head);text-transform:uppercase;letter-spacing:.8px;font-size:12px;padding:8px 14px;border:none;border-right:1px solid var(--line);background:#fff;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.seg button:last-child{border-right:none}
+.seg button:hover{background:#f7f6f5;color:var(--ink)}
+.seg button.on{background:var(--secondary);color:#fff;font-weight:600;cursor:default}
+.seg button.on:hover{background:var(--secondary);color:#fff}
+.seg .segl{font-family:var(--head);text-transform:uppercase;letter-spacing:.8px;font-size:10.5px;color:var(--muted);padding:0 10px;display:inline-flex;align-items:center;border-right:1px solid var(--line)}
