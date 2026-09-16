@@ -805,6 +805,64 @@ function sweepProspectHolds(){
   return { expired: expired.map(h => h.name), expiring: expiring.map(h => `${h.name} (${h.expires})`) };
 }
 
+/* ----- Monthly coaching calls owed -----
+ * Every active client gets one coaching call a month, whether or not a visit happens
+ * (see the Coaching Calls panel on the client profile). A call is a client_notes row of
+ * type 'Coaching Call'; the month it counts for is its note_date, not when it was typed.
+ *
+ * Ownership is clients.assigned_coach_id — explicit, not inferred from who happened to
+ * visit last. Clients with no assigned coach can't be owed by anyone, so they're reported
+ * separately to admins instead of silently vanishing.
+ *
+ * Timing (Mike, 2026-09-16): the current month only counts as owed from the 10th, so the
+ * panel isn't 20 red rows every 1st. Last month counts as missed once it has closed.
+ * Nothing is owed for a month that ended before the client started billing. */
+const CALLS_DUE_FROM_DAY = 10;
+/* Nobody is retroactively guilty. Coaching calls were only logged in the app from the
+ * day this panel shipped, so counting every prior month as "missed" would open the
+ * dashboard with a red row for essentially every client — noise that trains people to
+ * ignore it. The first time this runs we stamp the current month as the floor; months
+ * before it are never reported as missed. Admin can move the floor later via meta. */
+function callsTrackedFrom(today){
+  let k = getMeta('calls_tracked_from');
+  if(!k){ k = today.slice(0,7); setMeta('calls_tracked_from', k); }
+  return k;
+}
+function monthKey(d){ return d.slice(0,7); }
+function prevMonthKey(k){ const [y,m] = k.split('-').map(Number); return m === 1 ? `${y-1}-12` : `${y}-${String(m-1).padStart(2,'0')}`; }
+function callsOwed(today, { coachId = null, team = null, unassigned = false } = {}){
+  const thisM = monthKey(today), lastM = prevMonthKey(thisM);
+  const floor = callsTrackedFrom(today);
+  const dueThisMonth = +today.slice(8,10) >= CALLS_DUE_FROM_DAY;
+  const own = unassigned ? 'cl.assigned_coach_id IS NULL'
+    : coachId ? 'cl.assigned_coach_id=?' : 'cl.assigned_coach_id IS NOT NULL';
+  const args = [thisM, lastM];
+  if(coachId) args.push(coachId);
+  const rows = db.prepare(`
+    SELECT cl.id AS client_id, cl.name AS client, cl.billing_start, cl.assigned_coach_id,
+      co.name AS coach_name, co.team AS team,
+      (SELECT MAX(n.note_date) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call') AS last_call,
+      (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_this_month,
+      (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_last_month
+    FROM clients cl
+    LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
+    WHERE cl.deleted_at IS NULL AND cl.archived_at IS NULL AND cl.status='active'
+      AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active')
+      AND ${own}`).all(...args);
+  const out = [];
+  for(const r of rows){
+    if(team && r.team !== team) continue;
+    const started = (r.billing_start || '').slice(0,7);
+    const missed = (!r.calls_last_month && lastM >= floor && (!started || started <= lastM)) ? lastM : null;
+    const due = (dueThisMonth && !r.calls_this_month && (!started || started <= thisM)) ? thisM : null;
+    if(!missed && !due) continue;
+    out.push({ client_id: r.client_id, client: r.client, coach_id: r.assigned_coach_id, coach: r.coach_name || null,
+      team: r.team || null, last_call: r.last_call || null, missed, due });
+  }
+  // Worst first: a missed month outranks a merely-due one, then longest since the last call.
+  out.sort((a,b) => (b.missed?1:0) - (a.missed?1:0) || (a.last_call||'').localeCompare(b.last_call||''));
+  return out.slice(0, 200);
+}
 /* ----- Today: the role-aware action queue the dashboard is built from -----
    One place that answers "what needs a person right now", computed fresh from
    the DB on every load. Ordering inside each list is worst-first. */
@@ -826,7 +884,8 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
     const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week
       FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id=? AND COALESCE(v.scheduled_week, v.due)>=?
       AND COALESCE(v.notes_wins,'') = '' AND COALESCE(v.notes_issues,'') = '' AND COALESCE(v.notes_focus,'') = '' AND COALESCE(v.notes_commitments,'') = '' ORDER BY v.scheduled_week DESC LIMIT 20`).all(user.coach_id, cut30);
-    return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes });
+    return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes,
+      callsOwed: callsOwed(today, { coachId: user.coach_id }), callsMonth: monthKey(today) });
   }
 
   const teamFilter = user.role === 'lead' ? user.team : null;
@@ -864,7 +923,10 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
   const pendingCount = db.prepare("SELECT COUNT(*) c FROM pending_clients WHERE status='pending'").get().c;
   const completedThisMonth = db.prepare(`SELECT COUNT(*) c FROM visits v WHERE v.completed=1 AND COALESCE(v.scheduled_week,v.due) LIKE ?${tf}`)
     .get(today.slice(0,7)+'%', ...tArgs).c;
-  send(res, 200, { role: user.role, team: teamFilter, overdueNoPlan, lateOnCalendar, dueSoonUnscheduled, toConfirm, atRisk, missingNotes, holdsExpiring, pendingCount, completedThisMonth });
+  const callsOwedAll = callsOwed(today, { team: teamFilter });
+  const callsUnowned = teamFilter ? [] : callsOwed(today, { unassigned: true });
+  send(res, 200, { role: user.role, team: teamFilter, overdueNoPlan, lateOnCalendar, dueSoonUnscheduled, toConfirm, atRisk, missingNotes, holdsExpiring, pendingCount, completedThisMonth,
+    callsOwed: callsOwedAll, callsUnowned, callsMonth: monthKey(today) });
 });
 
 /* ----- coaches & teams ----- */

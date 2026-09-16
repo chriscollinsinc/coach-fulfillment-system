@@ -933,6 +933,7 @@ function todayTeamView(t, orphanedData){
     <div class="card ${t.dueSoonUnscheduled.length?'warn':'ok'}" style="cursor:pointer" onclick="${invJump('needs')}"><div class="k">${t.dueSoonUnscheduled.length}</div><div class="l">Due in 30 days, unscheduled</div></div>
     ${(t.toConfirm&&t.toConfirm.length)?`<div class="card warn" style="cursor:pointer" onclick="document.getElementById('confirmDonePanel')?.scrollIntoView({behavior:'smooth'})"><div class="k">${t.toConfirm.length}</div><div class="l">To confirm completed</div></div>`:''}
     <div class="card ok"><div class="k">${t.completedThisMonth}</div><div class="l">Completed this month${t.team?' — Team '+esc(t.team):''}</div></div>
+    ${(t.callsOwed&&t.callsOwed.length)?`<div class="card ${t.callsOwed.some(r=>r.missed)?'bad':'warn'}" style="cursor:pointer" onclick="document.getElementById('tdCalls')?.scrollIntoView({behavior:'smooth'})"><div class="k">${t.callsOwed.length}</div><div class="l">Coaching calls owed</div></div>`:''}
     ${orphanedData ? (() => {
       const sum = orphanedData.summary || {total: 0, overdue: 0, thisMonth: 0, nextMonth: 0};
       const cardClass = sum.overdue > 0 ? 'bad' : (sum.thisMonth > 0 ? 'warn' : 'ok');
@@ -942,6 +943,8 @@ function todayTeamView(t, orphanedData){
   if(t.pendingCount) html+=`<div class="panel" style="border-left:4px solid var(--primary);padding:10px 14px">
     <b>${t.pendingCount} new Keap subscription${t.pendingCount>1?'s':''}</b> waiting for assignment.
     <button class="btn tiny primary" style="margin-left:8px" onclick="go('pending')">Review →</button></div>`;
+
+  html+=callsOwedPanel(t);
 
   html+=`<div class="panel"><h2>Fix first — overdue with no plan (${t.overdueNoPlan.length})</h2>`;
   html+= t.overdueNoPlan.length ? `<table><tr><th>Client</th><th>Visit</th><th>Was due</th><th>How late</th><th></th></tr>`+
@@ -1026,6 +1029,73 @@ function todayTeamView(t, orphanedData){
   html+=`<p class="small" style="margin-top:8px">Weeks with nothing scheduled or blocked count as open. For the full 12-month view, use Availability.</p></div></details>`;
   return html;
 }
+/* ---------- Coaching calls owed (Today) ----------
+ * Deliberately its own panel rather than folded into "You owe a note": that list is a
+ * write-up missing for work already done, this one is work that hasn't happened yet.
+ * The server decides what's owed (see callsOwed) — current month only from the 10th,
+ * last month once it has closed — so this just renders it. */
+function monthLabel(key){
+  const [y,m] = String(key||'').split('-').map(Number);
+  return (MONTHS_SHORT[(m||1)-1] || '?') + ' ' + (y || '');
+}
+// Last day of a YYYY-MM, so a call logged for a closed month lands inside it and counts.
+function monthEndDate(key){
+  const [y,m] = String(key||'').split('-').map(Number);
+  const d = new Date(Date.UTC(y, m, 0));
+  return d.toISOString().slice(0,10);
+}
+function callRow(r){
+  const forKey = r.missed || r.due;
+  const late = !!r.missed;
+  const when = late ? `<span class="pill p-over">${monthLabel(r.missed)} missed</span>` : `<span class="pill p-due">${monthLabel(r.due)} due</span>`;
+  const both = r.missed && r.due ? ` <span class="small" style="color:var(--muted)">+ ${monthLabel(r.due)}</span>` : '';
+  return `<tr>
+    <td><b>${healthDot(r.client_id)}${clientLink(r.client, r.client_id)}</b></td>
+    ${r.coach !== undefined && D.user.role !== 'coach' ? `<td class="small" style="white-space:nowrap">${esc(r.coach||'—')}</td>` : ''}
+    <td style="white-space:nowrap">${when}${both}</td>
+    <td class="mono small" style="white-space:nowrap">${r.last_call ? fmt(r.last_call) : '<span style="color:var(--muted)">never</span>'}</td>
+    <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap">
+      <button class="btn tiny" onclick="openClientProfile(${r.client_id})">Open</button>
+      <button class="btn tiny primary" onclick="logCallDlg(${r.client_id},'${esc(r.client).replace(/'/g,"\\'")}','${forKey}')">Log call</button>
+    </div></td></tr>`;
+}
+function callsOwedPanel(t){
+  const rows = t.callsOwed || [];
+  const showCoach = D.user.role !== 'coach';
+  if(!rows.length) return '';
+  const missedN = rows.filter(r=>r.missed).length;
+  return `<div class="panel" id="tdCalls"><h2>Coaching calls owed <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${rows.length})</span></h2>
+    <p class="small" style="margin-bottom:8px">One call per client per month, visit or no visit. ${missedN ? `<b style="color:var(--bad)">${missedN}</b> month${missedN>1?'s':''} already closed without one.` : 'Nothing missed yet — these are this month\'s.'} Logging here counts toward that month's coverage strip on the client's page.</p>
+    <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th>${showCoach?'<th>Coach</th>':''}<th>For</th><th>Last call</th><th style="text-align:right"></th></tr>
+    ${todayRows(rows, 12, callRow)}</table></div>
+    ${(t.callsUnowned && t.callsUnowned.length) ? `<p class="small" style="margin-top:8px;color:var(--warn)">⚠ ${t.callsUnowned.length} active client${t.callsUnowned.length>1?'s':''} owe a call but have no assigned coach — nobody is being prompted for them. ${t.callsUnowned.slice(0,6).map(r=>clientLink(r.client, r.client_id)).join(', ')}${t.callsUnowned.length>6?' …':''}</p>` : ''}
+  </div>`;
+}
+/* Quick-log straight from Today, so a coach clearing the panel never has to leave it.
+ * The date defaults to the end of the month being logged — a call logged for a closed
+ * month has to sit inside that month to count toward it. */
+function logCallDlg(clientId, clientName, forKey){
+  const dflt = forKey === TODAY.slice(0,7) ? TODAY : monthEndDate(forKey);
+  openDlg(`<h3>Log coaching call</h3>
+    <p class="small" style="color:var(--muted)">${esc(clientName)} · counts toward <b>${monthLabel(forKey)}</b></p>
+    <label>Call date</label><input type="date" id="lcDate" value="${dflt}" style="width:160px">
+    <label>What was covered ${micBtn('lcBody')}</label>
+    <textarea id="lcBody" rows="3" style="width:100%;box-sizing:border-box" placeholder="Who you spoke with, what you covered, anything to follow up…"></textarea>
+    <p class="small" style="color:var(--muted)">Open the client's page if you need to tag a specific store.</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveQuickCall(${clientId})">Log call</button></div>`);
+}
+async function saveQuickCall(clientId){
+  const note_date = ($('#lcDate')||{}).value || TODAY;
+  const body = (($('#lcBody')||{}).value || '').trim();
+  if(!body){ uiAlert('Add a line about the call first'); return; }
+  if(window._rec){ try{window._rec.stop()}catch(e){} window._rec=null; }
+  try{
+    await api('POST','/api/clients/'+clientId+'/notes', { note_date, note_type: 'Coaching Call', body });
+    closeDlg(); toast('Call logged');
+    await loadToday();
+  }catch(e){ uiAlert(e.message || 'Could not log the call'); }
+}
 function todayCoachView(t){
   const me = D.user.coach_id;
   const full = v => D.visits.find(x=>x.id===v.id) || v;
@@ -1040,6 +1110,7 @@ function todayCoachView(t){
     ${stat(t.overdueMine.length, 'Overdue', 'var(--bad)', "document.getElementById('tdOverdue')?.scrollIntoView({behavior:'smooth'})")}
     ${stat(t.dueSoonMine.length, 'Due in the next 30 days', 'var(--warn)', "document.getElementById('tdDueSoon')?.scrollIntoView({behavior:'smooth'})")}
     ${stat(t.missingNotes.length, 'Notes owed', '#1d4f91', "document.getElementById('tdNotes')?.scrollIntoView({behavior:'smooth'})")}
+    ${stat((t.callsOwed||[]).length, 'Calls owed', (t.callsOwed||[]).some(r=>r.missed) ? 'var(--bad)' : 'var(--warn)', "document.getElementById('tdCalls')?.scrollIntoView({behavior:'smooth'})")}
     ${stat(onCal, 'On your calendar', 'var(--ok)', "go('board')")}
   </div>`;
 
@@ -1099,6 +1170,7 @@ function todayCoachView(t){
       <td class="mono">${fmt(v.scheduled_week||v.cal_week||v.due)}</td>
       <td><div style="display:flex;justify-content:flex-end">${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</div></td></tr>`).join('')+`</table></div></div>`;
   }
+  html += callsOwedPanel(t);
   return html;
 }
 
