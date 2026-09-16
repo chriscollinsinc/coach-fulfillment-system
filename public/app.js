@@ -779,7 +779,7 @@ document.addEventListener('click', closeNavDrop);
 async function logout(){ await api('POST','/api/logout'); D=null; render(); }
 function pwDlg(){
   openDlg(`<h3>Change password</h3>
-    <label>New password</label><input type="password" id="pw1">
+    <label>New password</label><input type="password" id="pw1" autocomplete="new-password">
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="savePw()">Save</button></div>`);
 }
@@ -810,10 +810,12 @@ function loginView(){
       <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
       <span>Sign in with Google</span></a>
     <div class="small" style="text-align:center;margin-bottom:10px;color:var(--muted)">— or —</div>` : ''}
-    <label>Email</label><input type="text" id="lEmail" autocomplete="username">
-    <label>Password</label><input type="password" id="lPw" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <form id="loginForm" onsubmit="event.preventDefault();doLogin()">
+    <label>Email</label><input type="text" name="username" id="lEmail" autocomplete="username">
+    <label>Password</label><input type="password" name="password" id="lPw" autocomplete="current-password">
     <div class="err" id="lErr"></div>
-    <button class="btn primary" onclick="doLogin()">Sign in</button>
+    <button class="btn primary" type="submit">Sign in</button>
+    </form>
     <div class="loginlinks"><a onclick="forgotDlg()">Forgot password?</a></div>
   </div></div>`;
 }
@@ -1154,22 +1156,22 @@ function board(){
   let html='';
   if(placing){
     html+=`<div class="placebanner">Placing <b>${clientLink(placing.client, placing.client_id)}</b> — ${esc(placing.cycle)} ${esc(placing.program)}, due ${fmt(placing.due)}.
-      Click any open week — <b>including past weeks</b>, to backfill a visit that already happened. <button class="btn tiny" onclick="st.placing=null;render()">Cancel</button></div>`;
+      Click any open week — <b>including past weeks</b>, to backfill a visit that already happened. <button class="btn tiny" onclick="st.placing=null;paintBoard()">Cancel</button></div>`;
   }
   html+=`<div class="controls">
     ${calendarSwitcher()}
     <span style="flex:1"></span>
     <div class="calsearch">
       <input id="calSearchBox" placeholder="🔍 Search a client's visits…" autocomplete="off" value="${esc(st.calSearch||'')}"
-        oninput="st.calSearch=this.value;render()"
-        onkeydown="if(event.key==='Escape'){st.calSearch='';render()}">
-      ${st.calSearch?`<button class="btn tiny" onclick="st.calSearch='';render()">clear ✕</button>`:''}
+        oninput="st.calSearch=this.value;paintBoard()"
+        onkeydown="if(event.key==='Escape'){st.calSearch='';paintBoard()}">
+      ${st.calSearch?`<button class="btn tiny" onclick="st.calSearch='';paintBoard()">clear ✕</button>`:''}
     </div>
     <div class="monthnav">
       <button class="btn" onclick="bMonth(-1)">‹</button>
       <span class="mlabel">${MONTHS[m]} ${y}</span>
       <button class="btn" onclick="bMonth(1)">›</button>
-      <button class="btn tiny" onclick="st.boardY=${+TODAY.slice(0,4)};st.boardM=${+TODAY.slice(5,7)-1};render()">Today</button>
+      <button class="btn tiny" onclick="st.boardY=${+TODAY.slice(0,4)};st.boardM=${+TODAY.slice(5,7)-1};paintBoard()">Today</button>
     </div></div>
   <div class="boardlayout"><div class="panel" style="margin:0">
   <table class="bgrid"><tr><th style="text-align:left">Coach</th>`;
@@ -1201,7 +1203,7 @@ function board(){
         // inside it are individually gated (see the detail box below), so anyone who can
         // see the board can click through to look, but only canEdit() (or the owning
         // coach, for Complete) sees anything actionable there.
-        click=` onclick="st.detail=${v.id};st.placing=null;render()"`;
+        click=` onclick="st.detail=${v.id};st.placing=null;paintBoard()"`;
       } else {
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
@@ -1236,9 +1238,9 @@ function board(){
         : `<b>${v.store?esc(v.store):'—'}</b>`}</div>` : (v.store?`<div class="small" style="margin-top:6px">Store: <b>${esc(v.store)}</b></div>`:'')}
       <div class="btnrow">
         ${(canEdit()||ownsVisit(v)) ? `<button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.completed?'Edit notes':'Complete'}</button>` : ''}
-        ${canReschedule(v) ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;render()">Move</button>` : ''}
+        ${canReschedule(v) ? `<button class="btn tiny" onclick="st.placing=${v.id};st.detail=null;paintBoard()">Move</button>` : ''}
         ${canReschedule(v) ? `<button class="btn tiny" onclick="unscheduleV(${v.id})">Unschedule</button>` : ''}
-        <button class="btn tiny" onclick="st.detail=null;render()">Close</button>
+        <button class="btn tiny" onclick="st.detail=null;paintBoard()">Close</button>
       </div></div>`;
   }
   const section=(title,list)=>{
@@ -1268,7 +1270,7 @@ function calSearchRail(q, global){
   const key = v => v.cal_week || v.due || '';
   const matches = D.visits.filter(v=>norm(v.client).includes(q) && key(v) && key(v) >= cutoff)
     .sort((a,b)=> key(a).localeCompare(key(b)) || (a.id-b.id));
-  if(!matches.length) return `<h2>Visit search</h2><p class="small">No visits found for “${esc(st.calSearch)}” in the last 2 years.<br><a onclick="st.calSearch='';render()" style="cursor:pointer;color:var(--primary)">clear search</a></p>`;
+  if(!matches.length) return `<h2>Visit search</h2><p class="small">No visits found for “${esc(st.calSearch)}” in the last 2 years.<br><a onclick="st.calSearch='';paintBoard()" style="cursor:pointer;color:var(--primary)">clear search</a></p>`;
   const names = [...new Set(matches.map(v=>v.client))];
   const placedOnGrid = matches.filter(v=>v.cal_week && v.cal_coach).length;
   let h=`<h2>Visit search (${matches.length})</h2>
@@ -1321,7 +1323,30 @@ function calendarSwitcher(){
   if(D.user.coach_id) h += b('☰ List', v==='mysched', go('mysched'), 'Your next 16 weeks as a list');
   return h + `</div>`;
 }
-function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.detail=null; render(); }
+/* Repaint only #main for calendar interactions (month paging, Today, the visit-search
+ * box, opening/closing a visit bubble). A full render() replaces app.innerHTML, which
+ * tears down and rebuilds the header — nav, global search box, user chip — on every
+ * click. Password managers (1Password especially) read a wholesale rebuild of the page
+ * chrome as a page transition and re-surface their "Save login?" prompt; paging months
+ * a few times is enough to get it popping up over and over. Nothing outside #main
+ * depends on which month is showing, so nothing outside #main gets rebuilt. */
+const CAL_MAIN_VIEWS = ['board','global','formercoaches','mysched'];
+function paintBoard(){
+  const m = $('#main');
+  if(!m || !CAL_MAIN_VIEWS.includes(st.view)){ render(); return; }
+  const el = document.getElementById('calSearchBox');
+  const selStart = el && typeof el.selectionStart === 'number' ? el.selectionStart : null;
+  const selEnd = el && typeof el.selectionEnd === 'number' ? el.selectionEnd : null;
+  m.innerHTML = st.view==='mysched' ? mySchedule() : board();
+  const el2 = document.getElementById('calSearchBox');
+  if(el2 && el){
+    el2.focus();
+    if(selStart != null && typeof el2.setSelectionRange === 'function'){
+      try{ el2.setSelectionRange(selStart, selEnd); }catch(e){}
+    }
+  }
+}
+function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.detail=null; paintBoard(); }
 async function placeHere(cid,w,force){
   const id=st.placing; if(!id) return;
   try{
