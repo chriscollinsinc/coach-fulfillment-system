@@ -3087,7 +3087,7 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
     const visitsThisYear = visits.filter(v => v.due && +v.due.slice(0,4) === year);
     const completedThisYear = visitsThisYear.filter(v => v.completed).length;
     const assignedCoach = cl.assigned_coach_id ? getCoach(cl.assigned_coach_id) : null;
-    const notes = db.prepare(`SELECT id, note_date, note_type, author_name, body, wins, issues, focus, visit_id, source
+    const notes = db.prepare(`SELECT id, note_date, note_type, author_name, body, wins, issues, focus, visit_id, source, store
       FROM client_notes WHERE client_id=? ORDER BY note_date DESC, id DESC`).all(cl.id);
     const openCommitments = db.prepare(`SELECT a.id, a.text, a.created, a.created_visit_id, cv.due AS from_due, cv.cal_week AS from_week
       FROM action_items a LEFT JOIN visits cv ON cv.id=a.created_visit_id
@@ -3456,9 +3456,14 @@ const NOTE_TYPES = ['Coaching Call', 'LID', 'General']; // LID is legacy: readab
  * than saved, so the store field stays a reliable filter. */
 function clientStoreList(clientId){
   const out = [];
+  const add = raw => { const t = String(raw || '').trim(); if(t && !out.some(x => x.toLowerCase() === t.toLowerCase())) out.push(t); };
   for(const row of db.prepare('SELECT stores FROM contracts WHERE client_id=?').all(clientId)){
-    try{ const a = JSON.parse(row.stores || '[]'); if(Array.isArray(a)) for(const s of a){ const t = String(s).trim(); if(t && !out.includes(t)) out.push(t); } }catch(_){}
+    try{ const a = JSON.parse(row.stores || '[]'); if(Array.isArray(a)) a.forEach(add); }catch(_){}
   }
+  // Plenty of multi-rooftop clients never had contracts.stores filled in, but their visits
+  // already carry a store from the sheet import. Those count too, so the picker shows up
+  // wherever the history proves there is more than one rooftop.
+  for(const row of db.prepare("SELECT DISTINCT store FROM visits WHERE client_id=? AND store IS NOT NULL AND store<>''").all(clientId)) add(row.store);
   return out;
 }
 function noteStore(clientId, raw){

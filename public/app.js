@@ -2497,6 +2497,19 @@ function offerProgramFix(contractId, suggestion){
  * (those are fixed individually via the Edit button on Visit history below). */
 /* Multi-store ("stores covered") display + editor on a contract row. */
 function parseContractStores(c){ try{ const a=JSON.parse((c&&c.stores)||'[]'); return Array.isArray(a)?a:[]; }catch(_){ return []; } }
+/* Every store this client is known to operate, de-duped and sorted. Two sources: the
+ * contract's own store list (contracts.stores, set by an admin) and, as a fallback, the
+ * stores already recorded on this client's visits - plenty of multi-rooftop clients came
+ * in from the sheet import with visits.store filled in but contracts.stores never set,
+ * and without this the picker would silently never appear for them. Empty for ordinary
+ * single-store clients, in which case no picker is shown at all. */
+function clientStoreOptions(){
+  const out = [];
+  const add = raw => { const t = String(raw || '').trim(); if(t && !out.some(x => x.toLowerCase() === t.toLowerCase())) out.push(t); };
+  for(const c of ((st.clientProfile && st.clientProfile.contracts) || [])) parseContractStores(c).forEach(add);
+  for(const v of ((st.clientProfile && st.clientProfile.visits) || [])) add(v.store);
+  return out.sort((a,b) => a.localeCompare(b));
+}
 function contractStoresHtml(c){
   const list = parseContractStores(c);
   const admin = D.user.role==='admin';
@@ -3226,6 +3239,7 @@ const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct
 function callsYear(){ return st.callsYear || +TODAY.slice(0,4); }
 function setCallsYear(y){ st.callsYear = y; st.callsMonth = null; rerenderCalls(); }
 function setCallsMonth(m){ st.callsMonth = (st.callsMonth === m) ? null : m; rerenderCalls(); }
+function setCallsStoreFilter(name){ st.callsStoreFilter = name; rerenderCalls(); }
 function rerenderCalls(){
   const el = $('#coachingCallsPanel'); if(!el) return;
   el.outerHTML = coachingCallsPanel(st.clientProfile.client, st.clientNotes || []);
@@ -3260,8 +3274,15 @@ function coachingCallsPanel(client, notes){
     </button>`;
   };
 
-  const listed = (st.callsMonth != null ? byMonth[st.callsMonth] : inYear).slice().sort((a,b) => (b.note_date||'').localeCompare(a.note_date||'') || b.id - a.id);
+  const stores = clientStoreOptions();
+  const listed = (st.callsMonth != null ? byMonth[st.callsMonth] : inYear).slice()
+    .filter(n => !st.callsStoreFilter || n.store === st.callsStoreFilter)
+    .sort((a,b) => (b.note_date||'').localeCompare(a.note_date||'') || b.id - a.id);
   const filterNote = st.callsMonth != null ? ` · showing ${MONTHS_SHORT[st.callsMonth]} <button class="btn tiny" onclick="setCallsMonth(${st.callsMonth})">show all ${year}</button>` : '';
+  // Coverage counts the group as a whole: one call in any month covers that month, whichever
+  // store it was about. The store chips below filter the list, not the strip.
+  const storeChip = (name, on) => `<button class="btn tiny${on?' primary':''}" onclick="setCallsStoreFilter(${name===null?'null':`'${esc(String(name)).replace(/'/g,"\\'")}'`})">${name===null?'All stores':esc(name)}</button>`;
+  const storeChips = stores.length > 1 ? `<div class="dlgrow" style="margin-bottom:10px;flex-wrap:wrap">${storeChip(null, !st.callsStoreFilter)}${stores.map(nm=>storeChip(nm, st.callsStoreFilter===nm)).join('')}</div>` : '';
 
   return `<div class="panel" id="coachingCallsPanel"><h2>🎧 Coaching Calls</h2>
     <p class="small" style="margin-bottom:10px">One call per month, every month — including months with a visit. Log the call here; the strip shows which months of ${year} are covered.</p>
@@ -3272,21 +3293,27 @@ function coachingCallsPanel(client, notes){
       <span class="small" style="margin-left:6px">${year > curY ? 'Nothing due yet' : `<b style="color:${missed ? 'var(--bad)' : 'var(--ok)'}">${covered} of ${monthsElapsed}</b> month${monthsElapsed===1?'':'s'} covered${missed ? ` · <b style="color:var(--bad)">${missed} missed</b>` : ''}`}${filterNote}</span>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${MONTHS_SHORT.map((_,m)=>cell(m)).join('')}</div>
+    ${storeChips}
     <div class="controls" style="margin-bottom:6px;align-items:flex-start">
       <div><label style="margin:0 0 3px;display:block">Call date</label><input type="date" id="callDate" value="${TODAY}" style="width:150px"></div>
+      ${stores.length ? `<div><label style="margin:0 0 3px;display:block">Store</label><select id="callStore" style="min-width:170px"><option value="">— whole group —</option>${stores.map(s=>`<option ${st.callsStore===s?'selected':''}>${esc(s)}</option>`).join('')}</select></div>` : ''}
       <div style="flex:1;min-width:240px"><label style="margin:0 0 3px;display:block">What was covered ${micBtn('callBody')}</label><textarea id="callBody" rows="2" style="width:100%;box-sizing:border-box" placeholder="Who you spoke with, what you covered, anything to follow up…"></textarea></div>
     </div>
     <div class="dlgrow" style="margin-bottom:12px"><button class="btn primary" onclick="saveCoachingCall(${client.id})">Log call</button></div>
-    <div>${listed.length ? listed.map(n => clientNoteCard(client.id, n)).join('') : `<p class="small">No coaching calls logged for ${st.callsMonth != null ? MONTHS_SHORT[st.callsMonth] + ' ' : ''}${year}.</p>`}</div>
+    <div>${listed.length ? listed.map(n => clientNoteCard(client.id, n)).join('') : `<p class="small">No coaching calls logged for ${st.callsMonth != null ? MONTHS_SHORT[st.callsMonth] + ' ' : ''}${year}${st.callsStoreFilter ? ' at ' + esc(st.callsStoreFilter) : ''}.</p>`}</div>
   </div>`;
 }
 async function saveCoachingCall(clientId){
   const note_date = ($('#callDate')||{}).value || TODAY;
   const body = (($('#callBody')||{}).value || '').trim();
+  const store = (($('#callStore')||{}).value || '').trim();
   if(!body){ uiAlert('Add a line about the call first'); return; }
   if(window._rec){ try{window._rec.stop()}catch(e){} window._rec=null; }
-  await api('POST','/api/clients/'+clientId+'/notes', { note_date, note_type: 'Coaching Call', body });
-  toast('Call logged');
+  await api('POST','/api/clients/'+clientId+'/notes', { note_date, note_type: 'Coaching Call', body, store });
+  toast(store ? `Call logged — ${store}` : 'Call logged');
+  // Keep the store selected: a coach logging several calls in a row is usually working
+  // through one rooftop at a time.
+  st.callsStore = store || null;
   st.callsYear = +note_date.slice(0,4); st.callsMonth = null;
   await loadClientProfile(clientId);
 }
@@ -3305,8 +3332,9 @@ function clientNoteCard(clientId, n){
       </div>`
     : `<div style="margin-top:4px;white-space:pre-wrap" id="note-body-${n.id}">${esc(n.body)}</div>`;
   const visitTag = n.visit_id ? ` <span class="pill" style="background:var(--visit,#fde5de);color:#b93c22">visit</span>` : '';
+  const storeTag = n.store ? ` <span class="pill" style="background:#e9f0fb;color:#1d4f91">🏬 ${esc(n.store)}</span>` : '';
   return `<div class="duecard" id="note-${n.id}">
-    <div class="meta"><b>${title}</b>${visitTag}${keapTag} · ${esc(n.author_name||n.author_email)} · logged ${n.created.slice(0,16).replace('T',' ')}${editedTag}</div>
+    <div class="meta"><b>${title}</b>${storeTag}${visitTag}${keapTag} · ${esc(n.author_name||n.author_email)} · logged ${n.created.slice(0,16).replace('T',' ')}${editedTag}</div>
     ${structured}
     ${isAdmin ? `<div class="dlgrow" style="margin-top:6px">
       <button class="btn tiny" onclick="editNoteDlg(${clientId},${n.id})">Edit</button>
@@ -3365,6 +3393,7 @@ function editNoteDlg(clientId, noteId){
     <label>Date</label><input type="date" id="enDate" value="${n.note_date}">
     <label>Type</label><select id="enType"><option ${n.note_type==='Coaching Call'?'selected':''}>Coaching Call</option><option ${n.note_type==='General'?'selected':''}>General</option>${n.note_type==='LID'?'<option selected>LID</option>':''}</select>
     <p class="small" style="color:var(--muted);margin-top:2px">Moving a note to "Coaching Call" counts it toward that month's call coverage.</p>
+    ${clientStoreOptions().length ? `<label>Store</label><select id="enStore"><option value="">— whole group —</option>${clientStoreOptions().map(s=>`<option ${n.store===s?'selected':''}>${esc(s)}</option>`).join('')}</select>` : ''}
     <label>Note</label><textarea id="enBody" rows="4" style="width:100%;box-sizing:border-box">${esc(n.body)}</textarea>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveEditedNote(${clientId},${noteId})">Save</button></div>`);
@@ -3372,7 +3401,9 @@ function editNoteDlg(clientId, noteId){
 async function saveEditedNote(clientId, noteId){
   const body = $('#enBody').value.trim();
   if(!body){ uiAlert('Note cannot be empty'); return; }
-  await api('PATCH',`/api/clients/${clientId}/notes/${noteId}`, { body, note_date: $('#enDate').value, note_type: $('#enType').value });
+  const patch = { body, note_date: $('#enDate').value, note_type: $('#enType').value };
+  if($('#enStore')) patch.store = $('#enStore').value;
+  await api('PATCH',`/api/clients/${clientId}/notes/${noteId}`, patch);
   closeDlg(); toast('Note updated');
   await loadClientProfile(clientId);
 }
