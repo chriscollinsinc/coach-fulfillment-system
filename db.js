@@ -215,6 +215,13 @@ ensureColumn('client_notes', 'visit_id', 'INTEGER');
    note id, recorded only on imported notes — a unique index on it makes re-running
    an import idempotent (re-importing the same Keap note is a no-op, never a dupe). */
 ensureColumn('client_notes', 'source', "TEXT NOT NULL DEFAULT 'app'");
+/* Which dealership a note is about. Multi-store contracts (contracts.stores) fund
+   visits across several rooftops; visits already carry visits.store, so a completed
+   visit's note is anchored to a store. Coaching calls had no equivalent — a Steven
+   Auto Group call could be about the Honda store or the Ford store and the history
+   didn't say. Free text, chosen from the contract's store list in the UI; null on
+   single-store clients and on every note logged before 2026-09-16. */
+ensureColumn('client_notes', 'store', 'TEXT');
 ensureColumn('client_notes', 'keap_note_id', 'TEXT');
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ucn_keap_note ON client_notes(keap_note_id) WHERE keap_note_id IS NOT NULL;`);
 /* Program changes (2026-09-15): one row per cadence change applied to a contract, so

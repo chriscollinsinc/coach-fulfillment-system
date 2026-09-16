@@ -3451,6 +3451,21 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
   }
 });
 const NOTE_TYPES = ['Coaching Call', 'LID', 'General']; // LID is legacy: readable, no longer created by the UI
+/* A note's store must be one the client's contracts actually cover — the UI only offers
+ * those, and anything else (a stale dropdown, a hand-rolled request) is dropped rather
+ * than saved, so the store field stays a reliable filter. */
+function clientStoreList(clientId){
+  const out = [];
+  for(const row of db.prepare('SELECT stores FROM contracts WHERE client_id=?').all(clientId)){
+    try{ const a = JSON.parse(row.stores || '[]'); if(Array.isArray(a)) for(const s of a){ const t = String(s).trim(); if(t && !out.includes(t)) out.push(t); } }catch(_){}
+  }
+  return out;
+}
+function noteStore(clientId, raw){
+  const want = String(raw || '').trim();
+  if(!want) return null;
+  return clientStoreList(clientId).find(s => s.toLowerCase() === want.toLowerCase()) || null;
+}
 route('POST', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
@@ -3462,9 +3477,10 @@ route('POST', /^\/api\/clients\/(\d+)\/notes$/, ['admin','lead','sales','coach']
   const wins = body.wins ? String(body.wins).trim() : null;
   const issues = body.issues ? String(body.issues).trim() : null;
   const focus = body.focus ? String(body.focus).trim() : null;
-  const r = db.prepare('INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,wins,issues,focus,created) VALUES(?,?,?,?,?,?,?,?,?,?)')
-    .run(cl.id, noteDate, noteType, user.email, user.name, text, wins, issues, focus, new Date().toISOString());
-  log(user.email, 'client.note_add', { clientId: cl.id, name: cl.name, noteDate, noteType });
+  const store = noteStore(cl.id, body.store);
+  const r = db.prepare('INSERT INTO client_notes(client_id,note_date,note_type,author_email,author_name,body,wins,issues,focus,store,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+    .run(cl.id, noteDate, noteType, user.email, user.name, text, wins, issues, focus, store, new Date().toISOString());
+  log(user.email, 'client.note_add', { clientId: cl.id, name: cl.name, noteDate, noteType, store });
   send(res, 200, { ok: true, id: Number(r.lastInsertRowid) });
 });
 route('PATCH', /^\/api\/clients\/(\d+)\/notes\/(\d+)$/, ['admin'], (req, res, m, body, user) => {
@@ -3474,6 +3490,7 @@ route('PATCH', /^\/api\/clients\/(\d+)\/notes\/(\d+)$/, ['admin'], (req, res, m,
   if(body.body !== undefined){ const t = String(body.body).trim(); if(!t) return err(res, 400, 'note text required'); f.body = t; }
   if(body.note_date !== undefined){ if(!/^\d{4}-\d{2}-\d{2}$/.test(body.note_date)) return err(res, 400, 'bad date'); f.note_date = body.note_date; }
   if(body.note_type !== undefined){ if(!NOTE_TYPES.includes(body.note_type)) return err(res, 400, 'bad type'); f.note_type = body.note_type; }
+  if(body.store !== undefined) f.store = noteStore(note.client_id, body.store);
   if(Object.keys(f).length){
     f.edited = new Date().toISOString();
     db.prepare(`UPDATE client_notes SET ${Object.keys(f).map(k=>k+'=?').join(',')} WHERE id=?`)
