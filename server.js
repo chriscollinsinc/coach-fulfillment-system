@@ -381,8 +381,9 @@ route('PATCH', /^\/api\/visits\/(\d+)$/, ['admin','lead','coach'], (req, res, m,
   
   // Permission check
   if(user.role === 'coach'){
-    // Coaches can only edit visits if they're assigned to the client
-    if(!canManageVisit(user, v)) return err(res, 403, 'You are not assigned to this client');
+    // Any coach associated with this visit may write its notes — on the calendar for it,
+    // or the client's assigned coach. See canNoteVisit.
+    if(!canNoteVisit(user, v)) return err(res, 403, 'You can only write notes on a visit you ran or are the assigned coach for');
     // Coaches can ONLY save notes, not edit other visit fields
     const allowedFields = ['notes_wins', 'notes_issues', 'notes_focus', 'notes_commitments'];
     for(const k of Object.keys(body)){
@@ -559,6 +560,16 @@ function canCompleteVisit(user, v){
 }
 
 /* A coach can place/unschedule/manage a visit only if they're assigned to that client */
+/* Notes follow the work, not the org chart. A coach may write on any visit they are
+ * ASSOCIATED with — either they're the coach on the calendar for it, or they own the
+ * client — which is the same test as canCompleteVisit. This matters on handoffs: a launch
+ * coach who comes back for a one-off visit months later is v.cal_coach but no longer the
+ * client's assigned coach, and before this they could complete that visit (notes ride
+ * along on the complete call) yet got a 403 the moment they reopened it to fix a typo,
+ * even though the UI offered them the button.
+ * Scheduling is deliberately stricter — see canManageVisit, which still governs placing
+ * and unscheduling, so a covering coach can't reshuffle someone else's client. */
+function canNoteVisit(user, v){ return canCompleteVisit(user, v); }
 function canManageVisit(user, v){
   if(user.role === 'admin') return true;
   if(user.role === 'lead') return canEditTeam(user, v.team);
