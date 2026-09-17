@@ -909,7 +909,14 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
     const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week
       FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id=? AND COALESCE(v.scheduled_week, v.due)>=?
       AND COALESCE(v.notes_wins,'') = '' AND COALESCE(v.notes_issues,'') = '' AND COALESCE(v.notes_focus,'') = '' AND COALESCE(v.notes_commitments,'') = '' ORDER BY v.scheduled_week DESC LIMIT 20`).all(user.coach_id, cut30);
-    return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes,
+    // Placed on a week that has now passed, still not marked complete. The app can't tell
+    // whether the coach went and forgot to log it or didn't go — either way it needs a hand.
+    // Independent of the due date: a visit placed early can be in this state while its due
+    // date is still weeks out, which is exactly when it fell through the cracks before.
+    const weekPassed = db.prepare(`SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
+      FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND date(v.cal_week,'+6 days')<? AND ${mine}
+      ORDER BY v.cal_week LIMIT 20`).all(today, user.coach_id, user.coach_id);
+    return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes, weekPassed,
       callsOwed: callsOwed(today, { coachId: user.coach_id }), callsMonth: monthKey(today) });
   }
 
@@ -942,6 +949,8 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
   const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week, v.completed_by_coach_id
     FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id IS NOT NULL AND COALESCE(v.scheduled_week, v.due)>=?${tf}
     AND COALESCE(v.notes_wins,'')='' AND COALESCE(v.notes_issues,'')='' AND COALESCE(v.notes_focus,'')='' AND COALESCE(v.notes_commitments,'')='' ORDER BY v.scheduled_week DESC LIMIT 50`).all(cut30, ...tArgs);
+  const weekPassed = db.prepare(`SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week, v.cal_coach
+    FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND date(v.cal_week,'+6 days')<?${tf} ORDER BY v.cal_week LIMIT 50`).all(today, ...tArgs);
   const holdsExpiring = db.prepare(`SELECT id, name, coach_id, expires FROM prospect_holds
     WHERE status='active' AND expires IS NOT NULL AND expires<=? ORDER BY expires LIMIT 20`).all(plus14)
     .filter(h => { if(!teamFilter) return true; const c = getCoach(h.coach_id); return c && c.team === teamFilter; });
@@ -950,7 +959,7 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
     .get(today.slice(0,7)+'%', ...tArgs).c;
   const callsOwedAll = callsOwed(today, { team: teamFilter });
   const callsUnowned = teamFilter ? [] : callsOwed(today, { unassigned: true });
-  send(res, 200, { role: user.role, team: teamFilter, overdueNoPlan, lateOnCalendar, dueSoonUnscheduled, toConfirm, atRisk, missingNotes, holdsExpiring, pendingCount, completedThisMonth,
+  send(res, 200, { role: user.role, team: teamFilter, overdueNoPlan, lateOnCalendar, dueSoonUnscheduled, toConfirm, atRisk, missingNotes, weekPassed, holdsExpiring, pendingCount, completedThisMonth,
     callsOwed: callsOwedAll, callsUnowned, callsMonth: monthKey(today) });
 });
 
