@@ -993,6 +993,14 @@ function todayTeamView(t, orphanedData){
       <td><button class="btn tiny" onclick="openClientProfile(${c.id})">Open profile</button></td></tr>`)+`</table></div>`;
   }
 
+  if(t.weekPassed && t.weekPassed.length){
+    html+=`<div class="panel"><h2>Scheduled week passed, not marked done (${t.weekPassed.length})</h2>
+    <p class="small" style="margin-bottom:8px">On a coach's calendar for a week that's now over, still open. Either it happened and wasn't logged, or it needs re-placing — the coach sees these on their own Today.</p>
+    <table><tr><th>Client</th><th>Visit</th><th>Was scheduled</th><th>Coach</th><th></th></tr>`+
+    todayRows(t.weekPassed, 10, v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td>
+      <td class="mono">wk of ${fmtW(v.cal_week)}</td><td>${esc(coach(v.cal_coach)?.name||'—')}</td>
+      <td><button class="btn tiny" onclick="openVisitModal(${v.id})">Open</button></td></tr>`)+`</table></div>`;
+  }
   if(t.missingNotes.length){
     html+=`<div class="panel"><h2>Completed without a note (${t.missingNotes.length})</h2>
     <p class="small" style="margin-bottom:8px">Visits marked done in the last 30 days with no write-up — undocumented work is invisible work.</p>
@@ -1109,7 +1117,7 @@ function todayCoachView(t){
   html+=`<div class="cards" style="margin-bottom:14px">
     ${stat(t.overdueMine.length, 'Overdue', 'var(--bad)', "document.getElementById('tdOverdue')?.scrollIntoView({behavior:'smooth'})")}
     ${stat(t.dueSoonMine.length, 'Due in the next 30 days', 'var(--warn)', "document.getElementById('tdDueSoon')?.scrollIntoView({behavior:'smooth'})")}
-    ${stat(t.missingNotes.length, 'Notes owed', '#1d4f91', "document.getElementById('tdNotes')?.scrollIntoView({behavior:'smooth'})")}
+    ${stat(t.missingNotes.length + (t.weekPassed||[]).length, 'Notes owed', '#1d4f91', "document.getElementById('tdNotes')?.scrollIntoView({behavior:'smooth'})")}
     ${stat((t.callsOwed||[]).length, 'Calls owed', (t.callsOwed||[]).some(r=>r.missed) ? 'var(--bad)' : 'var(--warn)', "document.getElementById('tdCalls')?.scrollIntoView({behavior:'smooth'})")}
     ${stat(onCal, 'On your calendar', 'var(--ok)', "go('board')")}
   </div>`;
@@ -1162,13 +1170,28 @@ function todayCoachView(t){
   };
   html+=sec('tdOverdue', 'Overdue from you', t.overdueMine, 'Nothing overdue. ✔', true);
   html+=sec('tdDueSoon', 'Due from you in the next 30 days', t.dueSoonMine, 'Nothing due soon. ✔', false);
-  if(t.missingNotes.length){
-    html+=`<div class="panel" id="tdNotes"><h2>You owe a note <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${t.missingNotes.length})</span></h2>
-    <p class="small" style="margin-bottom:8px">Visits you completed in the last 30 days with no write-up. The client's page can't show wins, issues or focus until you add one.</p>
-    <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Visited</th><th style="text-align:right"></th></tr>`+
-    t.missingNotes.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||v.program||'Completed visit')}</td>
-      <td class="mono">${fmt(v.scheduled_week||v.cal_week||v.due)}</td>
-      <td><div style="display:flex;justify-content:flex-end">${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</div></td></tr>`).join('')+`</table></div></div>`;
+  const wp = t.weekPassed || [];
+  if(t.missingNotes.length || wp.length){
+    html+=`<div class="panel" id="tdNotes"><h2>You owe a note <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${t.missingNotes.length + wp.length})</span></h2>`;
+    if(wp.length){
+      html+=`<h3 style="margin:4px 0 4px">Scheduled week passed, not marked done <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${wp.length})</span></h3>
+      <p class="small" style="margin-bottom:8px">You were on the calendar for these and the week is over. If you went, complete it and write it up. If you didn't, move it to a week you will.</p>
+      <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Was scheduled</th><th style="text-align:right"></th></tr>`+
+      wp.map(v=>`<tr><td><b>${healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td>
+        <td class="mono">wk of ${fmtW(v.cal_week)} <span class="small" style="color:var(--bad)">${daysLate(v.cal_week)}d ago</span></td>
+        <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap">
+          ${canReschedule(full(v)) ? `<button class="btn tiny" title="Pick another week" onclick="${placeJump(full(v))}">Move</button>` : ''}
+          <button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete &amp; write up</button></div></td></tr>`).join('')+`</table></div>`;
+    }
+    if(t.missingNotes.length){
+      html+=`<h3 style="margin:${wp.length?'14px':'4px'} 0 4px">Completed without a write-up <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${t.missingNotes.length})</span></h3>
+      <p class="small" style="margin-bottom:8px">Visits you marked done in the last 30 days with no notes. The client's page can't show wins, issues or focus until you add them.</p>
+      <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Visited</th><th style="text-align:right"></th></tr>`+
+      t.missingNotes.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||v.program||'Completed visit')}</td>
+        <td class="mono">${fmt(v.scheduled_week||v.cal_week||v.due)}</td>
+        <td><div style="display:flex;justify-content:flex-end">${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</div></td></tr>`).join('')+`</table></div>`;
+    }
+    html+=`</div>`;
   }
   html += callsOwedPanel(t);
   return html;
