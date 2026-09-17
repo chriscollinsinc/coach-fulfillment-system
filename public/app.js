@@ -3546,11 +3546,73 @@ const FAQ = [
     { q: 'Can I export the client/inventory list?', a: `Yes — the LID Inventory page has a CSV export that respects whatever filters you currently have applied.` },
   ]},
 ];
+/* ---------- Video guides (Scribe) ----------
+ * Accordion of walkthroughs. The iframe src is only set when a row is opened, so a page with
+ * a dozen guides doesn't load a dozen videos up front. Admins add/reorder/remove in place. */
+function guidesPanel(){
+  const guides = D.guides || [];
+  const admin = D.user.role === 'admin';
+  if(!guides.length && !admin) return '';
+  const ROLE_LABEL = { admin:'Admins', lead:'Leads', sales:'Sales', coach:'Coaches' };
+  const rows = guides.map((g, i) => `<details class="guide" id="guide-${g.id}" ontoggle="guideToggled(this,'${esc(g.url).replace(/'/g,'%27')}')" style="margin-bottom:8px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff">
+      <summary style="cursor:pointer;font-weight:600;padding:12px 14px;display:flex;align-items:center;gap:10px;list-style:none">
+        <span style="display:inline-flex;width:26px;height:26px;border-radius:50%;background:var(--primary);color:#fff;align-items:center;justify-content:center;font-size:12px;flex:none">▶</span>
+        <span style="flex:1">${esc(g.title)}</span>
+        ${g.roles && g.roles.length ? `<span class="small" style="color:var(--muted);font-weight:400">${g.roles.map(r=>ROLE_LABEL[r]||r).join(' · ')}</span>` : ''}
+        ${admin ? `<span style="display:inline-flex;gap:4px" onclick="event.preventDefault();event.stopPropagation()">
+          <button class="btn tiny" title="Move up" onclick="guideMove('${g.id}',-1)" ${i===0?'disabled':''}>↑</button>
+          <button class="btn tiny" title="Move down" onclick="guideMove('${g.id}',1)" ${i===guides.length-1?'disabled':''}>↓</button>
+          <button class="btn tiny" onclick="guideDlg('${g.id}')">Edit</button>
+          <button class="btn tiny danger" onclick="guideDelete('${g.id}','${esc(g.title).replace(/'/g,"\\'")}')">Remove</button></span>` : ''}
+      </summary>
+      <div class="guide-body" style="padding:0 14px 14px"><div class="small" style="color:var(--muted);padding:8px 0">Loading video…</div></div>
+    </details>`).join('');
+  return `<div class="panel"><h2>🎬 Video guides</h2>
+    <p class="small" style="margin-bottom:10px">Short click-through walkthroughs of the system. Open one to play it${admin ? ' — admins can add more with the Scribe embed code' : ''}.</p>
+    ${rows || '<p class="small">No guides yet.</p>'}
+    ${admin ? `<div class="controls" style="margin-top:10px"><button class="btn primary" onclick="guideDlg()">＋ Add guide</button></div>` : ''}
+  </div>`;
+}
+function guideToggled(el, url){
+  const body = el.querySelector('.guide-body'); if(!body) return;
+  if(el.open && !body.dataset.loaded){
+    body.dataset.loaded = '1';
+    body.innerHTML = `<iframe src="${url}" width="100%" height="800" allow="fullscreen" loading="lazy" style="aspect-ratio:16/12;border:0;min-height:480px;border-radius:8px;background:#f4f4f5"></iframe>`;
+  }
+}
+function guideDlg(id){
+  const g = id ? (D.guides||[]).find(x=>x.id===id) : null;
+  const roles = (g && g.roles) || [];
+  const chk = (r,l) => `<label class="small" style="margin-right:12px"><input type="checkbox" class="gRole" value="${r}" ${roles.includes(r)?'checked':''}> ${l}</label>`;
+  openDlg(`<h3>${g ? 'Edit guide' : 'Add video guide'}</h3>
+    <label>Title</label><input id="gTitle" value="${g ? esc(g.title) : ''}" placeholder="How to …">
+    <label>Scribe embed</label><textarea id="gEmbed" rows="3" style="width:100%;box-sizing:border-box" placeholder="Paste the whole <iframe …> embed code from Scribe, or just the scribehow.com/embed/… link">${g ? esc(g.url) : ''}</textarea>
+    <p class="small" style="color:var(--muted);margin-top:2px">In Scribe: Share → Embed → copy. The <code>?as=video</code> version plays as a movie; without it, it shows as steps.</p>
+    <label>Show to</label><div style="margin:2px 0 6px">${chk('coach','Coaches')}${chk('lead','Leads')}${chk('sales','Sales')}${chk('admin','Admins')}</div>
+    <p class="small" style="color:var(--muted)">Leave all unticked to show it to everyone.</p>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="guideSave(${g ? `'${g.id}'` : 'null'})">${g ? 'Save' : 'Add'}</button></div>`, {wide:true});
+}
+async function guideSave(id){
+  const title = ($('#gTitle')||{}).value || '', embed = ($('#gEmbed')||{}).value || '';
+  const roles = [...document.querySelectorAll('.gRole:checked')].map(x=>x.value);
+  try{
+    if(id) await api('PATCH','/api/guides/'+id,{ title, embed, roles });
+    else await api('POST','/api/guides',{ title, embed, roles });
+    closeDlg(); toast(id ? 'Guide updated' : 'Guide added'); await refresh();
+  }catch(e){ uiAlert(e.message || 'Could not save guide'); }
+}
+async function guideMove(id, dir){ try{ await api('PATCH','/api/guides/'+id,{ order: dir }); await refresh(); }catch(e){ uiAlert(e.message||'Could not move'); } }
+async function guideDelete(id, title){
+  if(!(await uiConfirm(`Remove "${title}" from the FAQ? The Scribe itself is untouched — this only removes the link here.`,'Remove'))) return;
+  try{ await api('DELETE','/api/guides/'+id); toast('Guide removed'); await refresh(); }catch(e){ uiAlert(e.message||'Could not remove'); }
+}
 function faqView(){
   const role = D.user.role;
   const sections = FAQ.filter(s=>s.roles.includes(role));
   let html = `<div class="panel"><h2>FAQ &amp; SOPs</h2>
     <p class="small">How this app's less-obvious features work — click a question to expand it. Sections only show if they're relevant to your role.</p></div>`;
+  html += guidesPanel();
   for(const s of sections){
     html += `<div class="panel"><h2>${esc(s.cat)}</h2>` +
       s.items.map(i=>`<details style="margin-bottom:8px">

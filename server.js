@@ -326,6 +326,7 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
   const out = {
     user,
     teams: teamNames(),
+    guides: guidesFor(user.role),
     // Team records: who leads each one. `teams` above stays a plain name list for the
     // many places that only need names; this is for the admin Teams panel and anything
     // that needs the lead.
@@ -1127,6 +1128,59 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
     visitHistory, upcoming, notes,
     todo: { overdue, dueSoon, missingNotes },
   });
+});
+/* ----- Video guides (Scribe embeds on the FAQ page) -----
+   Stored as JSON in meta.guides so an admin can add the next walkthrough from the FAQ page
+   itself instead of a deploy. Each guide: { id, title, url, roles[], created }. `url` is the
+   Scribe embed src — admins may paste the whole <iframe ...> tag; we pull the src out. Only
+   scribehow.com embeds are accepted, so this can never become a way to frame arbitrary
+   third-party pages inside the app. */
+function allGuides(){ try{ const a = JSON.parse(getMeta('guides') || '[]'); return Array.isArray(a) ? a : []; }catch(_){ return []; } }
+function guidesFor(role){ return allGuides().filter(g => !g.roles || !g.roles.length || g.roles.includes(role)); }
+function parseScribeEmbed(raw){
+  let url = String(raw || '').trim();
+  const m = url.match(/src=["']([^"']+)["']/i); if(m) url = m[1];
+  url = url.replace(/&amp;/g, '&');
+  try{
+    const u = new URL(url);
+    if(!/(^|\.)scribehow\.com$/i.test(u.hostname)) return null;
+    // Normalise share links to embed links: /shared/X -> /embed/X ; keep ?as=video if present
+    if(u.pathname.startsWith('/shared/')) u.pathname = u.pathname.replace('/shared/', '/embed/');
+    if(!u.pathname.startsWith('/embed/')) return null;
+    return u.toString();
+  }catch(_){ return null; }
+}
+route('POST', /^\/api\/guides$/, ['admin'], (req, res, m, body, user) => {
+  const title = String(body.title || '').trim();
+  const url = parseScribeEmbed(body.embed || body.url);
+  if(!title) return err(res, 400, 'title required');
+  if(!url) return err(res, 400, 'Paste the Scribe embed code or a scribehow.com/embed link');
+  const ROLES = ['admin','lead','sales','coach'];
+  const roles = Array.isArray(body.roles) ? body.roles.filter(r => ROLES.includes(r)) : [];
+  const guides = allGuides();
+  const g = { id: 'g_' + Date.now().toString(36), title, url, roles, created: new Date().toISOString(), by: user.email };
+  guides.push(g); setMeta('guides', JSON.stringify(guides));
+  log(user.email, 'guide.add', { id: g.id, title });
+  send(res, 200, { ok: true, guide: g });
+});
+route('PATCH', /^\/api\/guides\/([\w-]+)$/, ['admin'], (req, res, m, body, user) => {
+  const guides = allGuides(); const g = guides.find(x => x.id === m[1]); if(!g) return err(res, 404, 'not found');
+  if(body.title !== undefined){ const t = String(body.title).trim(); if(!t) return err(res, 400, 'title required'); g.title = t; }
+  if(body.embed !== undefined || body.url !== undefined){ const u = parseScribeEmbed(body.embed || body.url); if(!u) return err(res, 400, 'bad Scribe link'); g.url = u; }
+  if(body.roles !== undefined) g.roles = Array.isArray(body.roles) ? body.roles.filter(r => ['admin','lead','sales','coach'].includes(r)) : [];
+  if(body.order !== undefined){ // move: -1 up, +1 down
+    const i = guides.indexOf(g), j = i + (+body.order < 0 ? -1 : 1);
+    if(j >= 0 && j < guides.length){ guides.splice(i, 1); guides.splice(j, 0, g); }
+  }
+  setMeta('guides', JSON.stringify(guides));
+  log(user.email, 'guide.edit', { id: g.id, ...body });
+  send(res, 200, { ok: true });
+});
+route('DELETE', /^\/api\/guides\/([\w-]+)$/, ['admin'], (req, res, m, body, user) => {
+  const guides = allGuides(); const g = guides.find(x => x.id === m[1]); if(!g) return err(res, 404, 'not found');
+  setMeta('guides', JSON.stringify(guides.filter(x => x.id !== g.id)));
+  log(user.email, 'guide.delete', { id: g.id, title: g.title });
+  send(res, 200, { ok: true });
 });
 route('POST', /^\/api\/teams$/, ['admin'], (req, res, m, body, user) => {
   const t = String(body.name || '').trim();

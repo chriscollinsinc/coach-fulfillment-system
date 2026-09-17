@@ -2200,5 +2200,11 @@ migrateCoachCertifications();
 syncCoachUserTeams();
 seedTeamsFromMeta();
 syncLeadsFromTeams();
+/* First video guide (Mike, 2026-09-17). Admins add the rest from the FAQ page. */
+if(!getMeta('guides')){
+  setMeta('guides', JSON.stringify([{ id: 'g_seed1', title: 'How to Log a Coaching Call in the Fulfillment System',
+    url: 'https://scribehow.com/embed/How_to_Log_a_Coaching_Call_in_the_Fulfillment_System___icbnMlPR5KBa2aIw7j4Og?as=video',
+    roles: [], created: new Date().toISOString(), by: 'seed' }]));
+}
 
 module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, clientOwnerForMonth, teamNames, teamRow, teamLedBy, setTeamLead, mirrorTeamsMeta, leadIssues, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit };
