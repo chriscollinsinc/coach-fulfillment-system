@@ -3574,21 +3574,32 @@ function adminView(){
   if(tab==='data') return html + adminDataView();
   return html + adminHistoryView();
 }
+function teamInfoFor(name){ return (D.teamInfo||[]).find(x=>x.name===name) || { name, lead_coach_id:null, lead_name:null }; }
 function adminPeopleView(){
+  const issues = D.leadIssues || { noLead:[], strayLeads:[] };
   let html=`<div class="panel"><h2>Teams &amp; coaches</h2>
+    <p class="small" style="margin-bottom:8px">Every team has exactly one lead. The lead's login is a <b>lead</b> role and their coach record sits on the team they lead — both follow from the pick below, so there is nothing to keep in sync by hand.</p>
+    ${issues.strayLeads.length ? `<div style="background:#fdeecd;border-left:5px solid #c77d0a;padding:10px 14px;margin-bottom:10px" class="small">⚠ <b>Lead login, no team:</b> ${issues.strayLeads.map(u=>esc(u.name||u.email)).join(', ')} — role says lead but they don't lead a team. Set their team's lead below, or change the role in Users.</div>` : ''}
     <div class="controls"><button class="btn primary" onclick="coachDlg()">＋ Add coach</button>
     <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
   for(const t of D.teams){
     const members=D.coaches.filter(c=>c.team===t);
-    html+=`<h3 style="display:flex;align-items:center;gap:8px">Team ${esc(t)} (${members.length})
+    const info = teamInfoFor(t);
+    const leadPick = `<select onchange="setTeamLead('${esc(t).replace(/'/g,"\\'")}',this.value)" title="Who leads this team">
+        <option value="">${info.lead_coach_id ? '— remove lead —' : '— pick a lead —'}</option>
+        ${members.filter(c=>c.active).map(c=>`<option value="${c.id}" ${c.id===info.lead_coach_id?'selected':''}>${esc(c.name)}</option>`).join('')}</select>`;
+    html+=`<h3 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">Team ${esc(t)} <span class="small" style="font-weight:400">(${members.length})</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;background:${info.lead_coach_id?'#e2f4ea':'#fbe3e3'};color:${info.lead_coach_id?'#186b45':'#a12626'};font-size:12px">${info.lead_coach_id ? `★ Lead: <b>${esc(info.lead_name||'')}</b>` : '⚠ No lead'}</span>
+      ${leadPick}
+      <span style="flex:1"></span>
       <button class="btn tiny" onclick="renameTeamDlg('${esc(t).replace(/'/g,"\\'")}')">Rename</button>
       ${members.length?'':`<button class="btn tiny danger" onclick="deleteTeam('${esc(t).replace(/'/g,"\\'")}')">Delete</button>`}
-    </h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th>Team lead</th><th></th></tr>`;
+    </h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th></th></tr>`;
     members.forEach(c=>{
       const fv=D.visits.filter(v=>!v.completed&&v.cal_coach===c.id&&v.cal_week>=TODAY).length;
-      html+=`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--ink);text-decoration:none;display:flex;align-items:center;gap:8px">${avatarHtml(c.name,c.team,26)}<b style="text-decoration:underline;color:var(--primary)">${esc(c.name)}</b></a></td><td class="num">${fv}</td>
-        <td><select onchange="moveCoach('${c.id}',this.value)"><option></option>${D.teams.filter(x=>x!==t).map(x=>`<option>${x}</option>`).join('')}</select></td>
-        <td><input type="checkbox" ${c.is_lead?'checked':''} onchange="toggleTeamLead('${c.id}',this.checked)"></td>
+      const isLead = c.id===info.lead_coach_id;
+      html+=`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--ink);text-decoration:none;display:flex;align-items:center;gap:8px">${avatarHtml(c.name,c.team,26)}<b style="text-decoration:underline;color:var(--primary)">${esc(c.name)}</b>${isLead?' <span title="Team lead" style="color:#c77d0a">★</span>':''}</a></td><td class="num">${fv}</td>
+        <td>${isLead ? `<span class="small" style="color:var(--muted)" title="Pick a new lead for Team ${esc(t)} first">leads this team</span>` : `<select onchange="moveCoach('${c.id}',this.value)"><option></option>${D.teams.filter(x=>x!==t).map(x=>`<option>${x}</option>`).join('')}</select>`}</td>
         <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')" >Deactivate</button></td></tr>`;
     });
     html+=`</table>`;
@@ -4080,7 +4091,12 @@ function coachDlg(){
 async function saveCoach(){ const n=$('#kName').value.trim(); if(!n){uiAlert('Name required');return;}
   await api('POST','/api/coaches',{name:n,team:$('#kTeam').value}); closeDlg(); await refresh(); toast(n+' added — their weeks are open capacity'); }
 async function moveCoach(id,team){ if(!team) return; await api('PATCH','/api/coaches/'+id,{team}); await refresh(); toast('Moved'); }
-async function toggleTeamLead(id,isLead){ await api("PATCH","/api/coaches/"+id,{is_lead:isLead?1:0}); await refresh(); toast(isLead?"Marked as team lead":"Removed from team leads"); }
+async function setTeamLead(team, coachId){
+  try{
+    await api('PUT','/api/teams/'+encodeURIComponent(team)+'/lead',{ coach_id: coachId || null });
+    await refresh(); toast(coachId ? 'Team lead set — their login is now a lead' : 'Lead removed');
+  }catch(e){ uiAlert(e.message || 'Could not set lead'); await refresh(); }
+}
 function removeCoach(id,name){ coachDeleteWithModal(id); }
 function renameTeamDlg(from){
   openDlg(`<h3>Rename Team ${esc(from)}</h3>
@@ -4107,11 +4123,19 @@ async function deleteTeam(t){
   toast(`Team ${t} deleted`);
 }
 function teamDlg(){
-  openDlg(`<h3>Add team</h3><label>Team name</label><input id="tName">
+  const free = D.coaches.filter(c=>c.active && !(D.teamInfo||[]).some(t=>t.lead_coach_id===c.id));
+  openDlg(`<h3>Add team</h3>
+    <label>Team name</label><input id="tName" placeholder="e.g. Big Dogs">
+    <label>Team lead</label><select id="tLead"><option value="">— pick later —</option>${free.map(c=>`<option value="${c.id}">${esc(c.name)} (${esc(c.team||'no team')})</option>`).join('')}</select>
+    <p class="small" style="color:var(--muted)">Picking a lead moves that coach onto the new team and makes their login a lead. Promoting a coach to run a new team is exactly this.</p>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="saveTeam()">Add</button></div>`);
 }
-async function saveTeam(){ await api('POST','/api/teams',{name:$('#tName').value}); closeDlg(); await refresh(); }
+async function saveTeam(){
+  const name = ($('#tName')||{}).value || '', lead_coach_id = ($('#tLead')||{}).value || null;
+  try{ const r = await api('POST','/api/teams',{ name, lead_coach_id }); closeDlg(); if(r && r.warning) uiAlert(r.warning); await refresh(); }
+  catch(e){ uiAlert(e.message || 'Could not add team'); }
+}
 function userDlg(){
   openDlg(`<h3>Add user</h3>
     <label>Name</label><input id="uName">

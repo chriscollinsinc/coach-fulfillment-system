@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, clientOwnerForMonth, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit } = require('./db.js');
+const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, clientOwnerForMonth, teamNames, teamRow, teamLedBy, setTeamLead, mirrorTeamsMeta, leadIssues, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit } = require('./db.js');
 const { sendMail } = require('./mail.js');
 
 const PORT = process.env.PORT || 3000;
@@ -325,7 +325,12 @@ route('POST', /^\/api\/reset-password$/, null, (req, res, m, body) => {
 route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const out = {
     user,
-    teams: JSON.parse(getMeta('teams') || '[]'),
+    teams: teamNames(),
+    // Team records: who leads each one. `teams` above stays a plain name list for the
+    // many places that only need names; this is for the admin Teams panel and anything
+    // that needs the lead.
+    teamInfo: db.prepare('SELECT t.name, t.lead_coach_id, c.name AS lead_name, t.active FROM teams t LEFT JOIN coaches c ON c.id=t.lead_coach_id WHERE t.active=1 ORDER BY t.name').all(),
+    leadIssues: user.role === 'admin' ? leadIssues() : undefined,
     coaches: db.prepare(`SELECT c.*,
       (SELECT COUNT(*) FROM clients WHERE assigned_coach_id=c.id AND deleted_at IS NULL) AS assigned_stores,
       (SELECT COUNT(*) FROM visits WHERE cal_coach=c.id AND completed=0) AS upcoming_count
@@ -961,6 +966,11 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
   const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
   if(!canEditTeam(user, c.team) || (body.team && !canEditTeam(user, body.team))) return err(res, 403, 'Not your team');
   if(body.name) db.prepare('UPDATE coaches SET name=? WHERE id=?').run(body.name.trim(), c.id);
+  if(body.team && body.team !== c.team){
+    const leads = teamLedBy(c.id);
+    if(leads) return err(res, 400, `${c.name} leads Team ${leads} — pick a new lead for that team before moving them`);
+    if(!teamRow(body.team)) return err(res, 400, 'no such team');
+  }
   if(body.team){
     db.prepare('UPDATE coaches SET team=? WHERE id=?').run(body.team, c.id);
     db.prepare('UPDATE visits SET team=? WHERE cal_coach=? AND completed=0').run(body.team, c.id);
@@ -975,7 +985,15 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
   }
   // Handle coach certification levels
   if(body.is_handoff_capable !== undefined) db.prepare('UPDATE coaches SET is_handoff_capable=? WHERE id=?').run(body.is_handoff_capable ? 1 : 0, c.id);
-  if(body.is_lead !== undefined) db.prepare('UPDATE coaches SET is_lead=? WHERE id=?').run(body.is_lead ? 1 : 0, c.id);
+  // is_lead is derived from teams.lead_coach_id now; the old checkbox routes through the
+  // one write path so it can never create a second lead on a team.
+  if(body.is_lead !== undefined){
+    const cur = getCoach(c.id);
+    try{
+      if(body.is_lead){ if(!cur.team) return err(res, 400, 'coach has no team'); setTeamLead(cur.team, c.id, user.email); }
+      else { const leads = teamLedBy(c.id); if(leads) setTeamLead(leads, null, user.email); }
+    }catch(e){ return err(res, 400, e.message); }
+  }
   if(body.is_advisor_only !== undefined) db.prepare('UPDATE coaches SET is_advisor_only=? WHERE id=?').run(body.is_advisor_only ? 1 : 0, c.id);
   log(user.email, 'coach.edit', { id: c.id, ...body });
   send(res, 200, { ok: true });
@@ -1105,12 +1123,27 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
   });
 });
 route('POST', /^\/api\/teams$/, ['admin'], (req, res, m, body, user) => {
-  const teams = JSON.parse(getMeta('teams') || '[]');
   const t = String(body.name || '').trim();
-  if(!t || teams.includes(t)) return err(res, 400, 'invalid or duplicate team');
-  teams.push(t); setMeta('teams', JSON.stringify(teams));
+  if(!t) return err(res, 400, 'team name required');
+  if(teamRow(t)) return err(res, 400, 'a team with that name already exists');
+  db.prepare('INSERT INTO teams(name, active, created) VALUES(?,1,?)').run(t, new Date().toISOString());
+  mirrorTeamsMeta();
   log(user.email, 'team.add', t);
+  if(body.lead_coach_id){
+    try{ setTeamLead(t, String(body.lead_coach_id), user.email); }
+    catch(e){ return send(res, 200, { ok: true, warning: 'Team created, but lead not set: ' + e.message }); }
+  }
   send(res, 200, { ok: true });
+});
+/* Who leads a team — the ONE write path (see setTeamLead in db.js). Pass coach_id null
+   to clear. Everything derived (is_lead flag, login role, the lead's own team) follows. */
+route('PUT', /^\/api\/teams\/([^/]+)\/lead$/, ['admin'], (req, res, m, body, user) => {
+  const t = decodeURIComponent(m[1]);
+  if(!teamRow(t)) return err(res, 404, 'no such team');
+  const coachId = body && body.coach_id ? String(body.coach_id) : null;
+  try{ setTeamLead(t, coachId, user.email); }
+  catch(e){ return err(res, 400, e.message); }
+  send(res, 200, { ok: true, team: teamRow(t) });
 });
 /* Rename a team everywhere at once. Team names are plain strings on coaches,
    visits, and users (there's no team id), so a rename has to cascade through all
@@ -1119,16 +1152,17 @@ route('POST', /^\/api\/teams$/, ['admin'], (req, res, m, body, user) => {
 route('PATCH', /^\/api\/teams\/rename$/, ['admin'], (req, res, m, body, user) => {
   const from = String(body.from || '').trim();
   const to = String(body.to || '').trim();
-  const teams = JSON.parse(getMeta('teams') || '[]');
-  if(!teams.includes(from)) return err(res, 404, 'no such team');
+  if(!teamRow(from)) return err(res, 404, 'no such team');
   if(!to) return err(res, 400, 'new name required');
-  if(teams.includes(to)) return err(res, 400, `"${to}" already exists — to merge two teams, move the coaches over and delete the empty one instead`);
+  if(teamRow(to)) return err(res, 400, `"${to}" already exists — to merge two teams, move the coaches over and delete the empty one instead`);
   db.exec('BEGIN');
   try{
+    db.prepare('UPDATE teams SET name=? WHERE name=?').run(to, from);
     const nCoaches = db.prepare('UPDATE coaches SET team=? WHERE team=?').run(to, from).changes;
     const nVisits = db.prepare('UPDATE visits SET team=? WHERE team=?').run(to, from).changes;
     const nUsers = db.prepare('UPDATE users SET team=? WHERE team=?').run(to, from).changes;
-    setMeta('teams', JSON.stringify(teams.map(t => t === from ? to : t)));
+    db.prepare('UPDATE client_month_snapshots SET team=? WHERE team=?').run(to, from);
+    mirrorTeamsMeta();
     db.exec('COMMIT');
     log(user.email, 'team.rename', { from, to, nCoaches, nVisits, nUsers });
     send(res, 200, { ok: true, nCoaches, nVisits, nUsers });
@@ -1139,8 +1173,7 @@ route('PATCH', /^\/api\/teams\/rename$/, ['admin'], (req, res, m, body, user) =>
    which is correct: that's what the team was called when the work happened. */
 route('DELETE', /^\/api\/teams\/([^/]+)$/, ['admin'], (req, res, m, body, user) => {
   const t = decodeURIComponent(m[1]);
-  const teams = JSON.parse(getMeta('teams') || '[]');
-  if(!teams.includes(t)) return err(res, 404, 'no such team');
+  if(!teamRow(t)) return err(res, 404, 'no such team');
   const blockers = [];
   const nCoaches = db.prepare('SELECT COUNT(*) c FROM coaches WHERE team=? AND active=1').get(t).c;
   const nUsers = db.prepare('SELECT COUNT(*) c FROM users WHERE team=? AND active=1').get(t).c;
@@ -1149,7 +1182,11 @@ route('DELETE', /^\/api\/teams\/([^/]+)$/, ['admin'], (req, res, m, body, user) 
   if(nUsers) blockers.push(`${nUsers} active user(s)`);
   if(nOpen) blockers.push(`${nOpen} open visit(s)`);
   if(blockers.length) return err(res, 409, `Can't delete "${t}" — it still has ${blockers.join(', ')}. Move or deactivate them first.`);
-  setMeta('teams', JSON.stringify(teams.filter(x => x !== t)));
+  // Row goes, name string stays on completed visits — that is what the team was called
+  // when the work happened (Cliff's team, 2026).
+  if(teamRow(t).lead_coach_id) setTeamLead(t, null, user.email);
+  db.prepare('DELETE FROM teams WHERE name=?').run(t);
+  mirrorTeamsMeta();
   log(user.email, 'team.delete', t);
   send(res, 200, { ok: true });
 });
@@ -1158,6 +1195,7 @@ route('DELETE', /^\/api\/teams\/([^/]+)$/, ['admin'], (req, res, m, body, user) 
 route('POST', /^\/api\/users$/, ['admin'], (req, res, m, body, user) => {
   const { email, name, role, team, coach_id, password } = body;
   if(!email || !name || !role) return err(res, 400, 'email, name, role required');
+  if(role === 'lead' && !teamLedBy(coach_id)) return err(res, 400, 'A lead login must be linked to the coach who leads a team — set the team lead in Admin → Teams first');
   if(!/^\S+@\S+\.\S+$/.test(String(email))) return err(res, 400, 'bad email');
   // Password is optional: leave it blank to create a Google-sign-in-only account.
   // The stored sentinel can never match checkPw's salt:hash format, so password
@@ -1183,6 +1221,10 @@ route('PATCH', /^\/api\/users\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
       if(!/^\S+@\S+\.\S+$/.test(newEmail)) return err(res, 400, 'bad email');
       try{ db.prepare('UPDATE users SET email=? WHERE id=?').run(newEmail, target); }
       catch(e){ return err(res, 400, 'that email is already in use'); }
+    }
+    if(body.role === 'lead'){
+      const cid = body.coach_id !== undefined ? body.coach_id : (db.prepare('SELECT coach_id FROM users WHERE id=?').get(target) || {}).coach_id;
+      if(!teamLedBy(cid)) return err(res, 400, 'A lead login must be linked to the coach who leads a team — set the team lead in Admin → Teams first');
     }
     for(const k of ['name','role','team','coach_id']) if(body[k] !== undefined)
       db.prepare(`UPDATE users SET ${k}=? WHERE id=?`).run(body[k], target);

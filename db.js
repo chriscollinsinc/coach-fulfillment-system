@@ -2074,8 +2074,104 @@ deleteLegacyMagDuplicates();
 migrateKeapIdentityLink();
 migrateKeapRevenueSync();
 migrateProspectHolds();
+/* ---------- Teams as records, with a required lead (2026-09-17) ----------
+   Until now a team was a string in meta.teams, copied onto users.team, coaches.team and
+   visits.team, and "lead" lived in three unconnected places: users.role='lead',
+   coaches.is_lead (a free checkbox, several per team allowed) and the habit of naming
+   the team after the person. Nothing enforced anything — the Corey Brodeur drift came
+   straight out of that.
+
+   The team NAME stays the key (it is stable now: teams are named things, not people,
+   so the existing rename cascade is rarely needed and correct when it is). What is new
+   is a row per team and ONE lead per team, enforced by the database:
+     lead_coach_id UNIQUE  → a coach can lead at most one team
+     one column per team   → a team has at most one lead
+   Everything else is DERIVED from this row: coaches.is_lead, the lead's users.role, and
+   the lead's own coaches.team. A team with no lead is allowed (it happens the moment a
+   team is created, and it is Cliff's team today) but is surfaced as a problem, never
+   silently accepted. meta.teams is kept as a mirror so nothing that still reads it breaks. */
+db.exec(`
+CREATE TABLE IF NOT EXISTS teams(
+  name TEXT PRIMARY KEY,
+  lead_coach_id TEXT UNIQUE,
+  active INTEGER NOT NULL DEFAULT 1,
+  created TEXT
+);`);
+function teamNames(){ return db.prepare('SELECT name FROM teams WHERE active=1 ORDER BY name').all().map(r => r.name); }
+function mirrorTeamsMeta(){ setMeta('teams', JSON.stringify(teamNames())); }
+function teamRow(name){ return db.prepare('SELECT * FROM teams WHERE name=?').get(name) || null; }
+function teamLedBy(coachId){ return coachId ? (db.prepare('SELECT name FROM teams WHERE lead_coach_id=?').get(coachId) || {}).name || null : null; }
+/* The one write path for "who leads this team". Handles the previous lead stepping
+   down, the new lead's coach record and login following, and the mirror flags. */
+function setTeamLead(teamName, coachId, actor){
+  const t = teamRow(teamName); if(!t) throw new Error('no such team');
+  const prev = t.lead_coach_id || null;
+  if(coachId){
+    const c = db.prepare('SELECT id, team, active FROM coaches WHERE id=?').get(coachId);
+    if(!c) throw new Error('coach not found');
+    if(!c.active) throw new Error('an inactive coach cannot lead a team');
+    const elsewhere = teamLedBy(coachId);
+    if(elsewhere && elsewhere !== teamName) throw new Error(`already leads Team ${elsewhere} — a coach leads one team`);
+  }
+  db.exec('BEGIN');
+  try{
+    db.prepare('UPDATE teams SET lead_coach_id=? WHERE name=?').run(coachId || null, teamName);
+    if(coachId){
+      // The lead belongs to the team they lead. Their open visits and login follow, same
+      // as the coach PATCH does for any team move.
+      db.prepare('UPDATE coaches SET team=?, is_lead=1 WHERE id=?').run(teamName, coachId);
+      db.prepare('UPDATE visits SET team=? WHERE cal_coach=? AND completed=0').run(teamName, coachId);
+      db.prepare("UPDATE users SET team=?, role=CASE WHEN role='coach' THEN 'lead' ELSE role END WHERE coach_id=?").run(teamName, coachId);
+    }
+    if(prev && prev !== coachId){
+      db.prepare('UPDATE coaches SET is_lead=0 WHERE id=?').run(prev);
+      // Step the old lead's login back to coach unless they are an admin or lead something else.
+      db.prepare("UPDATE users SET role='coach' WHERE coach_id=? AND role='lead'").run(prev);
+    }
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); throw e; }
+  log(actor || 'system', 'team.lead', { team: teamName, from: prev, to: coachId || null });
+}
+/* One-time seed from the meta list, then an idempotent boot repair.
+   Lead inference for the seed, in order of trust: exactly one coaches.is_lead on the
+   team; else exactly one users.role='lead' linked to a coach on the team; else none
+   (logged — Cliff's team lands here, correctly). */
+function seedTeamsFromMeta(){
+  if(db.prepare('SELECT COUNT(*) c FROM teams').get().c) return;
+  const names = JSON.parse(getMeta('teams') || '[]');
+  const now = new Date().toISOString();
+  for(const name of names){
+    db.prepare('INSERT OR IGNORE INTO teams(name, active, created) VALUES(?,1,?)').run(name, now);
+    const flagged = db.prepare('SELECT id FROM coaches WHERE team=? AND is_lead=1 AND active=1').all(name);
+    const byRole = db.prepare("SELECT c.id FROM users u JOIN coaches c ON c.id=u.coach_id WHERE u.role='lead' AND u.active=1 AND c.team=? AND c.active=1").all(name);
+    const pick = flagged.length === 1 ? flagged[0].id : byRole.length === 1 ? byRole[0].id : null;
+    if(pick){ try{ setTeamLead(name, pick, 'system:seed'); }catch(e){ console.warn('team seed: could not set lead for', name, e.message); } }
+    else console.log(`⚠️  Team ${name}: no unambiguous lead (is_lead=${flagged.length}, role=lead=${byRole.length}) — set one in Admin → Teams`);
+  }
+  log('system', 'teams.seeded', { names });
+}
+/* Boot repair: flags and roles follow the teams table. Upgrades only — never demotes a
+   user on deploy; a role=lead who leads no team is reported, not silently changed. */
+function syncLeadsFromTeams(){
+  try{
+    db.prepare('UPDATE coaches SET is_lead = CASE WHEN EXISTS(SELECT 1 FROM teams t WHERE t.lead_coach_id=coaches.id) THEN 1 ELSE 0 END').run();
+    const up = db.prepare("UPDATE users SET role='lead' WHERE role='coach' AND coach_id IN (SELECT lead_coach_id FROM teams WHERE lead_coach_id IS NOT NULL)").run().changes;
+    if(up) console.log(`✅ ${up} team lead login(s) promoted to role=lead`);
+    const strays = db.prepare("SELECT u.email FROM users u WHERE u.role='lead' AND u.active=1 AND (u.coach_id IS NULL OR u.coach_id NOT IN (SELECT lead_coach_id FROM teams WHERE lead_coach_id IS NOT NULL))").all();
+    if(strays.length) console.log(`⚠️  role=lead but leads no team: ${strays.map(s=>s.email).join(', ')} — pick their team in Admin → Teams or change the role`);
+    mirrorTeamsMeta();
+  }catch(e){ console.error('⚠️  syncLeadsFromTeams failed:', e.message); }
+}
+function leadIssues(){
+  const noLead = db.prepare('SELECT name FROM teams WHERE active=1 AND lead_coach_id IS NULL').all().map(r=>r.name);
+  const strayLeads = db.prepare("SELECT u.email, u.name FROM users u WHERE u.role='lead' AND u.active=1 AND (u.coach_id IS NULL OR u.coach_id NOT IN (SELECT lead_coach_id FROM teams WHERE lead_coach_id IS NOT NULL))").all();
+  return { noLead, strayLeads };
+}
+
 ensureCurrentMonthSnapshot();
 migrateCoachCertifications();
 syncCoachUserTeams();
+seedTeamsFromMeta();
+syncLeadsFromTeams();
 
-module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, clientOwnerForMonth, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit };
+module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, clientOwnerForMonth, teamNames, teamRow, teamLedBy, setTeamLead, mirrorTeamsMeta, leadIssues, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit };
