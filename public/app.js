@@ -3664,14 +3664,19 @@ function adminView(){
  * revenue by team, coaching-call checklist, visit-note checklist. Checkmarks are derived
  * from the data, not ticked by hand. */
 function monthEndPeriod(){ return st.mePeriod || TODAY.slice(0,7); }
-function setMonthEnd(p){ st.mePeriod = p; st.meFilter = null; render(); }
-function setMonthEndFilter(v){ st.meFilter = v || null; loadMonthEnd(); }
+function setMonthEnd(p){ st.mePeriod = p; st.meFilter = null; st.meSort = null; render(); }
+function setMonthEndFilter(v){ st.meFilter = v || null; renderMonthEnd(); }
+function meSort(table, key){
+  const cur = st.meSort && st.meSort[table];
+  st.meSort = { ...(st.meSort||{}), [table]: (cur && cur.key===key) ? { key, dir: -cur.dir } : { key, dir: 1 } };
+  renderMonthEnd();
+}
 function monthEndView(){
   const cur = TODAY.slice(0,7);
   const months = []; { let [y,m] = cur.split('-').map(Number); for(let i=0;i<12;i++){ months.push(`${y}-${String(m).padStart(2,'0')}`); m--; if(m<1){ m=12; y--; } } }
   const sel = monthEndPeriod();
   return `<div class="panel"><h2>Month-end reconciliation</h2>
-    <p class="small" style="margin-bottom:10px">Revenue by team and the two note checklists for one month. Team is whoever had the client at the start of that month. A ✓ means the note exists; it can't be ticked by hand.</p>
+    <p class="small" style="margin-bottom:10px">Revenue by team and the two note checklists for one month. Team is whoever had the client at the start of that month. Cancelled contracts are excluded. A ✓ means the note exists; it can't be ticked by hand.</p>
     <div class="controls" style="flex-wrap:wrap;gap:6px">${months.map(p=>`<button class="btn tiny ${p===sel?'primary':''}" onclick="setMonthEnd('${p}')">${monthLabel(p)}${p===cur?' <span class="small" style="opacity:.7">(in progress)</span>':''}</button>`).join('')}</div>
   </div>
   <div id="monthEndOut"><div class="panel small">Loading ${monthLabel(sel)}…</div></div>`;
@@ -3679,69 +3684,81 @@ function monthEndView(){
 function toggleMeTeam(team){ const el = document.getElementById('me-team-'+team.replace(/\W/g,'_')); if(el) el.style.display = el.style.display==='none' ? '' : 'none'; }
 async function loadMonthEnd(){
   const out = $('#monthEndOut'); if(!out) return;
-  const p = monthEndPeriod();
-  try{
-    const r = await api('GET','/api/admin/month-end/'+p);
-    // One filter for the whole page: "team:X" or "coach:ID". Applies to all three sections.
-    const f = st.meFilter || '';
-    const [fk, fv] = f ? f.split(':') : [null, null];
-    const teamOf = x => x.team || '(no team)';
-    const pass = x => !f || (fk==='team' ? teamOf(x)===fv : String(x.coach_id||'')===fv);
-    const teams = [...new Set([...r.revenue.map(t=>t.team), ...r.calls.map(teamOf), ...r.visitNotes.map(teamOf)])].sort();
-    const coachMap = {}; [...r.revenue.flatMap(t=>t.rows), ...r.calls, ...r.visitNotes].forEach(x => { if(x.coach_id) coachMap[x.coach_id] = { name: x.coach || x.coach_id, team: teamOf(x) }; });
-    const coachOpts = Object.entries(coachMap).sort((a,b)=>a[1].team.localeCompare(b[1].team)||a[1].name.localeCompare(b[1].name));
-    const filterPick = `<select onchange="setMonthEndFilter(this.value)" style="margin-left:auto;max-width:260px">
-      <option value="">All teams &amp; coaches</option>
-      <optgroup label="Teams">${teams.map(t=>`<option value="team:${esc(t)}" ${f==='team:'+t?'selected':''}>Team ${esc(t)}</option>`).join('')}</optgroup>
-      <optgroup label="Coaches">${coachOpts.map(([id,c])=>`<option value="coach:${esc(id)}" ${f==='coach:'+id?'selected':''}>${esc(c.name)} · ${esc(c.team)}</option>`).join('')}</optgroup></select>`;
+  try{ st.meData = await api('GET','/api/admin/month-end/'+monthEndPeriod()); renderMonthEnd(); }
+  catch(e){ out.innerHTML = `<div class="panel small" style="color:var(--bad)">Could not load: ${esc(e.message||e)}</div>`; }
+}
+function renderMonthEnd(){
+  const out = $('#monthEndOut'); const r = st.meData; if(!out || !r) return;
+  const p = r.period;
+  // One filter for the whole page: "team:X" or "coach:ID". Applies to all three sections.
+  const f = st.meFilter || '';
+  const [fk, fv] = f ? f.split(':') : [null, null];
+  const teamOf = x => x.team || '(no team)';
+  const pass = x => !f || (fk==='team' ? teamOf(x)===fv : String(x.coach_id||'')===fv);
+  const teams = [...new Set([...r.revenue.map(t=>t.team), ...r.calls.map(teamOf), ...r.visitNotes.map(teamOf)])].sort();
+  const coachMap = {}; [...r.revenue.flatMap(t=>t.rows), ...r.calls, ...r.visitNotes].forEach(x => { if(x.coach_id) coachMap[x.coach_id] = { name: x.coach || x.coach_id, team: teamOf(x) }; });
+  const coachOpts = Object.entries(coachMap).sort((a,b)=>a[1].team.localeCompare(b[1].team)||a[1].name.localeCompare(b[1].name));
+  // Same select rendered in every section header, so it is wherever you are looking.
+  const filterPick = () => `<select onchange="setMonthEndFilter(this.value)" style="margin-left:auto;max-width:260px;font-weight:400">
+    <option value="">All teams &amp; coaches</option>
+    <optgroup label="Teams">${teams.map(t=>`<option value="team:${esc(t)}" ${f==='team:'+t?'selected':''}>Team ${esc(t)}</option>`).join('')}</optgroup>
+    <optgroup label="Coaches">${coachOpts.map(([id,c])=>`<option value="coach:${esc(id)}" ${f==='coach:'+id?'selected':''}>${esc(c.name)} · ${esc(c.team)}</option>`).join('')}</optgroup></select>`;
+  // Sortable headers. Default order: unfinished first, then by name/date.
+  const sortState = (st.meSort||{});
+  const th = (table, key, label, num) => { const sst = sortState[table]; const on = sst && sst.key===key;
+    return `<th class="${num?'num':''}" style="cursor:pointer;user-select:none;white-space:nowrap" onclick="meSort('${table}','${key}')" title="Sort">${label} <span style="opacity:${on?1:.3}">${on ? (sst.dir>0?'▲':'▼') : '↕'}</span></th>`; };
+  const sortRows = (table, rows, defaultCmp) => { const sst = sortState[table]; if(!sst) return rows.slice().sort(defaultCmp);
+    const val = x => x[sst.key]; return rows.slice().sort((a,b) => { const av = val(a), bv = val(b);
+      const c = (typeof av === 'number' || typeof bv === 'number') ? ((av??-Infinity) - (bv??-Infinity)) : String(av??'').localeCompare(String(bv??'')); return sst.dir * c; }); };
 
-    const rev = r.revenue.map(t => ({ ...t, rows: t.rows.filter(pass) })).filter(t => t.rows.length);
-    const revTotal = rev.reduce((s,t)=>s+t.rows.reduce((a,x)=>a+(x.price||0),0),0);
-    const calls = r.calls.filter(pass), vn = r.visitNotes.filter(pass);
-    const pct = (a,b) => b ? Math.round(100*a/b) : 0;
-    const tick = d => d ? '<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;background:#1e8e5a;color:#fff;align-items:center;justify-content:center;font-size:12px;font-weight:700">✓</span>' : '<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;border:2px solid #c23b3b;background:#fbe3e3;align-items:center;justify-content:center"></span>';
-    const cd = calls.filter(c=>c.done).length, vd = vn.filter(v=>v.done).length, sheetN = vn.filter(v=>v.kind==='sheet').length;
+  const rev = r.revenue.map(t => ({ ...t, rows: t.rows.filter(pass) })).filter(t => t.rows.length);
+  const revTotal = rev.reduce((s,t)=>s+t.rows.reduce((a,x)=>a+(x.price||0),0),0);
+  const calls0 = r.calls.filter(pass).map(c=>({ ...c, doneN: c.done?1:0 })), vn0 = r.visitNotes.filter(pass).map(v=>({ ...v, doneN: v.done?1:0 }));
+  const calls = sortRows('calls', calls0, (a,b)=>(a.doneN-b.doneN)||(a.team||'').localeCompare(b.team||'')||a.client.localeCompare(b.client));
+  const vn = sortRows('visits', vn0, (a,b)=>(a.doneN-b.doneN)||(a.when||'').localeCompare(b.when||''));
+  const pct = (a,b) => b ? Math.round(100*a/b) : 0;
+  const tick = d => d ? '<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;background:#1e8e5a;color:#fff;align-items:center;justify-content:center;font-size:12px;font-weight:700">✓</span>' : '<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;border:2px solid #c23b3b;background:#fbe3e3;align-items:center;justify-content:center"></span>';
+  const cd = calls.filter(c=>c.done).length, vd = vn.filter(v=>v.done).length, sheetN = vn.filter(v=>v.kind==='sheet').length;
+  const H = (title, sub, table) => `<h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${title} <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">${sub}</span>${filterPick()}</h2>`;
 
-    let h = `<div class="panel" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 16px"><b>Showing:</b> <span>${f ? (fk==='team' ? 'Team '+esc(fv) : esc((coachMap[fv]||{}).name||fv)) : 'everyone'}</span>${filterPick}</div>
-    <div class="cards" style="margin-bottom:14px">
-      <div class="card"><div class="k">${fmtMoney(revTotal)}</div><div class="l">Monthly revenue · ${monthLabel(p)}</div></div>
-      <div class="card ${cd===calls.length?'ok':'warn'}"><div class="k">${cd}<span class="small" style="font-size:16px;color:var(--muted)"> / ${calls.length}</span></div><div class="l">Coaching calls logged · ${pct(cd,calls.length)}%</div></div>
-      <div class="card ${vd===vn.length?'ok':'warn'}"><div class="k">${vd}<span class="small" style="font-size:16px;color:var(--muted)"> / ${vn.length}</span></div><div class="l">Visits written up · ${pct(vd,vn.length)}%</div></div>
-    </div>`;
+  let h = `<div class="cards" style="margin-bottom:14px">
+    <div class="card"><div class="k">${fmtMoney(revTotal)}</div><div class="l">Monthly revenue · ${monthLabel(p)}${f?' · filtered':''}</div></div>
+    <div class="card ${cd===calls.length?'ok':'warn'}"><div class="k">${cd}<span class="small" style="font-size:16px;color:var(--muted)"> / ${calls.length}</span></div><div class="l">Coaching calls logged · ${pct(cd,calls.length)}%</div></div>
+    <div class="card ${vd===vn.length?'ok':'warn'}"><div class="k">${vd}<span class="small" style="font-size:16px;color:var(--muted)"> / ${vn.length}</span></div><div class="l">Visits written up · ${pct(vd,vn.length)}%</div></div>
+  </div>`;
 
-    // Revenue: one accordion row per team → clients with coach, program, price
-    h += `<div class="panel"><h2>Revenue by team</h2>
-      <p class="small" style="margin-bottom:8px">Sum of each active contract's monthly-equivalent price (from Keap), attributed to the team that held the client at the start of ${monthLabel(p)}. Click a team to see every client behind the number.</p>
-      <table><tr><th style="width:22px"></th><th>Team</th><th class="num">Clients</th><th class="num">Contracts</th><th class="num">Monthly revenue</th><th class="num">Share</th><th></th></tr>` +
-      rev.map(t => {
-        const sub = t.rows.reduce((a,x)=>a+(x.price||0),0), unpriced = t.rows.filter(x=>x.price==null).length, key = t.team.replace(/\W/g,'_');
-        return `<tr style="cursor:pointer" onclick="toggleMeTeam('${esc(t.team).replace(/'/g,"\\'")}')"><td style="color:var(--muted)">▸</td><td><b>Team ${esc(t.team)}</b></td><td class="num">${new Set(t.rows.map(x=>x.client_id)).size}</td><td class="num">${t.rows.length}</td><td class="num"><b>${fmtMoney(sub)}</b></td><td class="num">${pct(sub, revTotal)}%</td>
-          <td class="small" style="color:var(--warn)">${unpriced?`${unpriced} with no price yet`:''}</td></tr>
-        <tr id="me-team-${key}" style="display:none"><td></td><td colspan="6" style="padding:0 0 10px">
-          <table style="width:100%;margin:0"><tr><th>Client</th><th>Coach</th><th>Program</th><th class="num">Monthly</th></tr>` +
-          t.rows.map(x=>`<tr><td>${clientLink(x.client, x.client_id)}</td><td class="small">${esc(x.coach||'—')}</td><td class="small">${esc(x.program||'—')}${x.status==='cancelled'?' <span class="pill" style="background:#f0f0f1;color:#55555c">cancelled in month</span>':''}</td><td class="num">${x.price==null?'<span class="small" style="color:var(--warn)">no price</span>':fmtMoney(x.price)}</td></tr>`).join('') +
-          `</table></td></tr>`; }).join('') +
-      `<tr style="border-top:2px solid var(--ink)"><td></td><td><b>Total</b></td><td class="num">${new Set(rev.flatMap(t=>t.rows.map(x=>x.client_id))).size}</td><td class="num">${rev.reduce((s,t)=>s+t.rows.length,0)}</td><td class="num"><b>${fmtMoney(revTotal)}</b></td><td class="num">100%</td><td></td></tr></table></div>`;
+  h += `<div class="panel">${H('Revenue by team', f ? 'filtered' : '')}
+    <p class="small" style="margin-bottom:8px">Sum of each active contract's monthly-equivalent price (from Keap), attributed to the team that held the client at the start of ${monthLabel(p)}. Cancelled contracts are not counted. Click a team to see every client behind the number.</p>
+    <table><tr><th style="width:22px"></th><th>Team</th><th class="num">Clients</th><th class="num">Contracts</th><th class="num">Monthly revenue</th><th class="num">Share</th><th></th></tr>` +
+    rev.map(t => {
+      const rows = sortRows('rev_'+t.team, t.rows, (a,b)=>(b.price||0)-(a.price||0)||a.client.localeCompare(b.client));
+      const sub = rows.reduce((a,x)=>a+(x.price||0),0), unpriced = rows.filter(x=>x.price==null).length, key = t.team.replace(/\W/g,'_'), tk = 'rev_'+t.team;
+      return `<tr style="cursor:pointer" onclick="toggleMeTeam('${esc(t.team).replace(/'/g,"\\'")}')"><td style="color:var(--muted)">▸</td><td><b>Team ${esc(t.team)}</b></td><td class="num">${new Set(rows.map(x=>x.client_id)).size}</td><td class="num">${rows.length}</td><td class="num"><b>${fmtMoney(sub)}</b></td><td class="num">${pct(sub, revTotal)}%</td>
+        <td class="small" style="color:var(--warn)">${unpriced?`${unpriced} with no price yet`:''}</td></tr>
+      <tr id="me-team-${key}" style="display:none"><td></td><td colspan="6" style="padding:0 0 10px">
+        <table style="width:100%;margin:0"><tr>${th(tk,'client','Client')}${th(tk,'coach','Coach')}${th(tk,'program','Program')}${th(tk,'price','Monthly',true)}</tr>` +
+        rows.map(x=>`<tr><td>${clientLink(x.client, x.client_id)}</td><td class="small">${esc(x.coach||'—')}</td><td class="small">${esc(x.program||'—')}</td><td class="num">${x.price==null?'<span class="small" style="color:var(--warn)">no price</span>':fmtMoney(x.price)}</td></tr>`).join('') +
+        `</table></td></tr>`; }).join('') +
+    `<tr style="border-top:2px solid var(--ink)"><td></td><td><b>Total</b></td><td class="num">${new Set(rev.flatMap(t=>t.rows.map(x=>x.client_id))).size}</td><td class="num">${rev.reduce((s,t)=>s+t.rows.length,0)}</td><td class="num"><b>${fmtMoney(revTotal)}</b></td><td class="num">100%</td><td></td></tr></table></div>`;
 
-    h += `<div class="panel"><h2>Coaching calls · ${monthLabel(p)} <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">${cd} of ${calls.length} logged</span></h2>
-      <p class="small" style="margin-bottom:8px">One call per active client per month. ✓ = a Coaching Call note dated in ${monthLabel(p)} exists on the client. Unlogged first.</p>
-      <div style="max-height:420px;overflow:auto"><table style="width:100%"><tr><th style="width:32px"></th><th>Client</th><th>Team</th><th>Coach</th><th>Logged</th><th></th></tr>` +
-      calls.map(c=>`<tr><td>${tick(c.done)}</td><td>${clientLink(c.client, c.client_id)}</td><td class="small">${esc(c.team||'—')}</td><td class="small">${esc(c.coach||'—')}</td>
-        <td class="small">${c.done ? `${c.calls>1?c.calls+' calls · ':''}last ${fmt(c.last)}` : '<span style="color:var(--bad)">none</span>'}</td>
-        <td>${c.done?'':`<button class="btn tiny" onclick="logCallDlg(${c.client_id},'${esc(c.client).replace(/'/g,"\\'")}','${p}')">Log call</button>`}</td></tr>`).join('') + `</table></div></div>`;
+  h += `<div class="panel">${H('Coaching calls · '+monthLabel(p), `${cd} of ${calls.length} logged`)}
+    <p class="small" style="margin-bottom:8px">One call per client with an active contract per month. ✓ = a Coaching Call note dated in ${monthLabel(p)} exists on the client. Click a column to sort.</p>
+    <div style="max-height:420px;overflow:auto"><table style="width:100%"><tr>${th('calls','doneN','')}${th('calls','client','Client')}${th('calls','team','Team')}${th('calls','coach','Coach')}${th('calls','last','Logged')}<th></th></tr>` +
+    calls.map(c=>`<tr><td>${tick(c.done)}</td><td>${clientLink(c.client, c.client_id)}</td><td class="small">${esc(c.team||'—')}</td><td class="small">${esc(c.coach||'—')}</td>
+      <td class="small">${c.done ? `${c.calls>1?c.calls+' calls · ':''}last ${fmt(c.last)}` : '<span style="color:var(--bad)">none</span>'}</td>
+      <td>${c.done?'':`<button class="btn tiny" onclick="logCallDlg(${c.client_id},'${esc(c.client).replace(/'/g,"\\'")}','${p}')">Log call</button>`}</td></tr>`).join('') + `</table></div></div>`;
 
-    const stateLabel = { done:'', no_notes:'<span class="pill p-due">Completed, no notes</span>', not_marked_done:'<span class="pill p-over">Not marked done</span>',
-      upcoming:'<span class="pill p-cal">Upcoming</span>', not_tracked:'<span class="pill" style="background:#f0f0f1;color:#55555c" title="Imported from the 2026 sheet as a calendar block. Not a visit record, so notes can\'t be written on it until Sheet Recon converts it.">Sheet visit · not tracked</span>' };
-    h += `<div class="panel"><h2>Visit notes · ${monthLabel(p)} <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">${vd} of ${vn.length} written up</span></h2>
-      <p class="small" style="margin-bottom:8px">Every visit completed in ${monthLabel(p)} or on a calendar week that touches it — the same LIDs the global calendar shows. ✓ = wins, issues, focus or commitments were written. Missing first.</p>
-      ${sheetN ? `<div style="background:#f0f0f1;border-left:5px solid #9a9aa2;padding:8px 12px;margin-bottom:10px" class="small"><b>${sheetN}</b> of these are 2026-sheet calendar blocks, not visit records — they can never be ticked here. Admin → Data → <b>Sheet Recon 2026</b> maps them onto real visits.</div>` : ''}
-      <div style="max-height:480px;overflow:auto"><table style="width:100%"><tr><th style="width:32px"></th><th>Client</th><th>Visit</th><th>When</th><th>Team</th><th>Coach</th><th>Status</th><th></th></tr>` +
-      vn.map(v=>`<tr${v.kind==='sheet'?' style="color:var(--muted)"':''}><td>${tick(v.done)}</td><td>${v.client_id ? clientLink(v.client, v.client_id) : `<span title="No client matched this sheet label">${esc(v.client)}</span> <span class="small">(unmatched)</span>`}</td>
-        <td class="small">${v.kind==='sheet' ? '<i>from sheet</i>' : `${esc(v.cycle||'')} ${esc(v.program||'')}`}</td><td class="mono small">${v.kind==='sheet' || !v.completed ? 'wk of '+fmtW(v.when) : fmt(v.when)}</td>
-        <td class="small">${esc(v.team||'—')}</td><td class="small">${esc(v.coach||'—')}</td><td>${stateLabel[v.state]||''}</td>
-        <td>${v.done || !v.id ? '' : `<button class="btn tiny" onclick="openVisitModal(${v.id})">Open</button>`}</td></tr>`).join('') + `</table></div></div>`;
-    out.innerHTML = h;
-  }catch(e){ out.innerHTML = `<div class="panel small" style="color:var(--bad)">Could not load: ${esc(e.message||e)}</div>`; }
+  const stateLabel = { done:'', no_notes:'<span class="pill p-due">Completed, no notes</span>', not_marked_done:'<span class="pill p-over">Not marked done</span>',
+    upcoming:'<span class="pill p-cal">Upcoming</span>', not_tracked:'<span class="pill" style="background:#f0f0f1;color:#55555c" title="Imported from the 2026 sheet as a calendar block. Not a visit record, so notes can\'t be written on it until Sheet Recon converts it.">Sheet visit · not tracked</span>' };
+  h += `<div class="panel">${H('Visit notes · '+monthLabel(p), `${vd} of ${vn.length} written up`)}
+    <p class="small" style="margin-bottom:8px">Every visit completed in ${monthLabel(p)} or on a calendar week that touches it — the same LIDs the global calendar shows. ✓ = wins, issues, focus or commitments were written. Click a column to sort.</p>
+    ${sheetN ? `<div style="background:#f0f0f1;border-left:5px solid #9a9aa2;padding:8px 12px;margin-bottom:10px" class="small"><b>${sheetN}</b> of these are 2026-sheet calendar blocks, not visit records — they can never be ticked here. Admin → Data → <b>Sheet Recon 2026</b> maps them onto real visits.</div>` : ''}
+    <div style="max-height:480px;overflow:auto"><table style="width:100%"><tr>${th('visits','doneN','')}${th('visits','client','Client')}${th('visits','cycle','Visit')}${th('visits','when','When')}${th('visits','team','Team')}${th('visits','coach','Coach')}${th('visits','state','Status')}<th></th></tr>` +
+    vn.map(v=>`<tr${v.kind==='sheet'?' style="color:var(--muted)"':''}><td>${tick(v.done)}</td><td>${v.client_id ? clientLink(v.client, v.client_id) : `<span title="No client matched this sheet label">${esc(v.client)}</span> <span class="small">(unmatched)</span>`}</td>
+      <td class="small">${v.kind==='sheet' ? '<i>from sheet</i>' : `${esc(v.cycle||'')} ${esc(v.program||'')}`}</td><td class="mono small">${v.kind==='sheet' || !v.completed ? 'wk of '+fmtW(v.when) : fmt(v.when)}</td>
+      <td class="small">${esc(v.team||'—')}</td><td class="small">${esc(v.coach||'—')}</td><td>${stateLabel[v.state]||''}</td>
+      <td>${v.done || !v.id ? '' : `<button class="btn tiny" onclick="openVisitModal(${v.id})">Open</button>`}</td></tr>`).join('') + `</table></div></div>`;
+  out.innerHTML = h;
 }
 function teamInfoFor(name){ return (D.teamInfo||[]).find(x=>x.name===name) || { name, lead_coach_id:null, lead_name:null }; }
 function adminPeopleView(){

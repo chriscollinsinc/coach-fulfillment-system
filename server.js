@@ -911,11 +911,9 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
   const contracts = db.prepare(`
     SELECT c.id, c.client_id, cl.name AS client, c.program, c.price, c.status, c.start_date, c.cancelled_at
     FROM contracts c JOIN clients cl ON cl.id=c.client_id
-    WHERE cl.deleted_at IS NULL
+    WHERE cl.deleted_at IS NULL AND c.archived_at IS NULL
       AND COALESCE(c.start_date, '0000') <= ?
-      AND (c.cancelled_at IS NULL OR substr(c.cancelled_at,1,10) >= ?)
-      AND c.status IN ('active','cancelled')
-      AND (c.archived_at IS NULL)`).all(end, start);
+      AND (c.status='active' OR (c.status='cancelled' AND substr(COALESCE(c.cancelled_at,''),1,10) > ?))`).all(end, end);
   const byTeam = {};
   for(const c of contracts){
     const owner = clientOwnerForMonth(c.client_id, period);
@@ -925,7 +923,7 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
     t.contracts++; t.clients.add(c.client_id);
     if(c.price == null) t.unpriced++; else t.revenue += +c.price;
     // Per-client detail for the accordion: one row per contract, coach is the month's owner.
-    t.rows.push({ client_id: c.client_id, client: c.client, coach_id: owner.coach_id, coach: coachName(owner.coach_id), program: c.program, price: c.price, status: c.status });
+    t.rows.push({ client_id: c.client_id, client: c.client, coach_id: owner.coach_id, coach: coachName(owner.coach_id), program: c.program, price: c.price });
   }
   const revenue = Object.values(byTeam).map(t => ({ team: t.team, revenue: t.revenue, contracts: t.contracts, clients: t.clients.size, unpriced: t.unpriced,
       rows: t.rows.sort((a,b) => (b.price||0) - (a.price||0) || a.client.localeCompare(b.client)) }))
@@ -934,10 +932,11 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
   // --- Coaching calls: every client active in the month; done = a Coaching Call note dated in the month
   const clients = db.prepare(`
     SELECT cl.id, cl.name, cl.billing_start FROM clients cl
-    WHERE cl.deleted_at IS NULL AND (cl.archived_at IS NULL OR substr(cl.archived_at,1,10) >= ?)
-      AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status IN ('active','cancelled')
-                 AND COALESCE(c.start_date,'0000') <= ? AND (c.cancelled_at IS NULL OR substr(c.cancelled_at,1,10) >= ?))
-    ORDER BY cl.name`).all(start, end, start);
+    WHERE cl.deleted_at IS NULL AND (cl.archived_at IS NULL OR substr(cl.archived_at,1,10) > ?)
+      AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.archived_at IS NULL
+                 AND COALESCE(c.start_date,'0000') <= ?
+                 AND (c.status='active' OR (c.status='cancelled' AND substr(COALESCE(c.cancelled_at,''),1,10) > ?)))
+    ORDER BY cl.name`).all(end, end, end);
   const callQ = db.prepare(`SELECT COUNT(*) n, MAX(note_date) last FROM client_notes WHERE client_id=? AND note_type='Coaching Call' AND note_date BETWEEN ? AND ?`);
   const calls = [];
   for(const cl of clients){
