@@ -109,6 +109,15 @@ CREATE TABLE IF NOT EXISTS client_month_snapshots(
   UNIQUE(period, client_id));
 CREATE INDEX IF NOT EXISTS icms_period ON client_month_snapshots(period);
 `);
+/* Who owned the client that month (2026-09-17). The snapshot is the app's existing
+   answer to "what was true in month M", so it is also where month-level ownership
+   belongs: the coach and team on the client at the START of the month. Handoffs are
+   what they always were — change clients.assigned_coach_id — and this row is what lets
+   a missed coaching call land on the coach who actually held the client that month,
+   not whoever holds it today. Frozen once per month: a later re-run of the snapshot
+   never overwrites a coach already recorded (see snapshotClientMonth). */
+ensureColumn('client_month_snapshots', 'assigned_coach_id', 'TEXT');
+ensureColumn('client_month_snapshots', 'team', 'TEXT');
 
 /* Add client_id / contract_id links to visits (idempotent). */
 function ensureColumn(table, col, decl){
@@ -639,20 +648,34 @@ function migratePhase1(){
    only the *first* call for a new month matters, but later ones just update in place. */
 function snapshotClientMonth(period){
   const p = period || new Date().toISOString().slice(0, 7);
-  const clients = db.prepare('SELECT * FROM clients').all();
-  const ins = db.prepare(`INSERT INTO client_month_snapshots(period,client_id,name,status,active_contracts,keap_id,created)
-    VALUES(?,?,?,?,?,?,?)
+  const clients = db.prepare('SELECT cl.*, co.team AS coach_team FROM clients cl LEFT JOIN coaches co ON co.id = cl.assigned_coach_id').all();
+  // Status fields refresh on re-run; ownership does not. COALESCE keeps whatever coach
+  // was first recorded for the month, so "owner at the start of the month" stays true
+  // even if an admin presses "snapshot now" after a handoff.
+  const ins = db.prepare(`INSERT INTO client_month_snapshots(period,client_id,name,status,active_contracts,keap_id,assigned_coach_id,team,created)
+    VALUES(?,?,?,?,?,?,?,?,?)
     ON CONFLICT(period,client_id) DO UPDATE SET name=excluded.name, status=excluded.status,
-      active_contracts=excluded.active_contracts, keap_id=excluded.keap_id`);
+      active_contracts=excluded.active_contracts, keap_id=excluded.keap_id,
+      assigned_coach_id=COALESCE(client_month_snapshots.assigned_coach_id, excluded.assigned_coach_id),
+      team=COALESCE(client_month_snapshots.team, excluded.team)`);
   const now = new Date().toISOString();
   let n = 0;
   for(const c of clients){
     const activeContracts = db.prepare("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'").get(c.id).c;
-    ins.run(p, c.id, c.name, c.status, activeContracts, c.keap_id || '', now);
+    ins.run(p, c.id, c.name, c.status, activeContracts, c.keap_id || '', c.assigned_coach_id || null, c.coach_team || null, now);
     n++;
   }
   log('system', 'snapshot.client_month', { period: p, clients: n });
   return { period: p, clients: n };
+}
+/* Who owned this client in a given month. The frozen snapshot is the truth for any
+   month it covers; a client with no row that month (created mid-month, or a month
+   before snapshots recorded owners) falls back to the live assignment. */
+function clientOwnerForMonth(clientId, period){
+  const row = db.prepare('SELECT assigned_coach_id, team FROM client_month_snapshots WHERE client_id=? AND period=?').get(clientId, period);
+  if(row && row.assigned_coach_id) return { coach_id: row.assigned_coach_id, team: row.team || null, source: 'snapshot' };
+  const live = db.prepare('SELECT cl.assigned_coach_id AS coach_id, co.team FROM clients cl LEFT JOIN coaches co ON co.id = cl.assigned_coach_id WHERE cl.id=?').get(clientId);
+  return { coach_id: (live && live.coach_id) || null, team: (live && live.team) || null, source: 'live' };
 }
 /* Runs the current month's snapshot once, guarded by a meta flag so a restart
    or a busy day doesn't re-run it needlessly. Call this at startup — cheap even
@@ -660,7 +683,20 @@ function snapshotClientMonth(period){
 function ensureCurrentMonthSnapshot(){
   const period = new Date().toISOString().slice(0, 7);
   const flagKey = 'snapshot_done_' + period;
-  if(getMeta(flagKey)) return;
+  if(getMeta(flagKey)){
+    // Rows already frozen this month but before the owner columns existed (first deploy
+    // of this feature): fill the owner from live data once, only where it is still empty.
+    // Live data is the best available stand-in for "start of this month" on that one deploy.
+    if(!getMeta('snapshot_owner_backfilled_' + period)){
+      const n = db.prepare(`UPDATE client_month_snapshots SET
+          assigned_coach_id = (SELECT cl.assigned_coach_id FROM clients cl WHERE cl.id = client_month_snapshots.client_id),
+          team = (SELECT co.team FROM clients cl JOIN coaches co ON co.id = cl.assigned_coach_id WHERE cl.id = client_month_snapshots.client_id)
+        WHERE period=? AND assigned_coach_id IS NULL`).run(period).changes;
+      setMeta('snapshot_owner_backfilled_' + period, new Date().toISOString());
+      if(n) console.log(`\u2705 Snapshot ${period}: owner filled on ${n} client row(s)`);
+    }
+    return;
+  }
   snapshotClientMonth(period);
   setMeta(flagKey, new Date().toISOString());
 }
@@ -2042,4 +2078,4 @@ ensureCurrentMonthSnapshot();
 migrateCoachCertifications();
 syncCoachUserTeams();
 
-module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit };
+module.exports = { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, clientOwnerForMonth, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit };

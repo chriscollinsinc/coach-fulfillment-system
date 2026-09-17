@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit } = require('./db.js');
+const { db, hashPw, checkPw, getMeta, setMeta, log, resolveClient, normName, findClientByKeapId, createPasswordReset, consumePasswordReset, snapshotClientMonth, ensureCurrentMonthSnapshot, clientOwnerForMonth, DB_PATH, parseCycleLabel, getLastVisitForContract, getIncompleteVisitsByContract, findExistingVisit, validateCycleSequence, getNextCycleNumber, findOrCreateVisit } = require('./db.js');
 const { sendMail } = require('./mail.js');
 
 const PORT = process.env.PORT || 3000;
@@ -845,31 +845,39 @@ function callsOwed(today, { coachId = null, team = null, unassigned = false } = 
   const thisM = monthKey(today), lastM = prevMonthKey(thisM);
   const floor = callsTrackedFrom(today);
   const dueThisMonth = +today.slice(8,10) >= CALLS_DUE_FROM_DAY;
-  const own = unassigned ? 'cl.assigned_coach_id IS NULL'
-    : coachId ? 'cl.assigned_coach_id=?' : 'cl.assigned_coach_id IS NOT NULL';
-  const args = [thisM, lastM];
-  if(coachId) args.push(coachId);
+  // Every active client is a candidate; WHO owes each month is decided per month below,
+  // from the monthly snapshot (owner at the start of that month), not from today's field.
+  // That is what makes a handoff clean: August's missed call stays with the launch coach
+  // even after Carl takes the client in September.
   const rows = db.prepare(`
-    SELECT cl.id AS client_id, cl.name AS client, cl.billing_start, cl.assigned_coach_id,
-      co.name AS coach_name, co.team AS team,
+    SELECT cl.id AS client_id, cl.name AS client, cl.billing_start,
       (SELECT MAX(n.note_date) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call') AS last_call,
       (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_this_month,
       (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_last_month
     FROM clients cl
-    LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
     WHERE cl.deleted_at IS NULL AND cl.archived_at IS NULL AND cl.status='active'
-      AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active')
-      AND ${own}`).all(...args);
-  const out = [];
+      AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active')`).all(thisM, lastM);
+  const coachName = (() => { const cache = {}; return id => { if(!id) return null; if(!(id in cache)){ const c = db.prepare('SELECT name FROM coaches WHERE id=?').get(id); cache[id] = c ? c.name : null; } return cache[id]; }; })();
+  const wanted = owner => unassigned ? !owner.coach_id
+    : coachId ? owner.coach_id === coachId
+    : team ? owner.team === team
+    : !!owner.coach_id;
+  const byKey = new Map(); // one row per (client, owner) — a client can legitimately appear twice across a handoff
   for(const r of rows){
-    if(team && r.team !== team) continue;
     const started = (r.billing_start || '').slice(0,7);
-    const missed = (!r.calls_last_month && lastM >= floor && (!started || started <= lastM)) ? lastM : null;
-    const due = (dueThisMonth && !r.calls_this_month && (!started || started <= thisM)) ? thisM : null;
-    if(!missed && !due) continue;
-    out.push({ client_id: r.client_id, client: r.client, coach_id: r.assigned_coach_id, coach: r.coach_name || null,
-      team: r.team || null, last_call: r.last_call || null, missed, due });
+    const owed = [];
+    if(!r.calls_last_month && lastM >= floor && (!started || started <= lastM)) owed.push({ month: lastM, kind: 'missed' });
+    if(dueThisMonth && !r.calls_this_month && (!started || started <= thisM)) owed.push({ month: thisM, kind: 'due' });
+    for(const o of owed){
+      const owner = clientOwnerForMonth(r.client_id, o.month);
+      if(!wanted(owner)) continue;
+      const key = r.client_id + '|' + (owner.coach_id || '');
+      if(!byKey.has(key)) byKey.set(key, { client_id: r.client_id, client: r.client, coach_id: owner.coach_id, coach: coachName(owner.coach_id),
+        team: owner.team || null, last_call: r.last_call || null, missed: null, due: null });
+      byKey.get(key)[o.kind] = o.month;
+    }
   }
+  const out = [...byKey.values()];
   // Worst first: a missed month outranks a merely-due one, then longest since the last call.
   out.sort((a,b) => (b.missed?1:0) - (a.missed?1:0) || (a.last_call||'').localeCompare(b.last_call||''));
   return out.slice(0, 200);
