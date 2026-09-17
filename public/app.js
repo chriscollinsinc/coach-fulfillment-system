@@ -1170,28 +1170,25 @@ function todayCoachView(t){
   };
   html+=sec('tdOverdue', 'Overdue from you', t.overdueMine, 'Nothing overdue. ✔', true);
   html+=sec('tdDueSoon', 'Due from you in the next 30 days', t.dueSoonMine, 'Nothing due soon. ✔', false);
-  const wp = t.weekPassed || [];
-  if(t.missingNotes.length || wp.length){
-    html+=`<div class="panel" id="tdNotes"><h2>You owe a note <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${t.missingNotes.length + wp.length})</span></h2>`;
-    if(wp.length){
-      html+=`<h3 style="margin:4px 0 4px">Scheduled week passed, not marked done <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${wp.length})</span></h3>
-      <p class="small" style="margin-bottom:8px">You were on the calendar for these and the week is over. If you went, complete it and write it up. If you didn't, move it to a week you will.</p>
-      <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Was scheduled</th><th style="text-align:right"></th></tr>`+
-      wp.map(v=>`<tr><td><b>${healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td>
-        <td class="mono">wk of ${fmtW(v.cal_week)} <span class="small" style="color:var(--bad)">${daysLate(v.cal_week)}d ago</span></td>
-        <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap">
-          ${canReschedule(full(v)) ? `<button class="btn tiny" title="Pick another week" onclick="${placeJump(full(v))}">Move</button>` : ''}
-          <button class="btn tiny primary" onclick="openVisitModal(${v.id})">Complete &amp; write up</button></div></td></tr>`).join('')+`</table></div>`;
-    }
-    if(t.missingNotes.length){
-      html+=`<h3 style="margin:${wp.length?'14px':'4px'} 0 4px">Completed without a write-up <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${t.missingNotes.length})</span></h3>
-      <p class="small" style="margin-bottom:8px">Visits you marked done in the last 30 days with no notes. The client's page can't show wins, issues or focus until you add them.</p>
-      <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Visited</th><th style="text-align:right"></th></tr>`+
-      t.missingNotes.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||v.program||'Completed visit')}</td>
-        <td class="mono">${fmt(v.scheduled_week||v.cal_week||v.due)}</td>
-        <td><div style="display:flex;justify-content:flex-end">${v.id?`<button class="btn tiny primary" onclick="openVisitModal(${v.id})">Add note</button>`:''}</div></td></tr>`).join('')+`</table></div>`;
-    }
-    html+=`</div>`;
+  // One list. To the coach these are the same chore — a visit that needs writing up — so
+  // they sit together, newest first; the pill says which kind each row is. Both buttons
+  // open the same visit modal, which already shows Complete for an open visit and
+  // Save notes for a completed one.
+  const owed = [
+    ...(t.weekPassed||[]).map(v => ({ ...v, kind:'open', when: v.cal_week })),
+    ...t.missingNotes.map(v => ({ ...v, kind:'done', when: v.scheduled_week||v.cal_week||v.due })),
+  ].sort((a,b) => (b.when||'').localeCompare(a.when||''));
+  if(owed.length){
+    html+=`<div class="panel" id="tdNotes"><h2>You owe a note <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${owed.length})</span></h2>
+    <p class="small" style="margin-bottom:8px">Visits with no write-up yet — either the scheduled week has passed and it isn't marked done, or it's marked done with no notes. The client's page can't show wins, issues or focus until you add them.</p>
+    <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>When</th><th>Status</th><th style="text-align:right"></th></tr>`+
+    owed.map(v=>`<tr><td><b>${healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b></td>
+      <td class="small" style="white-space:nowrap">${esc(v.cycle||'')} ${esc(v.program||'')}</td>
+      <td class="mono" style="white-space:nowrap">${v.kind==='open' ? `wk of ${fmtW(v.when)} <span class="small" style="color:var(--bad)">${daysLate(v.when)}d ago</span>` : fmt(v.when)}</td>
+      <td style="white-space:nowrap">${v.kind==='open' ? `<span class="pill p-over" title="On your calendar for a week that has passed, not marked complete">Not marked done</span>` : `<span class="pill p-due" title="Marked complete, no notes">Completed, no notes</span>`}</td>
+      <td><div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap">
+        ${v.kind==='open' && canReschedule(full(v)) ? `<button class="btn tiny" title="Didn't happen — pick another week" onclick="${placeJump(full(v))}">Move</button>` : ''}
+        <button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.kind==='open' ? 'Complete &amp; write up' : 'Add note'}</button></div></td></tr>`).join('')+`</table></div></div>`;
   }
   html += callsOwedPanel(t);
   return html;
