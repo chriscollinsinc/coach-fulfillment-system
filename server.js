@@ -921,11 +921,14 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
     const owner = clientOwnerForMonth(c.client_id, period);
     const team = owner.team || '(no team)';
     if(teamFilter && team !== teamFilter) continue;
-    const t = (byTeam[team] ||= { team, revenue: 0, contracts: 0, clients: new Set(), unpriced: 0 });
+    const t = (byTeam[team] ||= { team, revenue: 0, contracts: 0, clients: new Set(), unpriced: 0, rows: [] });
     t.contracts++; t.clients.add(c.client_id);
     if(c.price == null) t.unpriced++; else t.revenue += +c.price;
+    // Per-client detail for the accordion: one row per contract, coach is the month's owner.
+    t.rows.push({ client_id: c.client_id, client: c.client, coach_id: owner.coach_id, coach: coachName(owner.coach_id), program: c.program, price: c.price, status: c.status });
   }
-  const revenue = Object.values(byTeam).map(t => ({ team: t.team, revenue: t.revenue, contracts: t.contracts, clients: t.clients.size, unpriced: t.unpriced }))
+  const revenue = Object.values(byTeam).map(t => ({ team: t.team, revenue: t.revenue, contracts: t.contracts, clients: t.clients.size, unpriced: t.unpriced,
+      rows: t.rows.sort((a,b) => (b.price||0) - (a.price||0) || a.client.localeCompare(b.client)) }))
     .sort((a,b) => b.revenue - a.revenue);
 
   // --- Coaching calls: every client active in the month; done = a Coaching Call note dated in the month
@@ -948,24 +951,46 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
 
   // --- Visit notes: visits that happened (completed, scheduled_week in month) or were on the
   //     calendar for a week in the month; done = any note field filled
+  // Real visit rows: completed in the month (by completion date, else the week it ran),
+  // or open and placed on a calendar week that overlaps the month.
+  const today = new Date().toISOString().slice(0,10);
   const visits = db.prepare(`
-    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.completed, v.scheduled_week, v.cal_week, v.team,
-      COALESCE(v.completed_by_coach_id, v.cal_coach) AS coach_id,
+    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.completed, v.scheduled_week, v.cal_week, v.completed_date, v.team,
+      COALESCE(v.completed_by_coach_id, v.cal_coach) AS coach_id, v.cal_coach,
       (COALESCE(v.notes_wins,'')<>'' OR COALESCE(v.notes_issues,'')<>'' OR COALESCE(v.notes_focus,'')<>'' OR COALESCE(v.notes_commitments,'')<>'') AS has_notes
     FROM visits v
-    WHERE (v.completed=1 AND COALESCE(v.scheduled_week, v.cal_week, v.due) BETWEEN ? AND ?)
-       OR (v.completed=0 AND v.cal_week BETWEEN ? AND ?)
-    ORDER BY COALESCE(v.scheduled_week, v.cal_week)`).all(start, end, start, end);
-  const visitNotes = visits.filter(v => !teamFilter || v.team === teamFilter).map(v => ({
-    id: v.id, client: v.client, client_id: v.client_id, program: v.program, cycle: v.cycle, team: v.team || null,
-    coach_id: v.coach_id, coach: coachName(v.coach_id), when: v.scheduled_week || v.cal_week,
-    completed: !!v.completed, done: !!v.has_notes,
-    state: v.completed ? (v.has_notes ? 'done' : 'no_notes') : 'not_marked_done'
-  })).sort((a,b) => (a.done - b.done) || (a.when||'').localeCompare(b.when||''));
+    WHERE (v.completed=1 AND COALESCE(v.completed_date, v.scheduled_week, v.cal_week, v.due) BETWEEN ? AND ?)
+       OR (v.completed=0 AND v.cal_week IS NOT NULL AND v.cal_week <= ? AND date(v.cal_week,'+6 days') >= ?)
+    ORDER BY COALESCE(v.scheduled_week, v.cal_week)`).all(start, end, end, start);
+  const visitNotes = visits.map(v => {
+    const when = v.completed ? (v.completed_date || v.scheduled_week || v.cal_week) : v.cal_week;
+    const weekOver = v.cal_week ? (new Date(v.cal_week + 'T12:00:00').getTime() + 6*864e5) < Date.parse(today + 'T12:00:00') : true;
+    return { id: v.id, kind: 'visit', client: v.client, client_id: v.client_id, program: v.program, cycle: v.cycle, team: v.team || null,
+      coach_id: v.coach_id, coach: coachName(v.coach_id), when, completed: !!v.completed, done: !!v.has_notes,
+      state: v.completed ? (v.has_notes ? 'done' : 'no_notes') : (weekOver ? 'not_marked_done' : 'upcoming') };
+  });
+  // Legacy "visit" calendar blocks from the 2026 sheet. The global calendar draws these,
+  // so a month-end list that ignored them under-counted by 2-3x. They are not visit
+  // records — no cycle, no notes fields — so they can never be ✓ here; they show as
+  // "Sheet visit (not tracked)" until Sheet Recon converts them. A block that coincides
+  // with a real visit (same coach, same week, same client) is a duplicate and is skipped.
+  const matchClient = buildSheetLabelMatcher();
+  const blocks = db.prepare(`SELECT b.coach_id, b.week, b.label, c.team FROM blocks b LEFT JOIN coaches c ON c.id=b.coach_id
+    WHERE b.kind IN ('visit','visit_legacy') AND b.week <= ? AND date(b.week,'+6 days') >= ? ORDER BY b.week`).all(end, start);
+  for(const b of blocks){
+    const m = matchClient(b.label);
+    if(m && visits.some(v => v.cal_coach === b.coach_id && v.cal_week === b.week && v.client_id === m.id)) continue;
+    visitNotes.push({ id: null, kind: 'sheet', client: m ? m.name : b.label, client_id: m ? m.id : null, matched: !!m, label: b.label,
+      program: '', cycle: '', team: b.team || null, coach_id: b.coach_id, coach: coachName(b.coach_id), when: b.week,
+      completed: false, done: false, state: 'not_tracked' });
+  }
+  visitNotes.sort((a,b) => (a.done - b.done) || (a.when||'').localeCompare(b.when||''));
+  const filteredVisitNotes = visitNotes.filter(v => !teamFilter || v.team === teamFilter);
 
-  send(res, 200, { period, start, end, team: teamFilter, revenue, calls, visitNotes,
+  send(res, 200, { period, start, end, team: teamFilter, revenue, calls, visitNotes: filteredVisitNotes,
     summary: { revenueTotal: revenue.reduce((s,t)=>s+t.revenue,0), callsDone: calls.filter(c=>c.done).length, callsTotal: calls.length,
-      visitsDone: visitNotes.filter(v=>v.done).length, visitsTotal: visitNotes.length } });
+      visitsDone: filteredVisitNotes.filter(v=>v.done).length, visitsTotal: filteredVisitNotes.length,
+      sheetVisits: filteredVisitNotes.filter(v=>v.kind==='sheet').length } });
 });
 /* ----- Today: the role-aware action queue the dashboard is built from -----
    One place that answers "what needs a person right now", computed fresh from
@@ -2155,11 +2180,12 @@ const RECON_ALIASES = {
 // so no sheet label — now or after a future re-upload — can ever match it and place or
 // create a visit against it.
 const RECON_EXCLUDE_CLIENT_IDS = new Set([83]);
-function reconcileSheet2026(){
-  const y='2026', lo=y+'-01-01', hi=y+'-12-31', today=new Date().toISOString().slice(0,10);
+/* Label → client matcher used by the sheet recon AND by Month-end to attach legacy
+   "visit" calendar blocks to the client they belong to. Same rules as the recon audit. */
+function buildSheetLabelMatcher(){
   const clients = db.prepare("SELECT id,name FROM clients WHERE deleted_at IS NULL").all()
     .map(c=>({id:c.id,name:c.name,n:reconNorm(c.name),t:reconToks(c.name)})).filter(c=>c.n);
-  const matchClient = (label)=>{
+  return (label)=>{
     const clean = String(label).replace(/carryover/ig,'').replace(/\bshadow\b/ig,'');
     let ln = reconNorm(clean);
     if(RECON_ALIASES[ln]) ln = RECON_ALIASES[ln];                                            // confirmed variant → client
@@ -2178,6 +2204,10 @@ function reconcileSheet2026(){
     }
     return null;
   };
+}
+function reconcileSheet2026(){
+  const y='2026', lo=y+'-01-01', hi=y+'-12-31', today=new Date().toISOString().slice(0,10);
+  const matchClient = buildSheetLabelMatcher();
   const coaches = db.prepare("SELECT id,name FROM coaches").all();
   const coachName = id => (coaches.find(c=>c.id===id)||{}).name || id || '—';
   const blocks = db.prepare("SELECT coach_id, week, label FROM blocks WHERE (kind='visit' OR kind='visit_legacy') AND week>=? AND week<=? ORDER BY week").all(lo,hi);
