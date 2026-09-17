@@ -888,6 +888,85 @@ function callsOwed(today, { coachId = null, team = null, unassigned = false } = 
   out.sort((a,b) => (b.missed?1:0) - (a.missed?1:0) || (a.last_call||'').localeCompare(b.last_call||''));
   return out.slice(0, 200);
 }
+/* ----- Month-end reconciliation (Admin > Month-end) -----
+   One call per month: revenue by team, coaching-call checklist, visit-note checklist.
+   Team for a client in month M is the frozen snapshot (owner at the start of M), falling
+   back to the live assignment for clients with no snapshot row. "Active in M" for a
+   contract: started on or before month end and not cancelled before month start. Price is
+   contracts.price, the Keap monthly-equivalent -- the same number the nightly revenue
+   snapshot sums. Checkmarks are DERIVED from the data (a note exists / doesn't), never
+   ticked by hand, so the list can't drift from what's actually been written. */
+function monthBounds(period){
+  const [y, m] = period.split('-').map(Number);
+  const start = `${period}-01`;
+  const end = new Date(Date.UTC(y, m, 0)).toISOString().slice(0,10);
+  return { start, end };
+}
+route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req, res, m, body, user) => {
+  const period = m[1]; const { start, end } = monthBounds(period);
+  const teamFilter = user.role === 'lead' ? user.team : null;
+  const coachName = (() => { const c = {}; return id => { if(!id) return null; if(!(id in c)){ const r = db.prepare('SELECT name FROM coaches WHERE id=?').get(id); c[id] = r ? r.name : null; } return c[id]; }; })();
+
+  // --- Revenue by team: contracts active during the month, attributed to the client's team that month
+  const contracts = db.prepare(`
+    SELECT c.id, c.client_id, cl.name AS client, c.program, c.price, c.status, c.start_date, c.cancelled_at
+    FROM contracts c JOIN clients cl ON cl.id=c.client_id
+    WHERE cl.deleted_at IS NULL
+      AND COALESCE(c.start_date, '0000') <= ?
+      AND (c.cancelled_at IS NULL OR substr(c.cancelled_at,1,10) >= ?)
+      AND c.status IN ('active','cancelled')
+      AND (c.archived_at IS NULL)`).all(end, start);
+  const byTeam = {};
+  for(const c of contracts){
+    const owner = clientOwnerForMonth(c.client_id, period);
+    const team = owner.team || '(no team)';
+    if(teamFilter && team !== teamFilter) continue;
+    const t = (byTeam[team] ||= { team, revenue: 0, contracts: 0, clients: new Set(), unpriced: 0 });
+    t.contracts++; t.clients.add(c.client_id);
+    if(c.price == null) t.unpriced++; else t.revenue += +c.price;
+  }
+  const revenue = Object.values(byTeam).map(t => ({ team: t.team, revenue: t.revenue, contracts: t.contracts, clients: t.clients.size, unpriced: t.unpriced }))
+    .sort((a,b) => b.revenue - a.revenue);
+
+  // --- Coaching calls: every client active in the month; done = a Coaching Call note dated in the month
+  const clients = db.prepare(`
+    SELECT cl.id, cl.name, cl.billing_start FROM clients cl
+    WHERE cl.deleted_at IS NULL AND (cl.archived_at IS NULL OR substr(cl.archived_at,1,10) >= ?)
+      AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status IN ('active','cancelled')
+                 AND COALESCE(c.start_date,'0000') <= ? AND (c.cancelled_at IS NULL OR substr(c.cancelled_at,1,10) >= ?))
+    ORDER BY cl.name`).all(start, end, start);
+  const callQ = db.prepare(`SELECT COUNT(*) n, MAX(note_date) last FROM client_notes WHERE client_id=? AND note_type='Coaching Call' AND note_date BETWEEN ? AND ?`);
+  const calls = [];
+  for(const cl of clients){
+    if((cl.billing_start||'').slice(0,7) > period) continue; // not billing yet that month
+    const owner = clientOwnerForMonth(cl.id, period);
+    if(teamFilter && owner.team !== teamFilter) continue;
+    const r = callQ.get(cl.id, start, end);
+    calls.push({ client_id: cl.id, client: cl.name, team: owner.team || null, coach_id: owner.coach_id, coach: coachName(owner.coach_id), done: r.n > 0, calls: r.n, last: r.last || null });
+  }
+  calls.sort((a,b) => (a.done - b.done) || (a.team||'').localeCompare(b.team||'') || a.client.localeCompare(b.client));
+
+  // --- Visit notes: visits that happened (completed, scheduled_week in month) or were on the
+  //     calendar for a week in the month; done = any note field filled
+  const visits = db.prepare(`
+    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.completed, v.scheduled_week, v.cal_week, v.team,
+      COALESCE(v.completed_by_coach_id, v.cal_coach) AS coach_id,
+      (COALESCE(v.notes_wins,'')<>'' OR COALESCE(v.notes_issues,'')<>'' OR COALESCE(v.notes_focus,'')<>'' OR COALESCE(v.notes_commitments,'')<>'') AS has_notes
+    FROM visits v
+    WHERE (v.completed=1 AND COALESCE(v.scheduled_week, v.cal_week, v.due) BETWEEN ? AND ?)
+       OR (v.completed=0 AND v.cal_week BETWEEN ? AND ?)
+    ORDER BY COALESCE(v.scheduled_week, v.cal_week)`).all(start, end, start, end);
+  const visitNotes = visits.filter(v => !teamFilter || v.team === teamFilter).map(v => ({
+    id: v.id, client: v.client, client_id: v.client_id, program: v.program, cycle: v.cycle, team: v.team || null,
+    coach_id: v.coach_id, coach: coachName(v.coach_id), when: v.scheduled_week || v.cal_week,
+    completed: !!v.completed, done: !!v.has_notes,
+    state: v.completed ? (v.has_notes ? 'done' : 'no_notes') : 'not_marked_done'
+  })).sort((a,b) => (a.done - b.done) || (a.when||'').localeCompare(b.when||''));
+
+  send(res, 200, { period, start, end, team: teamFilter, revenue, calls, visitNotes,
+    summary: { revenueTotal: revenue.reduce((s,t)=>s+t.revenue,0), callsDone: calls.filter(c=>c.done).length, callsTotal: calls.length,
+      visitsDone: visitNotes.filter(v=>v.done).length, visitsTotal: visitNotes.length } });
+});
 /* ----- Today: the role-aware action queue the dashboard is built from -----
    One place that answers "what needs a person right now", computed fresh from
    the DB on every load. Ordering inside each list is worst-first. */

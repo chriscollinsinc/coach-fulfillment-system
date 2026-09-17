@@ -713,6 +713,7 @@ function render(){
     if(tab==='people'){ loadFormerCoaches(); }
     if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadTeamMismatchAudit(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
+    if(tab==='monthend'){ loadMonthEnd(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
   syncHistory();
@@ -1101,7 +1102,8 @@ async function saveQuickCall(clientId){
   try{
     await api('POST','/api/clients/'+clientId+'/notes', { note_date, note_type: 'Coaching Call', body });
     closeDlg(); toast('Call logged');
-    await loadToday();
+    if($('#todayOut')) await loadToday();
+    if($('#monthEndOut')) await loadMonthEnd();
   }catch(e){ uiAlert(e.message || 'Could not log the call'); }
 }
 function todayCoachView(t){
@@ -3646,15 +3648,77 @@ function faqView(){
 /* ---------- admin ---------- */
 /* Split into three sub-tabs — the old single page had backups buried under a
    full scroll of roster history, which non-technical admins simply never found. */
-const ADMIN_TABS = [['people','Team & Users'],['data','Data & Backups'],['history','History & Audit']];
+const ADMIN_TABS = [['people','Team & Users'],['monthend','Month-end'],['data','Data & Backups'],['history','History & Audit']];
 function setAdminTab(t){ st.adminTab=t; render(); }
 function adminView(){
   const tab = st.adminTab || 'people';
   let html = `<div class="controls" style="margin-bottom:14px">` +
     ADMIN_TABS.map(([k,l])=>`<button class="btn ${tab===k?'primary':''}" onclick="setAdminTab('${k}')">${l}</button>`).join('') + `</div>`;
   if(tab==='people') return html + adminPeopleView();
+  if(tab==='monthend') return html + monthEndView();
   if(tab==='data') return html + adminDataView();
   return html + adminHistoryView();
+}
+/* ---------- Month-end reconciliation ----------
+ * Sub-tab per month (current + 11 back). Three read-only sections from one API call:
+ * revenue by team, coaching-call checklist, visit-note checklist. Checkmarks are derived
+ * from the data, not ticked by hand. */
+function monthEndPeriod(){ return st.mePeriod || TODAY.slice(0,7); }
+function setMonthEnd(p){ st.mePeriod = p; st.meTeam = null; render(); }
+function setMonthEndTeam(t){ st.meTeam = t || null; loadMonthEnd(); }
+function monthEndView(){
+  const cur = TODAY.slice(0,7);
+  const months = []; { let [y,m] = cur.split('-').map(Number); for(let i=0;i<12;i++){ months.push(`${y}-${String(m).padStart(2,'0')}`); m--; if(m<1){ m=12; y--; } } }
+  const sel = monthEndPeriod();
+  return `<div class="panel"><h2>Month-end reconciliation</h2>
+    <p class="small" style="margin-bottom:10px">Revenue by team and the two note checklists for one month. Team is whoever had the client at the start of that month. A ✓ means the note exists; it can't be ticked by hand.</p>
+    <div class="controls" style="flex-wrap:wrap;gap:6px">${months.map(p=>`<button class="btn tiny ${p===sel?'primary':''}" onclick="setMonthEnd('${p}')">${monthLabel(p)}${p===cur?' <span class="small" style="opacity:.7">(in progress)</span>':''}</button>`).join('')}</div>
+  </div>
+  <div id="monthEndOut"><div class="panel small">Loading ${monthLabel(sel)}…</div></div>`;
+}
+async function loadMonthEnd(){
+  const out = $('#monthEndOut'); if(!out) return;
+  const p = monthEndPeriod();
+  try{
+    const r = await api('GET','/api/admin/month-end/'+p);
+    const teams = [...new Set([...r.revenue.map(t=>t.team), ...r.calls.map(c=>c.team||'(no team)'), ...r.visitNotes.map(v=>v.team||'(no team)')])].sort();
+    const tf = st.meTeam;
+    const calls = r.calls.filter(c => !tf || (c.team||'(no team)')===tf);
+    const vn = r.visitNotes.filter(v => !tf || (v.team||'(no team)')===tf);
+    const pct = (a,b) => b ? Math.round(100*a/b) : 0;
+    const tick = d => d ? '<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;background:#1e8e5a;color:#fff;align-items:center;justify-content:center;font-size:12px;font-weight:700">✓</span>' : '<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;border:2px solid #c23b3b;background:#fbe3e3;align-items:center;justify-content:center"></span>';
+    const teamPick = `<select onchange="setMonthEndTeam(this.value)" style="margin-left:auto"><option value="">All teams</option>${teams.map(t=>`<option ${tf===t?'selected':''}>${esc(t)}</option>`).join('')}</select>`;
+    const cd = calls.filter(c=>c.done).length, vd = vn.filter(v=>v.done).length;
+
+    let h = `<div class="cards" style="margin-bottom:14px">
+      <div class="card"><div class="k">${fmtMoney(r.summary.revenueTotal)}</div><div class="l">Monthly revenue · ${monthLabel(p)}</div></div>
+      <div class="card ${cd===calls.length?'ok':'warn'}"><div class="k">${cd}<span class="small" style="font-size:16px;color:var(--muted)"> / ${calls.length}</span></div><div class="l">Coaching calls logged · ${pct(cd,calls.length)}%</div></div>
+      <div class="card ${vd===vn.length?'ok':'warn'}"><div class="k">${vd}<span class="small" style="font-size:16px;color:var(--muted)"> / ${vn.length}</span></div><div class="l">Visits written up · ${pct(vd,vn.length)}%</div></div>
+    </div>`;
+
+    h += `<div class="panel"><h2>Revenue by team</h2>
+      <p class="small" style="margin-bottom:8px">Sum of each active contract's monthly-equivalent price (from Keap), attributed to the team that held the client at the start of ${monthLabel(p)}. Contracts started on or before month-end and not cancelled before month-start count.</p>
+      <table><tr><th>Team</th><th class="num">Clients</th><th class="num">Contracts</th><th class="num">Monthly revenue</th><th class="num">Share</th><th></th></tr>` +
+      r.revenue.map(t=>`<tr><td><b>Team ${esc(t.team)}</b></td><td class="num">${t.clients}</td><td class="num">${t.contracts}</td><td class="num"><b>${fmtMoney(t.revenue)}</b></td><td class="num">${pct(t.revenue, r.summary.revenueTotal)}%</td>
+        <td class="small" style="color:var(--warn)">${t.unpriced?`${t.unpriced} contract${t.unpriced>1?'s':''} with no price yet`:''}</td></tr>`).join('') +
+      `<tr style="border-top:2px solid var(--ink)"><td><b>Total</b></td><td class="num">${r.revenue.reduce((s,t)=>s+t.clients,0)}</td><td class="num">${r.revenue.reduce((s,t)=>s+t.contracts,0)}</td><td class="num"><b>${fmtMoney(r.summary.revenueTotal)}</b></td><td class="num">100%</td><td></td></tr></table></div>`;
+
+    h += `<div class="panel"><h2 style="display:flex;align-items:center;gap:10px">Coaching calls · ${monthLabel(p)} <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">${cd} of ${calls.length} logged</span>${teamPick}</h2>
+      <p class="small" style="margin-bottom:8px">One call per active client per month. ✓ = a Coaching Call note dated in ${monthLabel(p)} exists on the client. Unlogged first.</p>
+      <div style="max-height:420px;overflow:auto"><table style="width:100%"><tr><th style="width:32px"></th><th>Client</th><th>Team</th><th>Coach</th><th>Logged</th><th></th></tr>` +
+      calls.map(c=>`<tr><td>${tick(c.done)}</td><td>${clientLink(c.client, c.client_id)}</td><td class="small">${esc(c.team||'—')}</td><td class="small">${esc(c.coach||'—')}</td>
+        <td class="small">${c.done ? `${c.calls>1?c.calls+' calls · ':''}last ${fmt(c.last)}` : '<span style="color:var(--bad)">none</span>'}</td>
+        <td>${c.done?'':`<button class="btn tiny" onclick="logCallDlg(${c.client_id},'${esc(c.client).replace(/'/g,"\\'")}','${p}')">Log call</button>`}</td></tr>`).join('') + `</table></div></div>`;
+
+    const stateLabel = { done:'', no_notes:'<span class="pill p-due">Completed, no notes</span>', not_marked_done:'<span class="pill p-over">Not marked done</span>' };
+    h += `<div class="panel"><h2 style="display:flex;align-items:center;gap:10px">Visit notes · ${monthLabel(p)} <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">${vd} of ${vn.length} written up</span></h2>
+      <p class="small" style="margin-bottom:8px">Every visit completed in ${monthLabel(p)} or on a calendar week in it. ✓ = wins, issues, focus or commitments were written. Missing first.</p>
+      <div style="max-height:420px;overflow:auto"><table style="width:100%"><tr><th style="width:32px"></th><th>Client</th><th>Visit</th><th>When</th><th>Team</th><th>Coach</th><th>Status</th><th></th></tr>` +
+      vn.map(v=>`<tr><td>${tick(v.done)}</td><td>${clientLink(v.client, v.client_id)}</td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="mono small">${fmt(v.when)}</td>
+        <td class="small">${esc(v.team||'—')}</td><td class="small">${esc(v.coach||'—')}</td><td>${stateLabel[v.state]||''}</td>
+        <td>${v.done?'':`<button class="btn tiny" onclick="openVisitModal(${v.id})">Open</button>`}</td></tr>`).join('') + `</table></div></div>`;
+    out.innerHTML = h;
+  }catch(e){ out.innerHTML = `<div class="panel small" style="color:var(--bad)">Could not load: ${esc(e.message||e)}</div>`; }
 }
 function teamInfoFor(name){ return (D.teamInfo||[]).find(x=>x.name===name) || { name, lead_coach_id:null, lead_name:null }; }
 function adminPeopleView(){
