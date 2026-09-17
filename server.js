@@ -974,6 +974,12 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
   if(body.team){
     db.prepare('UPDATE coaches SET team=? WHERE id=?').run(body.team, c.id);
     db.prepare('UPDATE visits SET team=? WHERE cal_coach=? AND completed=0').run(body.team, c.id);
+    // Unplaced visits have no cal_coach; their coach is the client's assigned coach. Before
+    // this they kept the old team label when the coach moved, so they surfaced in the wrong
+    // lead's to-schedule list and the right lead got "Not your team" trying to place them
+    // (Metro Toyota / Vicki Johns, 2026-09-17).
+    db.prepare(`UPDATE visits SET team=? WHERE completed=0 AND cal_coach IS NULL
+      AND client_id IN (SELECT id FROM clients WHERE assigned_coach_id=?)`).run(body.team, c.id);
     // Keep their login in step — without this the coach's own nav, team overview and
     // to-schedule list stay pointed at the team they just left.
     db.prepare('UPDATE users SET team=? WHERE coach_id=?').run(body.team, c.id);
@@ -1824,6 +1830,39 @@ function findDuplicateVisits(){
     ORDER BY v1.contract_id, v1.cycle
   `).all();
 }
+/* Open visits whose team label disagrees with the coach responsible for them.
+   The coach is v.cal_coach when the visit is on a calendar, else the client's assigned
+   coach; the visit's team should be THAT coach's current team. A mismatch means the label
+   went stale — a coach moved teams and unplaced visits weren't carried, or the rolling
+   generator copied an old label forward — and the visit is showing up in the wrong lead's
+   list. Read-only here; the repair below relabels to the coach's team, open visits only. */
+function findTeamMismatches(){
+  return db.prepare(`
+    SELECT v.id, v.client, v.client_id, v.cycle, v.program, v.due, v.cal_week, v.team AS visit_team,
+      COALESCE(v.cal_coach, cl.assigned_coach_id) AS coach_id, co.name AS coach, co.team AS coach_team,
+      CASE WHEN v.cal_coach IS NOT NULL THEN 'on calendar' ELSE 'assigned' END AS via
+    FROM visits v
+    LEFT JOIN clients cl ON cl.id = v.client_id
+    JOIN coaches co ON co.id = COALESCE(v.cal_coach, cl.assigned_coach_id)
+    WHERE v.completed=0 AND co.team IS NOT NULL AND co.team<>''
+      AND IFNULL(v.team,'') <> co.team
+    ORDER BY co.team, co.name, v.due`).all();
+}
+route('GET', /^\/api\/admin\/team-mismatch-audit$/, ['admin'], (req, res) => {
+  const rows = findTeamMismatches();
+  const byTeamPair = {};
+  for(const r of rows){ const k = `${r.visit_team||'(none)'} → ${r.coach_team}`; byTeamPair[k] = (byTeamPair[k]||0) + 1; }
+  send(res, 200, { count: rows.length, byTeamPair, rows });
+});
+route('POST', /^\/api\/admin\/team-mismatch-repair$/, ['admin'], (req, res, m, body, user) => {
+  const rows = findTeamMismatches();
+  const upd = db.prepare('UPDATE visits SET team=? WHERE id=? AND completed=0');
+  db.exec('BEGIN');
+  try{ for(const r of rows) upd.run(r.coach_team, r.id); db.exec('COMMIT'); }
+  catch(e){ db.exec('ROLLBACK'); return err(res, 500, e.message); }
+  log(user.email, 'admin.team_mismatch_repair', { fixed: rows.length, sample: rows.slice(0,20).map(r=>({ id:r.id, client:r.client, from:r.visit_team, to:r.coach_team })) });
+  send(res, 200, { ok: true, fixed: rows.length });
+});
 route('GET', /^\/api\/admin\/duplicate-visits-audit$/, ['admin'], (req, res) => {
   const dups = findDuplicateVisits();
   const byContract = {};
@@ -2845,6 +2884,12 @@ function extendRollingSchedule(contract, opts = {}){
     nextDue = contract.start_date || new Date().toISOString().slice(0, 10);
     irregular = 'no visits on this contract yet — seeded from the contract start date';
   }
+  // Team comes from the coach who will actually do these visits — the client's assigned
+  // coach's CURRENT team — not from whatever label the last visit carried. Inheriting the
+  // label meant one stale team on one visit reproduced itself onto every future visit
+  // generated for the contract. Fall back to the last label only when there is no coach.
+  const ownerTeam = db.prepare('SELECT co.team FROM clients cl JOIN coaches co ON co.id=cl.assigned_coach_id WHERE cl.id=?').get(contract.client_id);
+  if(ownerTeam && ownerTeam.team) team = ownerTeam.team;
   if(!team){
     const teamRow = db.prepare('SELECT team FROM visits WHERE contract_id=? AND team IS NOT NULL AND team<>\'\' ORDER BY id DESC LIMIT 1').get(contract.id);
     team = (teamRow && teamRow.team) || null;

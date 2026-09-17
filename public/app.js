@@ -711,7 +711,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadTeamMismatchAudit(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
   }
   if(st.view==='faq') m.innerHTML=faqView();
@@ -3668,6 +3668,10 @@ function adminDataView(){
   <div class="controls"><button class="btn primary" onclick="loadRollingSchedulePreview()">Preview</button>
   <button class="btn danger" id="rollingApplyBtn" onclick="applyRollingSchedule()" disabled>Apply (run a Preview first)</button></div>
   <div id="rollingScheduleOut" class="small">Click Preview to see what this would add.</div></div>
+  <div class="panel"><h2>Visits on the wrong team</h2>
+  <p class="small" style="margin-bottom:12px">Open visits whose team label doesn't match the coach responsible for them — the coach on the calendar if it's placed, otherwise the client's assigned coach. These show up in the wrong lead's to-schedule list, and the right lead can get "Not your team" trying to place them. Usual cause: a coach moved teams and their unplaced visits kept the old label, then the rolling generator copied it forward. Read-only until you click Fix; the fix only relabels open visits to their coach's current team — completed history is never touched.</p>
+  <div class="controls"><button class="btn" onclick="loadTeamMismatchAudit()">Refresh</button></div>
+  <div id="teamMismatchOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Duplicate visits</h2>
   <p class="small" style="margin-bottom:12px">Finds not-yet-scheduled visits sitting on the same contract as an already-completed visit with the exact same cycle number (e.g. two "2 of 4"s) — that combination is always a stray leftover, most likely from the original spreadsheet import, never a legitimate visit. This is read-only until you click Clean up below, and only ever deletes visits matching this exact pattern — nothing else.</p>
   <div class="controls"><button class="btn" onclick="loadDuplicateVisitsAudit()">Refresh</button></div>
@@ -3776,6 +3780,26 @@ async function applyRollingSchedule(){
     toast(`Created ${r.totalCreated} visit(s) across ${r.perClient.length} contract(s)`);
     await refresh(); await loadRollingSchedulePreview();
   }catch(e){ uiAlert(e.message||'Apply failed'); }
+}
+async function loadTeamMismatchAudit(){
+  try{
+    const r = await api('GET','/api/admin/team-mismatch-audit');
+    if(!r.count){ $('#teamMismatchOut').innerHTML = '<p>None found. ✔ Every open visit is labelled with its coach\'s team.</p>'; return; }
+    const pairs = Object.entries(r.byTeamPair).sort((a,b)=>b[1]-a[1]).map(([k,n])=>`<span class="pill" style="margin-right:6px">${esc(k)} · ${n}</span>`).join('');
+    $('#teamMismatchOut').innerHTML = `<p><b>${r.count} open visit(s)</b> carry the wrong team label.</p><p style="margin:6px 0 10px">${pairs}</p>
+      <div style="max-height:360px;overflow:auto"><table><tr><th>Client</th><th>Visit</th><th>Due</th><th>Coach</th><th>Says</th><th>Should be</th></tr>` +
+      r.rows.slice(0,200).map(v=>`<tr><td>${clientLink(v.client, v.client_id)}</td>
+        <td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="mono">${fmt(v.due)}</td>
+        <td>${esc(v.coach)} <span class="small" style="color:var(--muted)">(${v.via})</span></td>
+        <td><span class="pill p-over">${esc(v.visit_team||'—')}</span></td><td><span class="pill p-ok">${esc(v.coach_team)}</span></td></tr>`).join('') +
+      `</table></div>${r.count>200?`<p class="small">Showing first 200 of ${r.count}.</p>`:''}
+      <div class="controls" style="margin-top:10px"><button class="btn primary" onclick="repairTeamMismatches(${r.count})">Fix all ${r.count} — relabel to coach's team</button></div>`;
+  }catch(e){ $('#teamMismatchOut').innerHTML = '<p>Could not load.</p>'; }
+}
+async function repairTeamMismatches(n){
+  if(!(await uiConfirm(`Relabel ${n} open visit(s) to their coach's current team? Completed visits are not touched. Each one will move to the correct lead's lists.`,'Fix teams'))) return;
+  try{ const r = await api('POST','/api/admin/team-mismatch-repair',{}); toast(`Relabelled ${r.fixed} visit(s)`); await refresh(); await loadTeamMismatchAudit(); }
+  catch(e){ uiAlert(e.message||'Repair failed'); }
 }
 async function loadDuplicateVisitsAudit(){
   try{
