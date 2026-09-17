@@ -2090,13 +2090,37 @@ migrateProspectHolds();
    the lead's own coaches.team. A team with no lead is allowed (it happens the moment a
    team is created, and it is Cliff's team today) but is surfaced as a problem, never
    silently accepted. meta.teams is kept as a mirror so nothing that still reads it breaks. */
+/* Shape matches schema_migration_phase1.sql, which already created this table on the
+   live database (a prior session's "New Schema", applied by hand, never loaded at boot).
+   CREATE IF NOT EXISTS keeps whatever is there, so every column below is one the live
+   table has, and the one-lead-per-coach rule is a partial UNIQUE INDEX added separately
+   rather than a column constraint — that way it lands on both a fresh DB and the live one.
+   Deploy ced9811 died here referencing a `created` column that table never had. */
 db.exec(`
 CREATE TABLE IF NOT EXISTS teams(
-  name TEXT PRIMARY KEY,
-  lead_coach_id TEXT UNIQUE,
-  active INTEGER NOT NULL DEFAULT 1,
-  created TEXT
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  lead_coach_id TEXT,
+  active INTEGER DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );`);
+/* Before the unique index can exist, the live rows must satisfy it. Anything already in
+   the table came from cadence_model.js, unvalidated: a lead pointing at a coach that no
+   longer exists, or one coach on two rows. Repair, log, then index. Idempotent. */
+function repairTeamsForUniqueLead(){
+  const dangling = db.prepare(`UPDATE teams SET lead_coach_id=NULL
+    WHERE lead_coach_id IS NOT NULL AND lead_coach_id NOT IN (SELECT id FROM coaches)`).run().changes;
+  if(dangling) console.log(`⚠️  teams: cleared ${dangling} lead(s) pointing at a coach that no longer exists`);
+  const dups = db.prepare(`SELECT lead_coach_id, COUNT(*) n FROM teams WHERE lead_coach_id IS NOT NULL GROUP BY lead_coach_id HAVING n>1`).all();
+  for(const d of dups){
+    // Keep the lowest-id row (oldest); the rest lose their lead and get flagged in the UI.
+    const rows = db.prepare('SELECT id, name FROM teams WHERE lead_coach_id=? ORDER BY id').all(d.lead_coach_id);
+    for(const r of rows.slice(1)) db.prepare('UPDATE teams SET lead_coach_id=NULL WHERE id=?').run(r.id);
+    console.log(`⚠️  teams: ${d.lead_coach_id} was lead of ${rows.length} teams — kept ${rows[0].name}, cleared ${rows.slice(1).map(r=>r.name).join(', ')}`);
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_teams_lead ON teams(lead_coach_id) WHERE lead_coach_id IS NOT NULL');
+}
+repairTeamsForUniqueLead();
 function teamNames(){ return db.prepare('SELECT name FROM teams WHERE active=1 ORDER BY name').all().map(r => r.name); }
 function mirrorTeamsMeta(){ setMeta('teams', JSON.stringify(teamNames())); }
 function teamRow(name){ return db.prepare('SELECT * FROM teams WHERE name=?').get(name) || null; }
@@ -2137,17 +2161,20 @@ function setTeamLead(teamName, coachId, actor){
    team; else exactly one users.role='lead' linked to a coach on the team; else none
    (logged — Cliff's team lands here, correctly). */
 function seedTeamsFromMeta(){
-  if(db.prepare('SELECT COUNT(*) c FROM teams').get().c) return;
+  if(getMeta('teams_seeded_v2')) return;
+  // Per-name and idempotent: the live table may already hold rows from cadence_model.js,
+  // so this must add what's missing rather than bail because the table isn't empty.
   const names = JSON.parse(getMeta('teams') || '[]');
-  const now = new Date().toISOString();
   for(const name of names){
-    db.prepare('INSERT OR IGNORE INTO teams(name, active, created) VALUES(?,1,?)').run(name, now);
+    db.prepare('INSERT OR IGNORE INTO teams(name, active) VALUES(?,1)').run(name);
+    if(teamRow(name).lead_coach_id) continue; // already has a lead — leave it alone
     const flagged = db.prepare('SELECT id FROM coaches WHERE team=? AND is_lead=1 AND active=1').all(name);
     const byRole = db.prepare("SELECT c.id FROM users u JOIN coaches c ON c.id=u.coach_id WHERE u.role='lead' AND u.active=1 AND c.team=? AND c.active=1").all(name);
     const pick = flagged.length === 1 ? flagged[0].id : byRole.length === 1 ? byRole[0].id : null;
     if(pick){ try{ setTeamLead(name, pick, 'system:seed'); }catch(e){ console.warn('team seed: could not set lead for', name, e.message); } }
     else console.log(`⚠️  Team ${name}: no unambiguous lead (is_lead=${flagged.length}, role=lead=${byRole.length}) — set one in Admin → Teams`);
   }
+  setMeta('teams_seeded_v2', new Date().toISOString());
   log('system', 'teams.seeded', { names });
 }
 /* Boot repair: flags and roles follow the teams table. Upgrades only — never demotes a

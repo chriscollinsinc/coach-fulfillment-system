@@ -1126,7 +1126,7 @@ route('POST', /^\/api\/teams$/, ['admin'], (req, res, m, body, user) => {
   const t = String(body.name || '').trim();
   if(!t) return err(res, 400, 'team name required');
   if(teamRow(t)) return err(res, 400, 'a team with that name already exists');
-  db.prepare('INSERT INTO teams(name, active, created) VALUES(?,1,?)').run(t, new Date().toISOString());
+  db.prepare('INSERT INTO teams(name, active) VALUES(?,1)').run(t);
   mirrorTeamsMeta();
   log(user.email, 'team.add', t);
   if(body.lead_coach_id){
