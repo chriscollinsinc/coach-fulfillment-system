@@ -507,3 +507,23 @@ details.guide[open]>summary{border-bottom:1px solid var(--line);background:#fafa
 .panel.cp table th{padding:8px 10px}
 .panel.cp .btn.tiny{padding:6px 12px;font-size:12px}
 .cp-tabs .btn{min-height:42px}
+
+/* ---- Quarter calendar view (st.boardSpan === 3) --------------------------
+   Same grid, three months of week columns. Cells get tighter and the coach
+   column narrower so 13 weeks fit without a horizontal scrollbar on a laptop;
+   the month band above the week headers keeps it readable at that density. */
+.bgrid.q td{height:54px;padding:2px}
+.bgrid.q td.cname{width:120px;font-size:12px;padding:6px 8px}
+.bgrid.q th{font-size:10px;padding:6px 2px}
+.bgrid.q .slot{min-height:46px;padding:4px 5px;font-size:11px;line-height:1.25}
+.bgrid.q .slot b{font-size:11px}
+.bgrid.q .slot small{font-size:9.5px}
+.bgrid.q .slot .storetag{display:none}
+.bgrid.q .s-open::after{font-size:9px}
+.bgrid tr.mband th{font-family:var(--head);font-size:11px;letter-spacing:1px;text-transform:uppercase;
+  color:var(--muted);padding:4px 2px;border-bottom:2px solid var(--line)}
+.bgrid tr.mband th.alt{background:#faf9f8}
+.railseg{display:flex;width:100%;margin-bottom:10px}
+.railseg button{flex:1;justify-content:center;padding:7px 8px;font-size:11px}
+@media(max-width:1150px){.bgrid.q{min-width:900px}}
+.bgrid th.mstart,.bgrid td.mstart{border-left:2px solid var(--ink)}

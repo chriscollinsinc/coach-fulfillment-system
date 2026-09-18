@@ -204,6 +204,13 @@ let ssoEnabled;  // undefined = not checked yet, else true/false — set once fr
 let st = {
   view:'dashboard', boardTeam:null,
   boardY:+TODAY.slice(0,4), boardM:+TODAY.slice(5,7)-1,
+  // Calendar span: 1 = a single month, 3 = the quarter starting at the month shown.
+  // Remembered per browser so a coach who lives in quarter view isn't re-toggling it
+  // every morning; it's a view preference, nothing depends on it being present.
+  boardSpan: (()=>{ try{ return +localStorage.getItem('cfsBoardSpan')===3 ? 3 : 1; }catch(e){ return 1; } })(),
+  // To-schedule rail scope for a coach: 'mine' = stores assigned to me, 'team' = the
+  // whole team's unscheduled work (covering, handoffs). Defaults to mine.
+  railScope: (()=>{ try{ return localStorage.getItem('cfsRailScope')==='team' ? 'team' : 'mine'; }catch(e){ return 'mine'; } })(),
   placing:null, detail:null,
   invFilter:'attention', invSearch:'',
   calSearch:'',
@@ -1209,7 +1216,18 @@ const healthDot = cid => {
 function board(){
   const global = st.view==='global';
   const t=st.boardTeam, y=st.boardY, m=st.boardM;
-  const weeks=mondaysInMonth(y,m);
+  const span = st.boardSpan===3 ? 3 : 1;
+  // Months on screen, left to right. One month is the old behaviour; three gives the
+  // quarter starting at the month shown, so a coach can see a whole booking cycle
+  // without paging. Columns are the same weeks either way — just more of them.
+  const spanMonths = Array.from({length:span}, (_,i) => { const k = m+i; return [y + Math.floor(k/12), ((k%12)+12)%12]; });
+  const weeks = spanMonths.flatMap(([yy,mm]) => mondaysInMonth(yy,mm));
+  // First column of each month after the first — gets a divider so a quarter reads as
+  // three blocks rather than one undifferentiated run of 13 weeks.
+  const monthStarts = new Set(span>1 ? spanMonths.slice(1).map(([yy,mm]) => mondaysInMonth(yy,mm)[0]).filter(Boolean) : []);
+  const lastMon = spanMonths[span-1];
+  const rangeStart = `${y}-${String(m+1).padStart(2,'0')}-01`;
+  const rangeEnd = (()=>{ const d = new Date(Date.UTC(lastMon[0], lastMon[1]+1, 0, 12)); return d.toISOString().slice(0,10); })();
   const formerCoachesView = st.view === 'formercoaches';
   
   // For coaches, only show their own row in board view, but show all team coaches in global view
@@ -1238,18 +1256,24 @@ function board(){
   const calHit = v => calQ && norm(v.client).includes(calQ);
 
   /* to-schedule list: for coaches, show their team's unscheduled LIDs; for others, show team/global */
-  const nextM = m===11?[y+1,0]:[y,m+1];
-  const inMonth=(v,yy,mm)=>v.due&&+v.due.slice(0,4)===yy&&+v.due.slice(5,7)===mm+1;
   
   // For coaches, show their team's unscheduled visits
   // For admin/lead, show team or global unscheduled visits
-  const cand = D.user.role === 'coach'
+  const scopeMine = !!D.user.coach_id && st.railScope !== 'team';
+  const candAll = D.user.role === 'coach'
     ? D.visits.filter(v => !v.completed && !v.cal_week && v.team === D.user.team)
     : D.visits.filter(v=>!v.completed&&!v.cal_week&&(global?myTeams().includes(v.team):v.team===t));
-  
-  const overdue=cand.filter(v=>v.due&&v.due<TODAY&&!inMonth(v,y,m)).sort((a,b)=>a.due.localeCompare(b.due));
-  const thisMo=cand.filter(v=>inMonth(v,y,m));
-  const nextMo=cand.filter(v=>inMonth(v,nextM[0],nextM[1]));
+  // "Mine" = the client is assigned to me. Coaching ownership follows the client, not
+  // the calendar slot, so this is the same test the Place button and the server use.
+  const cand = scopeMine ? candAll.filter(v => v.client_assigned_coach_id === D.user.coach_id) : candAll;
+  const mineN = D.user.coach_id ? candAll.filter(v => v.client_assigned_coach_id === D.user.coach_id).length : 0;
+
+  // Overdue is debt, not a month's work: it stays on screen whatever month the board is
+  // paged to, so nobody has to go hunting backwards through months to find it.
+  const overdue=cand.filter(v=>v.due&&v.due<TODAY).sort((a,b)=>a.due.localeCompare(b.due));
+  const inRange=v=>v.due&&v.due>=rangeStart&&v.due<=rangeEnd&&v.due>=TODAY;
+  const thisMo=cand.filter(inRange);
+  const nextMo=cand.filter(v=>v.due&&v.due>rangeEnd&&!inRange(v)).sort((a,b)=>a.due.localeCompare(b.due)).slice(0,40);
 
   let html='';
   if(placing){
@@ -1265,16 +1289,27 @@ function board(){
         onkeydown="if(event.key==='Escape'){st.calSearch='';paintBoard()}">
       ${st.calSearch?`<button class="btn tiny" onclick="st.calSearch='';paintBoard()">clear ✕</button>`:''}
     </div>
+    <div class="seg" style="margin-right:8px">
+      <button class="${span===1?'on':''}" ${span===1?'':'onclick="setBoardSpan(1)"'} title="One month at a time">Month</button>
+      <button class="${span===3?'on':''}" ${span===3?'':'onclick="setBoardSpan(3)"'} title="Three months side by side">Quarter</button>
+    </div>
     <div class="monthnav">
-      <button class="btn" onclick="bMonth(-1)">‹</button>
-      <span class="mlabel">${MONTHS[m]} ${y}</span>
-      <button class="btn" onclick="bMonth(1)">›</button>
+      <button class="btn" onclick="bMonth(-${span})">‹</button>
+      <span class="mlabel">${span===1 ? `${MONTHS[m]} ${y}` : `${MO[m]} – ${MO[lastMon[1]]} ${lastMon[0]}`}</span>
+      <button class="btn" onclick="bMonth(${span})">›</button>
       <button class="btn tiny" onclick="st.boardY=${+TODAY.slice(0,4)};st.boardM=${+TODAY.slice(5,7)-1};paintBoard()">Today</button>
     </div></div>
   <div class="boardlayout"><div class="panel" style="margin:0">
-  <table class="bgrid"><tr><th style="text-align:left">Coach</th>`;
+  <table class="bgrid${span===3?' q':''}">`;
+  if(span>1){
+    html+=`<tr class="mband"><th style="text-align:left"></th>`;
+    spanMonths.forEach(([yy,mm],i)=>{ const n=mondaysInMonth(yy,mm).length;
+      html+=`<th colspan="${n}" class="${i%2?'alt':''}${i?' mstart':''}">${MONTHS[mm]} ${yy}</th>`; });
+    html+=`</tr>`;
+  }
+  html+=`<tr><th style="text-align:left">Coach</th>`;
   weeks.forEach(w=>{ const now=TODAY>=w&&dayDiff(TODAY,w)<7;
-    html+=`<th class="${now?'wk-now':''}">wk of ${fmtW(w)}${now?' ●':''}</th>`; });
+    html+=`<th class="${now?'wk-now':''}${monthStarts.has(w)?' mstart':''}">${span===1?'wk of ':''}${fmtW(w)}${now?' ●':''}</th>`; });
   html+=`</tr>`;
   for(const c of members){
     html+=`<tr><td class="cname">${esc(c.name)}${global?`<br><span class="small" style="color:var(--muted)">${esc(c.team)}</span>`:''}</td>`;
@@ -1310,7 +1345,7 @@ function board(){
         const coachCanManage = D.user.role === 'coach' ? c.id === D.user.coach_id : true;
         if(canEditWeeks() && coachCanManage) click=` onclick="cellDlg('${c.id}','${w}')"`;
       }
-      html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
+      html+=`<td class="${monthStarts.has(w)?'mstart':''}"><div class="${cls}"${click}>${inner}</div></td>`;
     }
     html+=`</tr>`;
   }
@@ -1341,9 +1376,9 @@ function board(){
         <button class="btn tiny" onclick="st.detail=null;paintBoard()">Close</button>
       </div></div>`;
   }
-  const section=(title,list)=>{
+  const section=(title,list,note)=>{
     if(!list.length) return '';
-    let h=`<h2>${title} (${list.length})</h2>`;
+    let h=`<h2>${title} (${list.length})</h2>${note?`<p class="small" style="margin:-4px 0 8px;color:var(--muted)">${note}</p>`:''}`;
     list.slice(0,40).forEach(v=>{
       h+=`<div class="duecard ${v.due&&v.due<TODAY?'over':''}"><b>${healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b>
         <div class="meta">${esc(v.cycle)} ${esc(v.program)} · due ${fmt(v.due)}</div>
@@ -1352,10 +1387,14 @@ function board(){
     return h;
   };
   if(!calQ){
-    html+=section('Overdue / carryover',overdue);
-    html+=section(`Due ${MO[m]}`,thisMo);
-    html+=section(`Coming up · ${MO[nextM[1]]}`,nextMo);
-    if(!overdue.length&&!thisMo.length&&!nextMo.length) html+=`<h2>To schedule</h2><p class="small">Nothing waiting for ${global?'these teams':'Team '+t} in this window. 🎉</p>`;
+    if(D.user.coach_id) html+=`<div class="seg railseg">
+      <button class="${scopeMine?'on':''}" ${scopeMine?'':'onclick="setRailScope(\'mine\')"'} title="Only stores assigned to you">Mine${mineN?` · ${mineN}`:''}</button>
+      <button class="${scopeMine?'':'on'}" ${scopeMine?'onclick="setRailScope(\'team\')"':''} title="Everything unscheduled on your team — covering, handoffs">Team · ${candAll.length}</button>
+    </div>`;
+    html+=section('Overdue / carryover',overdue,'Past due, whatever month the board is on.');
+    html+=section(span===1?`Due ${MO[m]}`:`Due ${MO[m]} – ${MO[lastMon[1]]}`,thisMo);
+    html+=section('Coming up · later',nextMo);
+    if(!overdue.length&&!thisMo.length&&!nextMo.length) html+=`<h2>To schedule</h2><p class="small">Nothing waiting for ${scopeMine?'you':global?'these teams':'Team '+t} in this window. 🎉${scopeMine&&candAll.length?`<br><a onclick="setRailScope('team')" style="cursor:pointer;color:var(--primary)">${candAll.length} unscheduled on your team</a>`:''}</p>`;
   }
   html+=`</div></div>`;
   return html;
@@ -1444,7 +1483,12 @@ function paintBoard(){
     }
   }
 }
-function bMonth(d){ st.boardM+=d; if(st.boardM>11){st.boardM=0;st.boardY++;} if(st.boardM<0){st.boardM=11;st.boardY--;} st.detail=null; paintBoard(); }
+function setBoardSpan(n){ st.boardSpan=n; try{ localStorage.setItem('cfsBoardSpan', n); }catch(e){} st.detail=null; paintBoard(); }
+function setRailScope(s){ st.railScope=s; try{ localStorage.setItem('cfsRailScope', s); }catch(e){} paintBoard(); }
+function bMonth(d){ // d can be ±1 (month view) or ±3 (quarter view) — normalise, don't assume one step
+  const k = st.boardY*12 + st.boardM + d;
+  st.boardY = Math.floor(k/12); st.boardM = ((k%12)+12)%12;
+  st.detail=null; paintBoard(); }
 async function placeHere(cid,w,force){
   const id=st.placing; if(!id) return;
   try{
