@@ -272,6 +272,10 @@ function calendarPill(v){
   // Scheduled week is over and nobody marked it complete: the visit presumably happened
   // but the coach never filed notes. Surface that instead of a reassuring "On calendar".
   if(v.cal_week && weekEndOf(v.cal_week) < TODAY){
+    if(D.notesTrackedFrom && v.cal_week < D.notesTrackedFrom){
+      // Before coaches used the app — documented in Keap, nobody's debt here.
+      return `<span class="pill" style="background:#f0f0f1;color:#55555c;cursor:pointer" title="Week of ${esc(fmtW(v.cal_week))}${esc(who)} — before ${esc(fmt(D.notesTrackedFrom))}, when notes started being tracked here. Click to view on the calendar." onclick="event.stopPropagation();jumpToCalendar(${v.id})">Week passed · pre-tracking</span>`;
+    }
     const tip = `Scheduled for week of ${fmtW(v.cal_week)}${who}. That week has passed and the visit hasn't been marked complete — notes are missing. Click to view it on the calendar.`;
     return `<span class="pill p-over" style="cursor:pointer" title="${esc(tip)}" onclick="event.stopPropagation();jumpToCalendar(${v.id})">Notes missing</span>`;
   }
@@ -1008,7 +1012,7 @@ function todayTeamView(t, orphanedData){
     <table><tr><th>Client</th><th>Scheduled On</th><th>Coach</th><th></th></tr>`+
     todayRows(t.missingNotes, 8, v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="mono">${fmt(v.scheduled_week)}</td>
       <td>${esc(coach(v.completed_by_coach_id)?.name||'—')}</td>
-      <td>${v.client_id?`<button class="btn tiny" onclick="openClientProfile(${v.client_id})">Add note</button>`:''}</td></tr>`)+`</table></div>`;
+      <td><div style="display:flex;gap:6px">${waiveBtn(v, `${v.client} · ${fmt(v.scheduled_week)}`)}<button class="btn tiny" onclick="openVisitModal(${v.id})">Add note</button></div></td></tr>`)+`</table></div>`;
   }
 
   if(t.holdsExpiring.length){
@@ -3117,6 +3121,32 @@ async function loadCoachProfile(id){
   $('#main').innerHTML = coachProfileView(data);
 }
 function setCpTab(t){ st.cpTab = t; if(st.coachProfileData) $('#main').innerHTML = coachProfileView(st.coachProfileData); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+/* Admin override for "owes a note": waive one visit with a reason. The visit stays
+ * completed and stays in history; it simply stops being anyone's debt. Reversible. */
+function waiveNotesDlg(visitId, label){
+  openDlg(`<h3>Waive notes</h3>
+    <p class="small" style="color:var(--muted)">${esc(label)}</p>
+    <p class="small">This visit will no longer count as owing a write-up — on Today, the coach's profile, or month-end. It stays in history as completed. You can undo this from the coach's History tab.</p>
+    <label>Reason <span class="small" style="color:var(--muted)">(optional, shown on the visit)</span></label>
+    <input id="wvReason" placeholder="e.g. Documented in Keap · Covered by lead · Client cancelled on arrival">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="waiveNotes(${visitId})">Waive</button></div>`);
+}
+async function waiveNotes(visitId){
+  try{ await api('POST','/api/visits/'+visitId+'/waive-notes', { reason: ($('#wvReason')||{}).value || '' }); closeDlg(); toast('Notes waived'); await refreshAfterNotesChange(); }
+  catch(e){ uiAlert(e.message||'Could not waive'); }
+}
+async function unwaiveNotes(visitId){
+  try{ await api('DELETE','/api/visits/'+visitId+'/waive-notes'); toast('Waiver removed'); await refreshAfterNotesChange(); }
+  catch(e){ uiAlert(e.message||'Could not undo'); }
+}
+async function refreshAfterNotesChange(){
+  await refresh();
+  if(st.view==='coachprofile' && st.coachId) await loadCoachProfile(st.coachId);
+  if($('#todayOut')) await loadToday();
+  if($('#monthEndOut')) await loadMonthEnd();
+}
+const waiveBtn = (v, label) => D.user.role==='admin' ? `<button class="btn tiny" style="color:var(--muted)" title="Admin: this visit will stop counting as owing a note" onclick="waiveNotesDlg(${v.id},'${esc(label).replace(/'/g,"\\'")}')">Waive</button>` : '';
 /* ---------- Coach profile ----------
  * One header that answers "who is this and how are they doing", stat tiles that take you
  * to the matching tab, and a segmented control instead of six stacked tables. Row actions
@@ -3196,7 +3226,7 @@ function coachProfileView(data){
     if(owed.length) html += section('Notes owed', owed.length,
       `<p class="small" style="margin-bottom:8px">Visits with no write-up — either the week passed and it isn't marked done, or it's done with no notes.</p><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>When</th><th>Status</th><th></th></tr>` +
       owed.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="mono">${v.kind==='open'?'wk of '+fmtW(v.when):fmt(v.when)}</td>
-        <td>${v.kind==='open'?'<span class="pill p-over">Not marked done</span>':'<span class="pill p-due">Completed, no notes</span>'}</td><td><div style="display:flex;justify-content:flex-end"><button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.kind==='open'?'Complete &amp; write up':'Add note'}</button></div></td></tr>`).join('') + `</table>`);
+        <td>${v.kind==='open'?'<span class="pill p-over">Not marked done</span>':'<span class="pill p-due">Completed, no notes</span>'}</td><td><div style="display:flex;gap:6px;justify-content:flex-end">${v.kind==='done'?waiveBtn(v, `${v.client} · ${v.cycle||''} ${v.program||''} · ${fmt(v.when)}`):''}<button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.kind==='open'?'Complete &amp; write up':'Add note'}</button></div></td></tr>`).join('') + `</table>`);
     if(todo.callsOwed.length) html += section('Coaching calls owed', todo.callsOwed.length,
       `<p class="small" style="margin-bottom:8px">One call per client per month.</p><table style="width:100%"><tr><th>Client</th><th>For</th><th>Last call</th><th></th></tr>` +
       todo.callsOwed.map(r=>`<tr><td><b>${clientLink(r.client, r.client_id)}</b></td><td>${r.missed?`<span class="pill p-over">${monthLabel(r.missed)} missed</span>`:''}${r.due?` <span class="pill p-due">${monthLabel(r.due)} due</span>`:''}</td><td class="small">${r.last_call?fmt(r.last_call):'<span style="color:var(--muted)">never</span>'}</td>
@@ -3238,11 +3268,17 @@ function coachProfileView(data){
     html += `<div class="panel cp"><h2>Visit history <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${visitHistory.length})</span></h2>
       <p class="small" style="margin-bottom:8px">Every visit ${esc(coach.name)} completed, credited permanently regardless of later reassignment. ✓ = written up.</p>` +
       (visitHistory.length ? years.map(y => { const rows = byYear[y], w = rows.filter(v=>v.has_notes).length;
-        return `<h3 style="margin:14px 0 4px">${y} <span class="small" style="font-weight:400">· ${rows.length} visit${rows.length>1?'s':''} · ${w} written up</span></h3>
+        const tracked = rows.filter(v=>!v.pre_tracking).length;
+        return `<h3 style="margin:14px 0 4px">${y} <span class="small" style="font-weight:400">· ${rows.length} visit${rows.length>1?'s':''}${tracked ? ` · ${w} of ${tracked} written up` : ' · before notes were tracked here'}</span></h3>
         <table style="width:100%"><tr><th style="width:32px"></th><th>Visited</th><th>Client</th><th>Visit</th><th>Store</th><th></th></tr>` +
-        rows.map(v=>`<tr><td>${v.has_notes?'<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;background:#1e8e5a;color:#fff;align-items:center;justify-content:center;font-size:12px;font-weight:700">✓</span>':'<span title="No notes" style="display:inline-flex;width:20px;height:20px;border-radius:50%;border:2px solid #c23b3b;background:#fbe3e3"></span>'}</td>
-          <td class="mono">${fmt(v.completed_date||v.scheduled_week)}</td><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="small">${esc(v.store||'')}</td>
-          <td><div style="display:flex;justify-content:flex-end"><button class="btn tiny" onclick="openVisitModal(${v.id})">${v.has_notes?'View notes':'Add note'}</button></div></td></tr>`).join('') + `</table>`; }).join('')
+        rows.map(v=>{ const ok = v.has_notes || v.notes_waived_at || v.pre_tracking;
+          const mark = v.has_notes ? '<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;background:#1e8e5a;color:#fff;align-items:center;justify-content:center;font-size:12px;font-weight:700">✓</span>'
+            : ok ? '<span title="Not owed" style="display:inline-flex;width:20px;height:20px;border-radius:50%;background:#e5e5e7;color:#55555c;align-items:center;justify-content:center;font-size:12px">–</span>'
+            : '<span title="No notes" style="display:inline-flex;width:20px;height:20px;border-radius:50%;border:2px solid #c23b3b;background:#fbe3e3"></span>';
+          const tag = v.has_notes ? '' : v.notes_waived_at ? `<span class="pill" style="background:#f0f0f1;color:#55555c" title="${esc(v.notes_waived_reason||'')}">Waived${v.notes_waived_reason?' · '+esc(v.notes_waived_reason):''}</span>${D.user.role==='admin'?` <a class="small" style="cursor:pointer;color:var(--muted)" onclick="unwaiveNotes(${v.id})">undo</a>`:''}` : v.pre_tracking ? '<span class="pill" style="background:#f0f0f1;color:#55555c" title="Before notes were tracked in the app">In Keap</span>' : '';
+          return `<tr${ok&&!v.has_notes?' style="color:var(--muted)"':''}><td>${mark}</td>
+          <td class="mono">${fmt(v.completed_date||v.scheduled_week)}</td><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')} ${tag}</td><td class="small">${esc(v.store||'')}</td>
+          <td><div style="display:flex;gap:6px;justify-content:flex-end">${(!ok)?waiveBtn(v, `${v.client} · ${v.cycle||''} ${v.program||''} · ${fmt(v.completed_date||v.scheduled_week)}`):''}<button class="btn tiny" onclick="openVisitModal(${v.id})">${v.has_notes?'View notes':(ok?'Open':'Add note')}</button></div></td></tr>`; }).join('') + `</table>`; }).join('')
       : `<p>No completed visits on record yet.</p>`) + `</div>`;
   }
 
@@ -3752,10 +3788,21 @@ function monthEndView(){
   const months = []; { let [y,m] = cur.split('-').map(Number); for(let i=0;i<12;i++){ months.push(`${y}-${String(m).padStart(2,'0')}`); m--; if(m<1){ m=12; y--; } } }
   const sel = monthEndPeriod();
   return `<div class="panel"><h2>Month-end reconciliation</h2>
-    <p class="small" style="margin-bottom:10px">Revenue by team and the two note checklists for one month. Team is whoever had the client at the start of that month. Cancelled contracts are excluded. A ✓ means the note exists; it can't be ticked by hand.</p>
+    <p class="small" style="margin-bottom:10px">Revenue by team and the two note checklists for one month. Team is whoever had the client at the start of that month. Cancelled contracts are excluded. A ✓ means the note exists; it can't be ticked by hand. Notes are tracked in the app from <b>${fmt(D.notesTrackedFrom||'2026-09-01')}</b>${D.user.role==='admin'?` <a class="small" style="cursor:pointer" onclick="notesCutoffDlg()">change</a>`:''}; earlier visits live in Keap.</p>
     <div class="controls" style="flex-wrap:wrap;gap:6px">${months.map(p=>`<button class="btn tiny ${p===sel?'primary':''}" onclick="setMonthEnd('${p}')">${monthLabel(p)}${p===cur?' <span class="small" style="opacity:.7">(in progress)</span>':''}</button>`).join('')}</div>
   </div>
   <div id="monthEndOut"><div class="panel small">Loading ${monthLabel(sel)}…</div></div>`;
+}
+function notesCutoffDlg(){
+  openDlg(`<h3>Notes tracked from</h3>
+    <p class="small">Completed visits before this date are documented in Keap and never count as owing a note anywhere in the app. Coaches started using the system on Sep 1, 2026.</p>
+    <label>Date</label><input type="date" id="ntfDate" value="${D.notesTrackedFrom||'2026-09-01'}" style="width:170px">
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+    <button class="btn primary" onclick="saveNotesCutoff()">Save</button></div>`);
+}
+async function saveNotesCutoff(){
+  try{ await api('PUT','/api/settings/notes-tracked-from',{ date: $('#ntfDate').value }); closeDlg(); toast('Updated'); await refresh(); }
+  catch(e){ uiAlert(e.message||'Could not save'); }
 }
 function toggleMeTeam(team){ const el = document.getElementById('me-team-'+team.replace(/\W/g,'_')); if(el) el.style.display = el.style.display==='none' ? '' : 'none'; }
 async function loadMonthEnd(){
@@ -3825,15 +3872,16 @@ function renderMonthEnd(){
       <td>${c.done?'':`<button class="btn tiny" onclick="logCallDlg(${c.client_id},'${esc(c.client).replace(/'/g,"\\'")}','${p}')">Log call</button>`}</td></tr>`).join('') + `</table></div></div>`;
 
   const stateLabel = { done:'', no_notes:'<span class="pill p-due">Completed, no notes</span>', not_marked_done:'<span class="pill p-over">Not marked done</span>',
+    waived:'<span class="pill" style="background:#f0f0f1;color:#55555c">Waived by admin</span>', pre_tracking:'<span class="pill" style="background:#f0f0f1;color:#55555c" title="Before notes were tracked in the app">In Keap</span>',
     upcoming:'<span class="pill p-cal">Upcoming</span>', not_tracked:'<span class="pill" style="background:#f0f0f1;color:#55555c" title="Imported from the 2026 sheet as a calendar block. Not a visit record, so notes can\'t be written on it until Sheet Recon converts it.">Sheet visit · not tracked</span>' };
   h += `<div class="panel">${H('Visit notes · '+monthLabel(p), `${vd} of ${vn.length} written up`)}
-    <p class="small" style="margin-bottom:8px">Every visit completed in ${monthLabel(p)} or on a calendar week that touches it — the same LIDs the global calendar shows. ✓ = wins, issues, focus or commitments were written. Click a column to sort.</p>
+    <p class="small" style="margin-bottom:8px">Every visit completed in ${monthLabel(p)} or on a calendar week that touches it — the same LIDs the global calendar shows. ✓ = wins, issues, focus or commitments were written. Click a column to sort.${r.notesTrackedFrom && p < r.notesTrackedFrom.slice(0,7) ? ` <b>Notes were not tracked in the app before ${fmt(r.notesTrackedFrom)}</b> — visits this month are documented in Keap and are shown as "In Keap", not as missing.` : ''}</p>
     ${sheetN ? `<div style="background:#f0f0f1;border-left:5px solid #9a9aa2;padding:8px 12px;margin-bottom:10px" class="small"><b>${sheetN}</b> of these are 2026-sheet calendar blocks, not visit records — they can never be ticked here. Admin → Data → <b>Sheet Recon 2026</b> maps them onto real visits.</div>` : ''}
     <div style="max-height:480px;overflow:auto"><table style="width:100%"><tr>${th('visits','doneN','')}${th('visits','client','Client')}${th('visits','cycle','Visit')}${th('visits','when','When')}${th('visits','team','Team')}${th('visits','coach','Coach')}${th('visits','state','Status')}<th></th></tr>` +
     vn.map(v=>`<tr${v.kind==='sheet'?' style="color:var(--muted)"':''}><td>${tick(v.done)}</td><td>${v.client_id ? clientLink(v.client, v.client_id) : `<span title="No client matched this sheet label">${esc(v.client)}</span> <span class="small">(unmatched)</span>`}</td>
       <td class="small">${v.kind==='sheet' ? '<i>from sheet</i>' : `${esc(v.cycle||'')} ${esc(v.program||'')}`}</td><td class="mono small">${v.kind==='sheet' || !v.completed ? 'wk of '+fmtW(v.when) : fmt(v.when)}</td>
       <td class="small">${esc(v.team||'—')}</td><td class="small">${esc(v.coach||'—')}</td><td>${stateLabel[v.state]||''}</td>
-      <td>${v.done || !v.id ? '' : `<button class="btn tiny" onclick="openVisitModal(${v.id})">Open</button>`}</td></tr>`).join('') + `</table></div></div>`;
+      <td><div style="display:flex;gap:6px;justify-content:flex-end">${v.state==='no_notes'?waiveBtn(v, `${v.client} · ${v.cycle||''} ${v.program||''} · ${fmt(v.when)}`):''}${v.done || !v.id ? '' : `<button class="btn tiny" onclick="openVisitModal(${v.id})">Open</button>`}</div></td></tr>`).join('') + `</table></div></div>`;
   out.innerHTML = h;
 }
 function teamInfoFor(name){ return (D.teamInfo||[]).find(x=>x.name===name) || { name, lead_coach_id:null, lead_name:null }; }

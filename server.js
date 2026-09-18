@@ -327,6 +327,7 @@ route('GET', /^\/api\/state$/, ['admin','lead','sales','coach'], (req, res, m, b
     user,
     teams: teamNames(),
     guides: guidesFor(user.role),
+    notesTrackedFrom: notesTrackedFrom(),
     // Team records: who leads each one. `teams` above stays a plain name list for the
     // many places that only need names; this is for the admin Teams panel and anything
     // that needs the lead.
@@ -822,6 +823,38 @@ function sweepProspectHolds(){
   return { expired: expired.map(h => h.name), expiring: expiring.map(h => `${h.name} (${h.expires})`) };
 }
 
+/* ----- Visit notes: the ONE definition of "owes a note" -----
+   A completed visit owes a note when all four note fields are empty, it was not waived by
+   an admin, and it happened on/after meta.notes_tracked_from (coaches began using the app
+   2026-09-01; earlier visits are documented in Keap and are nobody's debt here). Every
+   list that says "notes missing" — Today, coach profile, month-end — uses these. */
+function notesTrackedFrom(){ return getMeta('notes_tracked_from') || '2026-09-01'; }
+const NOTES_EMPTY_SQL = "COALESCE(v.notes_wins,'')='' AND COALESCE(v.notes_issues,'')='' AND COALESCE(v.notes_focus,'')='' AND COALESCE(v.notes_commitments,'')=''";
+const VISIT_WHEN_SQL = "COALESCE(v.completed_date, v.scheduled_week, v.cal_week, v.due)";
+function notesOwedSql(){ return `(${NOTES_EMPTY_SQL}) AND v.notes_waived_at IS NULL AND ${VISIT_WHEN_SQL} >= '${notesTrackedFrom()}'`; }
+/* Open visits whose calendar week has passed are "not marked done" — same cutoff applies:
+   a sheet-imported week from before the app was in use is not a coach's forgotten write-up. */
+function weekPassedTrackedSql(){ return `v.cal_week >= '${notesTrackedFrom()}'`; }
+route('POST', /^\/api\/visits\/(\d+)\/waive-notes$/, ['admin'], (req, res, m, body, user) => {
+  const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
+  const reason = String((body && body.reason) || '').trim();
+  db.prepare('UPDATE visits SET notes_waived_at=?, notes_waived_by=?, notes_waived_reason=? WHERE id=?').run(new Date().toISOString(), user.email, reason || null, v.id);
+  log(user.email, 'visit.notes_waived', { visitId: v.id, client: v.client, cycle: v.cycle, reason });
+  send(res, 200, { ok: true });
+});
+route('DELETE', /^\/api\/visits\/(\d+)\/waive-notes$/, ['admin'], (req, res, m, body, user) => {
+  const v = getVisit(m[1]); if(!v) return err(res, 404, 'not found');
+  db.prepare('UPDATE visits SET notes_waived_at=NULL, notes_waived_by=NULL, notes_waived_reason=NULL WHERE id=?').run(v.id);
+  log(user.email, 'visit.notes_unwaived', { visitId: v.id, client: v.client });
+  send(res, 200, { ok: true });
+});
+route('GET', /^\/api\/settings\/notes-tracked-from$/, ['admin'], (req, res) => send(res, 200, { notes_tracked_from: notesTrackedFrom() }));
+route('PUT', /^\/api\/settings\/notes-tracked-from$/, ['admin'], (req, res, m, body, user) => {
+  const d = String((body && body.date) || '');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(d)) return err(res, 400, 'date YYYY-MM-DD required');
+  setMeta('notes_tracked_from', d); log(user.email, 'settings.notes_tracked_from', d);
+  send(res, 200, { ok: true, notes_tracked_from: d });
+});
 /* ----- Monthly coaching calls owed -----
  * Every active client gets one coaching call a month, whether or not a visit happens
  * (see the Coaching Calls panel on the client profile). A call is a client_notes row of
@@ -955,7 +988,7 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
   const today = new Date().toISOString().slice(0,10);
   const visits = db.prepare(`
     SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.completed, v.scheduled_week, v.cal_week, v.completed_date, v.team,
-      COALESCE(v.completed_by_coach_id, v.cal_coach) AS coach_id, v.cal_coach,
+      COALESCE(v.completed_by_coach_id, v.cal_coach) AS coach_id, v.cal_coach, v.notes_waived_at,
       (COALESCE(v.notes_wins,'')<>'' OR COALESCE(v.notes_issues,'')<>'' OR COALESCE(v.notes_focus,'')<>'' OR COALESCE(v.notes_commitments,'')<>'') AS has_notes
     FROM visits v
     WHERE (v.completed=1 AND COALESCE(v.completed_date, v.scheduled_week, v.cal_week, v.due) BETWEEN ? AND ?)
@@ -964,9 +997,12 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
   const visitNotes = visits.map(v => {
     const when = v.completed ? (v.completed_date || v.scheduled_week || v.cal_week) : v.cal_week;
     const weekOver = v.cal_week ? (new Date(v.cal_week + 'T12:00:00').getTime() + 6*864e5) < Date.parse(today + 'T12:00:00') : true;
+    const pre = (when || '') < notesTrackedFrom();
+    const waived = !!v.notes_waived_at;
     return { id: v.id, kind: 'visit', client: v.client, client_id: v.client_id, program: v.program, cycle: v.cycle, team: v.team || null,
-      coach_id: v.coach_id, coach: coachName(v.coach_id), when, completed: !!v.completed, done: !!v.has_notes,
-      state: v.completed ? (v.has_notes ? 'done' : 'no_notes') : (weekOver ? 'not_marked_done' : 'upcoming') };
+      coach_id: v.coach_id, coach: coachName(v.coach_id), when, completed: !!v.completed, waived, pre_tracking: pre,
+      done: !!v.has_notes || waived || pre,
+      state: v.completed ? (v.has_notes ? 'done' : waived ? 'waived' : pre ? 'pre_tracking' : 'no_notes') : (weekOver ? (pre ? 'pre_tracking' : 'not_marked_done') : 'upcoming') };
   });
   // Legacy "visit" calendar blocks from the 2026 sheet. The global calendar draws these,
   // so a month-end list that ignored them under-counted by 2-3x. They are not visit
@@ -989,7 +1025,7 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
   send(res, 200, { period, start, end, team: teamFilter, revenue, calls, visitNotes: filteredVisitNotes,
     summary: { revenueTotal: revenue.reduce((s,t)=>s+t.revenue,0), callsDone: calls.filter(c=>c.done).length, callsTotal: calls.length,
       visitsDone: filteredVisitNotes.filter(v=>v.done).length, visitsTotal: filteredVisitNotes.length,
-      sheetVisits: filteredVisitNotes.filter(v=>v.kind==='sheet').length } });
+      sheetVisits: filteredVisitNotes.filter(v=>v.kind==='sheet').length, notesTrackedFrom: notesTrackedFrom() } });
 });
 /* ----- Today: the role-aware action queue the dashboard is built from -----
    One place that answers "what needs a person right now", computed fresh from
@@ -1011,13 +1047,13 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
       FROM visits v WHERE v.completed=0 AND v.due>=? AND v.due<=? AND ${mine} ORDER BY v.due LIMIT 20`).all(today, plus30, user.coach_id, user.coach_id);
     const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week
       FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id=? AND COALESCE(v.scheduled_week, v.due)>=?
-      AND COALESCE(v.notes_wins,'') = '' AND COALESCE(v.notes_issues,'') = '' AND COALESCE(v.notes_focus,'') = '' AND COALESCE(v.notes_commitments,'') = '' ORDER BY v.scheduled_week DESC LIMIT 20`).all(user.coach_id, cut30);
+      AND ${notesOwedSql()} ORDER BY v.scheduled_week DESC LIMIT 20`).all(user.coach_id, cut30);
     // Placed on a week that has now passed, still not marked complete. The app can't tell
     // whether the coach went and forgot to log it or didn't go — either way it needs a hand.
     // Independent of the due date: a visit placed early can be in this state while its due
     // date is still weeks out, which is exactly when it fell through the cracks before.
     const weekPassed = db.prepare(`SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
-      FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND date(v.cal_week,'+6 days')<? AND ${mine}
+      FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND date(v.cal_week,'+6 days')<? AND ${weekPassedTrackedSql()} AND ${mine}
       ORDER BY v.cal_week LIMIT 20`).all(today, user.coach_id, user.coach_id);
     return send(res, 200, { role:'coach', nextVisit: nextVisit||null, overdueMine, dueSoonMine, missingNotes, weekPassed,
       callsOwed: callsOwed(today, { coachId: user.coach_id }), callsMonth: monthKey(today) });
@@ -1051,9 +1087,9 @@ route('GET', /^\/api\/today$/, ['admin','lead','sales','coach'], (req, res, m, b
   }
   const missingNotes = db.prepare(`SELECT v.id, v.client, v.client_id, v.scheduled_week, v.completed_by_coach_id
     FROM visits v WHERE v.completed=1 AND v.completed_by_coach_id IS NOT NULL AND COALESCE(v.scheduled_week, v.due)>=?${tf}
-    AND COALESCE(v.notes_wins,'')='' AND COALESCE(v.notes_issues,'')='' AND COALESCE(v.notes_focus,'')='' AND COALESCE(v.notes_commitments,'')='' ORDER BY v.scheduled_week DESC LIMIT 50`).all(cut30, ...tArgs);
+    AND ${notesOwedSql()} ORDER BY v.scheduled_week DESC LIMIT 50`).all(cut30, ...tArgs);
   const weekPassed = db.prepare(`SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week, v.cal_coach
-    FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND date(v.cal_week,'+6 days')<?${tf} ORDER BY v.cal_week LIMIT 50`).all(today, ...tArgs);
+    FROM visits v WHERE v.completed=0 AND v.cal_week IS NOT NULL AND date(v.cal_week,'+6 days')<? AND ${weekPassedTrackedSql()}${tf} ORDER BY v.cal_week LIMIT 50`).all(today, ...tArgs);
   const holdsExpiring = db.prepare(`SELECT id, name, coach_id, expires FROM prospect_holds
     WHERE status='active' AND expires IS NOT NULL AND expires<=? ORDER BY expires LIMIT 20`).all(plus14)
     .filter(h => { if(!teamFilter) return true; const c = getCoach(h.coach_id); return c && c.team === teamFilter; });
@@ -1222,7 +1258,9 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
 
   const visitHistory = db.prepare(`
     SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.scheduled_week, v.completed_date, v.store,
-      (COALESCE(v.notes_wins,'')<>'' OR COALESCE(v.notes_issues,'')<>'' OR COALESCE(v.notes_focus,'')<>'' OR COALESCE(v.notes_commitments,'')<>'') AS has_notes
+      (COALESCE(v.notes_wins,'')<>'' OR COALESCE(v.notes_issues,'')<>'' OR COALESCE(v.notes_focus,'')<>'' OR COALESCE(v.notes_commitments,'')<>'') AS has_notes,
+      v.notes_waived_at, v.notes_waived_reason,
+      (${VISIT_WHEN_SQL} < '${notesTrackedFrom()}') AS pre_tracking
     FROM visits v WHERE v.completed_by_coach_id=? AND v.completed=1 ORDER BY COALESCE(v.completed_date, v.scheduled_week) DESC LIMIT 500`).all(c.id);
   const upcoming = db.prepare(`
     SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
@@ -1244,11 +1282,11 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
     ORDER BY v.due`).all(c.id, c.id);
   const overdue = openWork.filter(v => v.due && v.due < todayIso);
   const dueSoon = openWork.filter(v => v.due && v.due >= todayIso && v.due <= in14);
-  const weekPassed = openWork.filter(v => v.cal_week && new Date(v.cal_week+'T12:00:00').getTime() + 6*864e5 < Date.parse(todayIso+'T12:00:00'));
+  const weekPassed = openWork.filter(v => v.cal_week && v.cal_week >= notesTrackedFrom() && new Date(v.cal_week+'T12:00:00').getTime() + 6*864e5 < Date.parse(todayIso+'T12:00:00'));
   const missingNotes = db.prepare(`
     SELECT v.id, v.client, v.client_id, v.cycle, v.program, COALESCE(v.completed_date, v.scheduled_week) AS visited
     FROM visits v
-    WHERE v.completed_by_coach_id=? AND v.completed=1 AND COALESCE(v.notes_wins,'')='' AND COALESCE(v.notes_issues,'')='' AND COALESCE(v.notes_focus,'')='' AND COALESCE(v.notes_commitments,'')=''
+    WHERE v.completed_by_coach_id=? AND v.completed=1 AND ${notesOwedSql()}
     ORDER BY visited DESC LIMIT 50`).all(c.id);
   const callsOwedNow = callsOwed(todayIso, { coachId: c.id });
   send(res, 200, {

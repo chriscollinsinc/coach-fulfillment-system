@@ -290,6 +290,16 @@ ensureColumn('visits', 'manual_coach_name', 'TEXT');
 /* Actual completion date for historical visits, allowing manual entry when different from
    the scheduled week. Used for reconciling archive records with actual completion dates. */
 ensureColumn('visits', 'completed_date', 'TEXT');
+/* Notes accountability (2026-09-18). Coaches started using the app on 2026-09-01; every
+   completed visit before that was documented in Keap and stays there. So "owes a note"
+   only applies from meta.notes_tracked_from (default 2026-09-01) onward, and an admin can
+   waive an individual visit after that date with a reason — a one-off the coach shouldn't
+   be chased for. Both are read by the shared notesOwedSql() in server.js; nothing else
+   should decide on its own what "notes missing" means. */
+ensureColumn('visits', 'notes_waived_at', 'TEXT');
+ensureColumn('visits', 'notes_waived_by', 'TEXT');
+ensureColumn('visits', 'notes_waived_reason', 'TEXT');
+if(!getMeta('notes_tracked_from')) setMeta('notes_tracked_from', '2026-09-01');
 /* Visit notes: structured coaching call notes captured when a coach completes a visit.
    wins/issues/focus are the core coaching note fields; commitments tracks action items. */
 ensureColumn('visits', 'notes_wins', 'TEXT');
