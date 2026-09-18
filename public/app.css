@@ -501,3 +501,9 @@ table.recon-tbl tr:hover td{background:#faf6f0}
 /* Video guides accordion (FAQ) */
 details.guide>summary::-webkit-details-marker{display:none}
 details.guide[open]>summary{border-bottom:1px solid var(--line);background:#fafaf9}
+
+/* Coach profile: roomier rows and bigger targets for an audience that is not twenty-five */
+.panel.cp table td{padding:11px 10px;font-size:14.5px}
+.panel.cp table th{padding:8px 10px}
+.panel.cp .btn.tiny{padding:6px 12px;font-size:12px}
+.cp-tabs .btn{min-height:42px}

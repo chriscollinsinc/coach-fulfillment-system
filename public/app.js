@@ -3113,77 +3113,153 @@ function clientProfileView(data, notes){
 function openCoachProfile(id){ st.view='coachprofile'; st.coachId=id; render(); }
 async function loadCoachProfile(id){
   const data = await api('GET', '/api/coaches/'+id+'/profile');
+  st.coachProfileData = data; st.coachProfileCoach = data.coach;
   $('#main').innerHTML = coachProfileView(data);
 }
+function setCpTab(t){ st.cpTab = t; if(st.coachProfileData) $('#main').innerHTML = coachProfileView(st.coachProfileData); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+/* ---------- Coach profile ----------
+ * One header that answers "who is this and how are they doing", stat tiles that take you
+ * to the matching tab, and a segmented control instead of six stacked tables. Row actions
+ * everywhere something can be acted on, using the same pills and verbs as Today so a coach
+ * (or the admin looking at their page) never learns two vocabularies. Large targets and
+ * generous row height on purpose: the audience is not twenty-five. */
 function coachProfileView(data){
-  const { coach, assignedClients, stats, visitHistory, upcoming, notes, todo } = data;
+  const { coach, login, leadsTeam, teamLead, assignedClients, stats, visitHistory, upcoming, notes, todo } = data;
   const isSelf = D.user.role==='coach';
   const canManage = D.user.role==='admin' || D.user.role==='lead';
-  let html = `<div class="panel">
-    <div class="controls">
-      ${!isSelf ? `<button class="btn tiny" onclick="go('admin')">← Admin</button>` : ''}
+  const tab = st.cpTab || 'overview';
+  const full = v => D.visits.find(x=>x.id===v.id) || v;
+  const tenure = coach.start_date ? (() => { const d = dayDiff(TODAY, coach.start_date); const y = Math.floor(d/365), mo = Math.floor((d%365)/30); return y ? `${y} yr${y>1?'s':''}${mo?` ${mo} mo`:''}` : `${Math.max(1,mo)} mo`; })() : null;
+  const certs = [coach.is_launch_certified ? 'Launch certified' : null, coach.is_handoff_capable ? 'Handoff-capable' : null, coach.is_advisor_only ? 'Advisor only' : null].filter(Boolean);
+  const boardJump = `st.view='board';st.boardTeam='${esc(coach.team||'').replace(/'/g,"\\'")}';st.boardY=${+TODAY.slice(0,4)};st.boardM=${+TODAY.slice(5,7)-1};st.placing=null;render()`;
+
+  // ---- Header
+  let html = `<div class="panel cp">
+    <div class="controls" style="margin-bottom:6px">
+      ${!isSelf ? `<button class="btn" onclick="go('admin')">← Back to Admin</button>` : ''}
       <span style="flex:1"></span>
-      ${canManage ? `<button class="btn tiny" onclick="editCoachDlg('${coach.id}')">Edit profile</button>` : ''}
-      ${(canManage && coach.active) ? `<button class="btn tiny danger" onclick="removeCoach('${coach.id}','${esc(coach.name).replace(/'/g,"\\'")}')">Deactivate coach</button>` : ''}
+      <button class="btn" onclick="${boardJump}">Open calendar</button>
+      ${canManage ? `<button class="btn" onclick="editCoachDlg('${coach.id}')">Edit profile</button>` : ''}
+      ${(canManage && coach.active) ? `<button class="btn danger" onclick="removeCoach('${coach.id}','${esc(coach.name).replace(/'/g,"\\'")}')">Deactivate</button>` : ''}
     </div>
-    <h2 style="margin-top:8px;display:flex;align-items:center;gap:10px">${avatarHtml(coach.name,coach.team,40)}
-      <span>${esc(coach.name)} <span class="small">— Team ${esc(coach.team)}</span>
-      ${coach.active ? '' : '<span class="pill p-over">inactive</span>'}</span>
-    </h2>
-    <p class="small" style="margin-top:6px">${coach.phone?`Phone: ${esc(coach.phone)} · `:''}${coach.start_date?`Start date: ${fmt(coach.start_date)}`:''}${(!coach.phone&&!coach.start_date)?'No phone or start date on file yet.':''}</p>
-    <div class="cards" style="margin-top:12px">
-      <div class="card"><div class="k">${stats.assignedStores}</div><div class="l">Assigned stores</div></div>
-      <div class="card"><div class="k">${stats.completedThisYear}</div><div class="l">Visits completed this year</div></div>
-      <div class="card"><div class="k">${stats.allTimeCompleted}</div><div class="l">Visits completed, all-time</div></div>
-      <div class="card"><div class="k">${stats.upcomingCount}</div><div class="l">On the calendar now</div></div>
+    <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
+      ${avatarHtml(coach.name, coach.team, 64)}
+      <div style="flex:1;min-width:260px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-family:var(--head);font-size:30px;font-weight:600;letter-spacing:.5px;line-height:1">${esc(coach.name)}</span>
+          ${leadsTeam ? `<span class="pill" style="background:#fdf4e3;color:#8a5b06;border:1px solid #e8c98a">★ Team lead</span>` : ''}
+          ${coach.active ? '' : '<span class="pill p-over">Inactive</span>'}
+        </div>
+        <div style="margin-top:8px;display:flex;gap:18px;flex-wrap:wrap;font-size:15px;color:#333">
+          <span><b>Team ${esc(coach.team||'—')}</b>${teamLead && !leadsTeam ? ` <span class="small" style="color:var(--muted)">· led by ${esc(teamLead)}</span>` : ''}</span>
+          ${coach.phone ? `<a href="tel:${esc(coach.phone.replace(/[^\d+]/g,''))}" style="color:inherit">📞 ${esc(coach.phone)}</a>` : `<span class="small" style="color:var(--muted)">No phone on file</span>`}
+          ${login ? `<a href="mailto:${esc(login.email)}" style="color:inherit">✉ ${esc(login.email)}</a>${login.active ? '' : ' <span class="pill p-over">login disabled</span>'}` : (canManage ? `<span class="small" style="color:var(--warn)">No login linked</span>` : '')}
+          ${coach.start_date ? `<span title="Start date ${fmt(coach.start_date)}">🗓 Since ${fmt(coach.start_date)}${tenure ? ` <span class="small" style="color:var(--muted)">· ${tenure}</span>` : ''}</span>` : ''}
+        </div>
+        ${certs.length ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${certs.map(x=>`<span class="pill" style="background:#f0f0f1;color:#55555c">${x}</span>`).join('')}</div>` : ''}
+      </div>
+    </div>`;
+
+  // ---- Stat tiles → tabs
+  const tile = (n, label, t, tone) => `<div class="card" style="cursor:pointer;border-top-color:${tone||'var(--primary)'}${tab===t?';box-shadow:0 0 0 2px var(--ink) inset':''}" onclick="setCpTab('${t}')" title="Open ${label}">
+    <div class="k" style="color:${n && tone ? tone : 'inherit'}">${n}</div><div class="l">${label}</div></div>`;
+  html += `<div class="cards" style="margin-top:16px">
+      ${tile(stats.attention, 'Needs attention', 'overview', stats.attention ? 'var(--bad)' : 'var(--ok)')}
+      ${tile(stats.assignedStores, 'Stores', 'stores')}
+      ${tile(stats.upcomingCount, 'On the calendar', 'calendar')}
+      ${tile(stats.completedThisYear, `Visits in ${TODAY.slice(0,4)}`, 'history')}
+      ${tile(stats.allTimeCompleted, 'Visits all-time', 'history')}
+    </div>
+    <div class="controls cp-tabs" style="margin-top:16px;gap:6px;flex-wrap:wrap">
+      ${[['overview','Overview'],['stores','Stores'],['calendar','Calendar'],['history','History'],['notes','Notes']].map(([k,l]) => `<button class="btn ${tab===k?'primary':''}" style="padding:10px 18px;font-size:14px" onclick="setCpTab('${k}')">${l}${k==='overview'&&stats.attention?` <span style="display:inline-block;min-width:20px;padding:0 6px;border-radius:999px;background:${tab===k?'#fff':'var(--bad)'};color:${tab===k?'var(--bad)':'#fff'};font-size:12px;font-weight:700">${stats.attention}</span>`:''}</button>`).join('')}
     </div>
   </div>`;
 
-  const todoTotal = (todo.overdue.length + todo.dueSoon.length + todo.missingNotes.length);
-  if(isSelf){
-    // A coach's own to-do lives on Today (overdue, due soon, notes owed) — don't repeat it here.
-    html += `<div class="panel"><h2>To-do${todoTotal?` (${todoTotal})`:''}</h2>
-      <p class="small">${todoTotal ? `You have ${todoTotal} item${todoTotal===1?'':'s'} outstanding — ` : 'Nothing outstanding — '}your working list is on <a onclick="go('dashboard')" style="cursor:pointer"><b>Today</b></a>.</p></div>`;
-  } else {
-  html += `<div class="panel"><h2>To-do${todoTotal?` (${todoTotal})`:''}</h2>`;
-  if(!todoTotal){
-    html += `<p class="small">Nothing outstanding — no overdue stores, nothing due in the next 2 weeks, and every completed visit has a note.</p>`;
-  } else {
-    if(todo.overdue.length) html += `<h3 style="color:var(--bad)">Overdue (${todo.overdue.length})</h3><table><tr><th>Client</th><th>Program</th><th>Was due</th></tr>` +
-      todo.overdue.map(v=>`<tr><td>${clientLink(v.client, v.client_id)}</td><td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('') + `</table>`;
-    if(todo.dueSoon.length) html += `<h3>Due within 2 weeks (${todo.dueSoon.length})</h3><table><tr><th>Client</th><th>Program</th><th>Due</th></tr>` +
-      todo.dueSoon.map(v=>`<tr><td>${clientLink(v.client, v.client_id)}</td><td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('') + `</table>`;
-    if(todo.missingNotes.length) html += `<h3>Completed visits missing a note (${todo.missingNotes.length})</h3><table><tr><th>Client</th><th>Scheduled On</th></tr>` +
-      todo.missingNotes.map(v=>`<tr><td>${clientLink(v.client, v.client_id)}</td><td class="mono">${fmt(v.scheduled_week)}</td></tr>`).join('') + `</table>`;
+  const noteLink = v => `<button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.completed?'Add note':'Complete &amp; write up'}</button>`;
+  const rowActions = v => { const f = full(v); return `<div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap">
+      ${!f.cal_week && canReschedule(f) && !placeBlockReason(f) ? `<button class="btn tiny" onclick="${placeJump(f)}">Place</button>` : ''}
+      <button class="btn tiny primary" onclick="openVisitModal(${v.id})">Open</button></div>`; };
+  const statusOf = v => { const f = full(v); return f.completed ? completedPill(f) : f.cal_week ? calendarPill(f) : unscheduledPill(f); };
+  const section = (title, count, body, tone) => `<div class="panel cp"><h2 style="display:flex;align-items:center;gap:10px${tone?';color:'+tone:''}">${title} <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${count})</span></h2>${body}</div>`;
+
+  // ---- Overview
+  if(tab==='overview'){
+    if(isSelf && !stats.attention){
+      html += `<div class="panel cp"><h2>All clear</h2><p>Nothing needs your attention right now. Your working list lives on <a onclick="go('dashboard')" style="cursor:pointer"><b>Today</b></a>.</p></div>`;
+    } else if(!stats.attention && !todo.dueSoon.length){
+      html += `<div class="panel cp"><h2>All clear</h2><p>Nothing overdue, nothing owed, and every completed visit has a note.</p></div>`;
+    }
+    if(todo.overdue.length) html += section('Overdue visits', todo.overdue.length,
+      `<p class="small" style="margin-bottom:8px">Past their due date and not completed.</p><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Was due</th><th>Status</th><th></th></tr>` +
+      todo.overdue.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="mono">${fmt(v.due)} <span class="small" style="color:var(--bad)">${Math.floor(dayDiff(TODAY,v.due))}d</span></td><td>${statusOf(v)}</td><td>${rowActions(v)}</td></tr>`).join('') + `</table>`, 'var(--bad)');
+    const owed = [...todo.weekPassed.filter(v=>!todo.overdue.some(o=>o.id===v.id)).map(v=>({...v,kind:'open',when:v.cal_week})), ...todo.missingNotes.map(v=>({...v,kind:'done',when:v.visited}))];
+    if(owed.length) html += section('Notes owed', owed.length,
+      `<p class="small" style="margin-bottom:8px">Visits with no write-up — either the week passed and it isn't marked done, or it's done with no notes.</p><table style="width:100%"><tr><th>Client</th><th>Visit</th><th>When</th><th>Status</th><th></th></tr>` +
+      owed.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="mono">${v.kind==='open'?'wk of '+fmtW(v.when):fmt(v.when)}</td>
+        <td>${v.kind==='open'?'<span class="pill p-over">Not marked done</span>':'<span class="pill p-due">Completed, no notes</span>'}</td><td><div style="display:flex;justify-content:flex-end"><button class="btn tiny primary" onclick="openVisitModal(${v.id})">${v.kind==='open'?'Complete &amp; write up':'Add note'}</button></div></td></tr>`).join('') + `</table>`);
+    if(todo.callsOwed.length) html += section('Coaching calls owed', todo.callsOwed.length,
+      `<p class="small" style="margin-bottom:8px">One call per client per month.</p><table style="width:100%"><tr><th>Client</th><th>For</th><th>Last call</th><th></th></tr>` +
+      todo.callsOwed.map(r=>`<tr><td><b>${clientLink(r.client, r.client_id)}</b></td><td>${r.missed?`<span class="pill p-over">${monthLabel(r.missed)} missed</span>`:''}${r.due?` <span class="pill p-due">${monthLabel(r.due)} due</span>`:''}</td><td class="small">${r.last_call?fmt(r.last_call):'<span style="color:var(--muted)">never</span>'}</td>
+        <td><div style="display:flex;justify-content:flex-end"><button class="btn tiny primary" onclick="logCallDlg(${r.client_id},'${esc(r.client).replace(/'/g,"\\'")}','${r.missed||r.due}')">Log call</button></div></td></tr>`).join('') + `</table>`);
+    if(todo.dueSoon.length) html += section('Coming due in the next 2 weeks', todo.dueSoon.length,
+      `<table style="width:100%"><tr><th>Client</th><th>Visit</th><th>Due</th><th>Status</th><th></th></tr>` +
+      todo.dueSoon.map(v=>`<tr><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="mono">${fmt(v.due)}</td><td>${statusOf(v)}</td><td>${rowActions(v)}</td></tr>`).join('') + `</table>`);
   }
-  html += `</div>`;
+
+  // ---- Stores
+  if(tab==='stores'){
+    html += section('Assigned stores', assignedClients.length, assignedClients.length ? `
+      <p class="small" style="margin-bottom:8px">Every client this coach is responsible for, with where each one stands.</p>
+      <table style="width:100%"><tr><th>Client</th><th>Program</th><th>Next visit</th><th>Last visit</th><th>Last call</th><th></th></tr>` +
+      assignedClients.map(c=>`<tr>
+        <td><b>${healthDot(c.id)}${clientLink(c.name, c.id)}</b>${c.status!=='active'?` <span class="pill">${esc(c.status)}</span>`:''}</td>
+        <td class="small">${esc((c.programs||'').split(',').join(' · ')||'—')}</td>
+        <td class="small">${c.next_week ? `wk of ${fmtW(c.next_week)}` : c.next_due ? `<span style="color:${c.next_due<TODAY?'var(--bad)':'inherit'}">due ${fmt(c.next_due)}${c.overdue_n?` · <b>${c.overdue_n} overdue</b>`:''}</span>` : '—'}</td>
+        <td class="small">${c.last_visit ? fmt(c.last_visit) : '<span style="color:var(--muted)">none yet</span>'}</td>
+        <td class="small">${c.last_call ? fmt(c.last_call) : '<span style="color:var(--muted)">never</span>'}</td>
+        <td><div style="display:flex;justify-content:flex-end"><button class="btn tiny" onclick="openClientProfile(${c.id})">Open</button></div></td></tr>`).join('') + `</table>` : `<p>No stores currently assigned.</p>`);
   }
 
-  html += `<div class="panel"><h2>Assigned stores</h2>` +
-    (assignedClients.length ? `<table><tr><th>Client</th><th>Status</th></tr>` +
-      assignedClients.map(c=>`<tr><td>${clientLink(c.name, c.id)}</td>
-        <td>${c.status==='active'?'<span class="pill p-done">active</span>':c.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}</td></tr>`).join('') + `</table>`
-      : `<p class="small">No stores currently assigned.</p>`) + `</div>`;
-
-  if(upcoming.length){
-    html += `<div class="panel"><h2>On the calendar</h2><table><tr><th>Client</th><th>Program</th><th>Due</th><th>Scheduled week</th></tr>` +
-      upcoming.map(v=>`<tr><td>${clientLink(v.client, v.client_id)}</td>
-        <td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.due)}</td><td class="mono">${fmtW(v.cal_week)}</td></tr>`).join('') + `</table></div>`;
+  // ---- Calendar (upcoming, grouped by month)
+  if(tab==='calendar'){
+    const byMonth = {}; upcoming.forEach(v => { const k = (v.cal_week||'').slice(0,7) || 'unscheduled'; (byMonth[k] ||= []).push(v); });
+    const keys = Object.keys(byMonth).sort();
+    html += `<div class="panel cp"><h2 style="display:flex;align-items:center;gap:10px">On the calendar <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${upcoming.length})</span><span style="flex:1"></span><button class="btn" onclick="${boardJump}">Open the calendar grid</button></h2>` +
+      (upcoming.length ? keys.map(k => `<h3 style="margin:14px 0 4px">${k==='unscheduled'?'Not yet placed':monthLabel(k)} <span class="small" style="font-weight:400">(${byMonth[k].length})</span></h3>
+        <table style="width:100%"><tr><th>Week</th><th>Client</th><th>Visit</th><th>Due</th><th>Status</th><th></th></tr>` +
+        byMonth[k].map(v=>`<tr><td class="mono">${v.cal_week?'wk of '+fmtW(v.cal_week):'—'}</td><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="mono small">${fmt(v.due)}</td><td>${statusOf(v)}</td><td>${rowActions(v)}</td></tr>`).join('') + `</table>`).join('')
+      : `<p>Nothing on the calendar. <a onclick="${boardJump}" style="cursor:pointer"><b>Open the calendar</b></a> to place visits.</p>`) + `</div>`;
   }
 
-  html += `<div class="panel"><h2>Visit history</h2>
-    <p class="small" style="margin-bottom:8px">Every visit ${esc(coach.name)} has completed, credited to them permanently regardless of any later reassignment.</p>` +
-    (visitHistory.length ? `<table><tr><th>Client</th><th>Program</th><th>Scheduled On</th></tr>` +
-      visitHistory.map(v=>`<tr><td>${clientLink(v.client, v.client_id)}</td>
-        <td>${esc(v.program||'—')}</td><td class="mono">${fmt(v.scheduled_week)}</td></tr>`).join('') + `</table>`
-      : `<p class="small">No completed visits on record yet.</p>`) + `</div>`;
+  // ---- History (completed, grouped by year)
+  if(tab==='history'){
+    const byYear = {}; visitHistory.forEach(v => { const k = (v.completed_date||v.scheduled_week||'').slice(0,4) || '—'; (byYear[k] ||= []).push(v); });
+    const years = Object.keys(byYear).sort().reverse();
+    html += `<div class="panel cp"><h2>Visit history <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${visitHistory.length})</span></h2>
+      <p class="small" style="margin-bottom:8px">Every visit ${esc(coach.name)} completed, credited permanently regardless of later reassignment. ✓ = written up.</p>` +
+      (visitHistory.length ? years.map(y => { const rows = byYear[y], w = rows.filter(v=>v.has_notes).length;
+        return `<h3 style="margin:14px 0 4px">${y} <span class="small" style="font-weight:400">· ${rows.length} visit${rows.length>1?'s':''} · ${w} written up</span></h3>
+        <table style="width:100%"><tr><th style="width:32px"></th><th>Visited</th><th>Client</th><th>Visit</th><th>Store</th><th></th></tr>` +
+        rows.map(v=>`<tr><td>${v.has_notes?'<span style="display:inline-flex;width:20px;height:20px;border-radius:50%;background:#1e8e5a;color:#fff;align-items:center;justify-content:center;font-size:12px;font-weight:700">✓</span>':'<span title="No notes" style="display:inline-flex;width:20px;height:20px;border-radius:50%;border:2px solid #c23b3b;background:#fbe3e3"></span>'}</td>
+          <td class="mono">${fmt(v.completed_date||v.scheduled_week)}</td><td><b>${clientLink(v.client, v.client_id)}</b></td><td class="small">${esc(v.cycle||'')} ${esc(v.program||'')}</td><td class="small">${esc(v.store||'')}</td>
+          <td><div style="display:flex;justify-content:flex-end"><button class="btn tiny" onclick="openVisitModal(${v.id})">${v.has_notes?'View notes':'Add note'}</button></div></td></tr>`).join('') + `</table>`; }).join('')
+      : `<p>No completed visits on record yet.</p>`) + `</div>`;
+  }
 
-  html += `<div class="panel"><h2>Notes</h2>
-    <p class="small" style="margin-bottom:8px">Notes ${esc(coach.name)} has logged, across all their stores.</p>` +
-    (notes.length ? notes.map(n=>`<div class="duecard">
-      <div class="meta"><b>${fmt(n.note_date)} — ${esc(n.note_type)}</b> · ${clientLink(n.client_name, n.client_id)}${n.source==='keap'?' <span class="pill" style="background:#e2f0f0;color:#2a6a6a">via Keap</span>':''}</div>
-      <div style="margin-top:4px;white-space:pre-wrap">${esc(n.body)}</div>
-    </div>`).join('') : `<p class="small">No notes logged yet.</p>`) + `</div>`;
+  // ---- Notes (filter by type)
+  if(tab==='notes'){
+    const nf = st.cpNoteType || '';
+    const types = [...new Set(notes.map(n=>n.note_type))].sort();
+    const shown = notes.filter(n => !nf || n.note_type===nf);
+    html += `<div class="panel cp"><h2 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">Notes <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${shown.length})</span>
+        <span style="flex:1"></span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${['',...types].map(t=>`<button class="btn tiny ${nf===t?'primary':''}" onclick="st.cpNoteType='${t}';setCpTab('notes')">${t||'All'}</button>`).join('')}</div></h2>
+      <p class="small" style="margin-bottom:8px">Everything ${esc(coach.name)} has written, newest first.</p>` +
+      (shown.length ? shown.map(n=>`<div class="duecard" style="padding:12px 14px">
+        <div class="meta"><b>${fmt(n.note_date)} — ${n.note_type==='Coaching Call'?'🎧 Coaching call':esc(n.note_type)}</b> · ${clientLink(n.client_name, n.client_id)}${n.store?` <span class="pill" style="background:#e9f0fb;color:#1d4f91">🏬 ${esc(n.store)}</span>`:''}${n.source==='keap'?' <span class="pill" style="background:#e2f0f0;color:#2a6a6a">via Keap</span>':''}</div>
+        <div style="margin-top:6px;white-space:pre-wrap;font-size:15px;line-height:1.5">${esc(n.body)}</div>
+      </div>`).join('') : `<p>No notes${nf?` of type "${esc(nf)}"`:''} yet.</p>`) + `</div>`;
+  }
   return html;
 }
 function coachDeactivateDlg(id, name){

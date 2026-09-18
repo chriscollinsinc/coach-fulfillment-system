@@ -1203,42 +1203,61 @@ route('GET', /^\/api\/coaches\/([\w-]+)\/profile$/, ['admin','lead','coach'], (r
   const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
   if(user.role === 'coach' && user.coach_id !== c.id) return err(res, 403, 'You can only view your own profile');
   if(user.role === 'lead' && !canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
-  const assignedClients = db.prepare(`SELECT id, name, status FROM clients WHERE assigned_coach_id=? AND deleted_at IS NULL AND archived_at IS NULL ORDER BY name`).all(c.id);
-  const yr = new Date().getFullYear();
+  const todayIso = new Date().toISOString().slice(0,10);
+  const yr = todayIso.slice(0,4);
+  const login = db.prepare('SELECT email, role, active FROM users WHERE coach_id=? ORDER BY active DESC LIMIT 1').get(c.id) || null;
+  const leadsTeam = teamLedBy(c.id);
+  const teamLead = (db.prepare('SELECT co.name FROM teams t JOIN coaches co ON co.id=t.lead_coach_id WHERE t.name=?').get(c.team) || {}).name || null;
+
+  // Stores: one row per assigned client with the things an admin actually asks about it.
+  const assignedClients = db.prepare(`
+    SELECT cl.id, cl.name, cl.status,
+      (SELECT GROUP_CONCAT(DISTINCT c2.program) FROM contracts c2 WHERE c2.client_id=cl.id AND c2.status='active') AS programs,
+      (SELECT MIN(v.due) FROM visits v WHERE v.client_id=cl.id AND v.completed=0) AS next_due,
+      (SELECT v.cal_week FROM visits v WHERE v.client_id=cl.id AND v.completed=0 AND v.cal_week IS NOT NULL ORDER BY v.cal_week LIMIT 1) AS next_week,
+      (SELECT MAX(COALESCE(v.completed_date, v.scheduled_week)) FROM visits v WHERE v.client_id=cl.id AND v.completed=1) AS last_visit,
+      (SELECT MAX(n.note_date) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call') AS last_call,
+      (SELECT COUNT(*) FROM visits v WHERE v.client_id=cl.id AND v.completed=0 AND v.due<?) AS overdue_n
+    FROM clients cl WHERE cl.assigned_coach_id=? AND cl.deleted_at IS NULL AND cl.archived_at IS NULL ORDER BY cl.name`).all(todayIso, c.id);
+
   const visitHistory = db.prepare(`
-    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.scheduled_week, v.completed_by_email
-    FROM visits v WHERE v.completed_by_coach_id=? ORDER BY v.scheduled_week DESC LIMIT 500`).all(c.id);
+    SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.scheduled_week, v.completed_date, v.store,
+      (COALESCE(v.notes_wins,'')<>'' OR COALESCE(v.notes_issues,'')<>'' OR COALESCE(v.notes_focus,'')<>'' OR COALESCE(v.notes_commitments,'')<>'') AS has_notes
+    FROM visits v WHERE v.completed_by_coach_id=? AND v.completed=1 ORDER BY COALESCE(v.completed_date, v.scheduled_week) DESC LIMIT 500`).all(c.id);
   const upcoming = db.prepare(`
     SELECT v.id, v.client, v.client_id, v.program, v.cycle, v.due, v.cal_week
-    FROM visits v WHERE v.cal_coach=? AND v.completed=0 ORDER BY v.due`).all(c.id);
-  const completedThisYear = visitHistory.filter(v => (v.scheduled_week||'').slice(0,4) === String(yr)).length;
+    FROM visits v WHERE v.cal_coach=? AND v.completed=0 ORDER BY v.cal_week`).all(c.id);
+  const completedThisYear = visitHistory.filter(v => (v.completed_date || v.scheduled_week || '').slice(0,4) === yr).length;
   const notes = db.prepare(`
-    SELECT n.id, n.client_id, cl.name AS client_name, n.note_date, n.note_type, n.body, n.author_name, n.author_email, n.source
+    SELECT n.id, n.client_id, cl.name AS client_name, n.note_date, n.note_type, n.body, n.store, n.author_name, n.author_email, n.source, n.visit_id
     FROM client_notes n JOIN clients cl ON cl.id = n.client_id
     WHERE n.author_email IN (SELECT email FROM users WHERE coach_id=?)
-    ORDER BY n.note_date DESC LIMIT 200`).all(c.id);
-  // Quick-glance to-do: everything currently in this coach's court, worked out fresh
-  // on every load rather than stored, so it's always accurate.
-  const todayIso = new Date().toISOString().slice(0,10);
-  const in14 = new Date(Date.now() + 14*24*60*60*1000).toISOString().slice(0,10);
+    ORDER BY n.note_date DESC, n.id DESC LIMIT 300`).all(c.id);
+
+  // Needs attention: everything in this coach's court, worked out fresh. Same definitions
+  // as Today so the admin and the coach are looking at the same list.
+  const in14 = new Date(Date.now() + 14*864e5).toISOString().slice(0,10);
   const openWork = db.prepare(`
-    SELECT v.id, v.client, v.client_id, v.due, v.program
+    SELECT v.id, v.client, v.client_id, v.due, v.program, v.cycle, v.cal_week, v.cal_coach
     FROM visits v LEFT JOIN clients cl ON cl.id = v.client_id
     WHERE v.completed=0 AND (v.cal_coach=? OR cl.assigned_coach_id=?)
     ORDER BY v.due`).all(c.id, c.id);
   const overdue = openWork.filter(v => v.due && v.due < todayIso);
   const dueSoon = openWork.filter(v => v.due && v.due >= todayIso && v.due <= in14);
+  const weekPassed = openWork.filter(v => v.cal_week && new Date(v.cal_week+'T12:00:00').getTime() + 6*864e5 < Date.parse(todayIso+'T12:00:00'));
   const missingNotes = db.prepare(`
-    SELECT v.id, v.client, v.client_id, v.scheduled_week
+    SELECT v.id, v.client, v.client_id, v.cycle, v.program, COALESCE(v.completed_date, v.scheduled_week) AS visited
     FROM visits v
-    WHERE v.completed_by_coach_id=? AND COALESCE(v.notes_wins,'')='' AND COALESCE(v.notes_issues,'')='' AND COALESCE(v.notes_focus,'')='' AND COALESCE(v.notes_commitments,'')=''
-    ORDER BY v.scheduled_week DESC LIMIT 50`).all(c.id);
+    WHERE v.completed_by_coach_id=? AND v.completed=1 AND COALESCE(v.notes_wins,'')='' AND COALESCE(v.notes_issues,'')='' AND COALESCE(v.notes_focus,'')='' AND COALESCE(v.notes_commitments,'')=''
+    ORDER BY visited DESC LIMIT 50`).all(c.id);
+  const callsOwedNow = callsOwed(todayIso, { coachId: c.id });
   send(res, 200, {
-    coach: c,
+    coach: c, login, leadsTeam, teamLead,
     assignedClients,
-    stats: { assignedStores: assignedClients.length, completedThisYear, allTimeCompleted: visitHistory.length, upcomingCount: upcoming.length },
+    stats: { assignedStores: assignedClients.length, completedThisYear, allTimeCompleted: visitHistory.length, upcomingCount: upcoming.length,
+      attention: overdue.length + missingNotes.length + weekPassed.length + callsOwedNow.length },
     visitHistory, upcoming, notes,
-    todo: { overdue, dueSoon, missingNotes },
+    todo: { overdue, dueSoon, weekPassed, missingNotes, callsOwed: callsOwedNow },
   });
 });
 /* ----- Video guides (Scribe embeds on the FAQ page) -----
