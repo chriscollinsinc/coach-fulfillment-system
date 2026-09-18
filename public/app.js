@@ -1078,7 +1078,7 @@ function callsOwedPanel(t){
   if(!rows.length) return '';
   const missedN = rows.filter(r=>r.missed).length;
   return `<div class="panel" id="tdCalls"><h2>Coaching calls owed <span class="small" style="font-family:inherit;font-weight:400;letter-spacing:0;text-transform:none">(${rows.length})</span></h2>
-    <p class="small" style="margin-bottom:8px">One call per client per month, visit or no visit. ${missedN ? `<b style="color:var(--bad)">${missedN}</b> month${missedN>1?'s':''} already closed without one.` : 'Nothing missed yet — these are this month\'s.'} Logging here counts toward that month's coverage strip on the client's page.</p>
+    <p class="small" style="margin-bottom:8px">One touchpoint per client per month — a logged call, or a completed visit with notes. ${missedN ? `<b style="color:var(--bad)">${missedN}</b> month${missedN>1?'s':''} already closed without one.` : 'Nothing missed yet — these are this month\'s.'} Logging here counts toward that month's coverage strip on the client's page.</p>
     <div style="overflow-x:auto"><table style="width:100%"><tr><th>Client</th>${showCoach?'<th>Coach</th>':''}<th>For</th><th>Last call</th><th style="text-align:right"></th></tr>
     ${todayRows(rows, 12, callRow)}</table></div>
     ${(t.callsUnowned && t.callsUnowned.length) ? `<p class="small" style="margin-top:8px;color:var(--warn)">⚠ ${t.callsUnowned.length} active client${t.callsUnowned.length>1?'s':''} owe a call but have no assigned coach — nobody is being prompted for them. ${t.callsUnowned.slice(0,6).map(r=>clientLink(r.client, r.client_id)).join(', ')}${t.callsUnowned.length>6?' …':''}</p>` : ''}
@@ -3456,25 +3456,35 @@ function coachingCallsPanel(client, notes){
   const inYear = calls.filter(n => (n.note_date||'').slice(0,4) === String(year));
   const byMonth = Array.from({length:12}, () => []);
   inYear.forEach(n => { const m = +(n.note_date||'').slice(5,7) - 1; if(m >= 0 && m < 12) byMonth[m].push(n); });
+  // A completed visit with notes in a month counts as that month's touchpoint too.
+  const visitsByMonth = Array.from({length:12}, () => 0);
+  for(const v of ((st.clientProfile && st.clientProfile.visits) || [])){
+    if(!v.completed) continue;
+    if(!((v.notes_wins||'').trim() || (v.notes_issues||'').trim() || (v.notes_focus||'').trim() || (v.notes_commitments||'').trim())) continue;
+    const d = v.completed_date || v.scheduled_week || v.cal_week || v.due || '';
+    if(d.slice(0,4) !== String(year)) continue;
+    const m = +d.slice(5,7) - 1; if(m >= 0 && m < 12) visitsByMonth[m]++;
+  }
+  const isCovered = m => byMonth[m].length > 0 || visitsByMonth[m] > 0;
   const curY = +TODAY.slice(0,4), curM = +TODAY.slice(5,7) - 1;
   const years = [...new Set(calls.map(n => +(n.note_date||'').slice(0,4)).filter(Boolean).concat([curY]))].sort((a,b)=>b-a);
 
   // Coverage: months up to and including the current one that have at least one call.
   const monthsElapsed = year < curY ? 12 : year > curY ? 0 : curM + 1;
-  const covered = byMonth.slice(0, monthsElapsed).filter(m => m.length).length;
-  const missed = byMonth.slice(0, Math.max(0, year < curY ? 12 : curM)).filter(m => !m.length).length;
+  const covered = byMonth.slice(0, monthsElapsed).filter((_, m) => isCovered(m)).length;
+  const missed = byMonth.slice(0, Math.max(0, year < curY ? 12 : curM)).filter((_, m) => !isCovered(m)).length;
 
   const cell = (m) => {
-    const has = byMonth[m].length;
+    const has = byMonth[m].length, vis = visitsByMonth[m];
     const isCur = year === curY && m === curM;
     const isPast = year < curY || (year === curY && m < curM);
     const sel = st.callsMonth === m;
     let bg, fg, border, label;
-    if(has){ bg = '#e2f4ea'; fg = '#186b45'; border = '#1e8e5a'; label = has > 1 ? `${has} calls` : 'called'; }
+    if(has || vis){ bg = '#e2f4ea'; fg = '#186b45'; border = '#1e8e5a'; label = has && vis ? 'call + visit' : has ? (has > 1 ? `${has} calls` : 'called') : 'visited'; }
     else if(isCur){ bg = '#fdeecd'; fg = '#8a5b06'; border = '#c77d0a'; label = 'due'; }
     else if(isPast){ bg = '#fbe3e3'; fg = '#a12626'; border = '#c23b3b'; label = 'missed'; }
     else { bg = '#f3f2f1'; fg = '#9a9aa2'; border = 'transparent'; label = ''; }
-    return `<button onclick="setCallsMonth(${m})" title="${MONTHS_SHORT[m]} ${year}${has ? ` — ${has} call${has>1?'s':''}` : ''}" style="flex:1;min-width:52px;padding:8px 4px;border-radius:8px;border:2px solid ${sel ? 'var(--ink)' : border};background:${bg};color:${fg};cursor:pointer;text-align:center;line-height:1.2">
+    return `<button onclick="setCallsMonth(${m})" title="${MONTHS_SHORT[m]} ${year}${has ? ` — ${has} call${has>1?'s':''}` : ''}${vis ? ` — ${vis} visit${vis>1?'s':''} with notes` : ''}" style="flex:1;min-width:52px;padding:8px 4px;border-radius:8px;border:2px solid ${sel ? 'var(--ink)' : border};background:${bg};color:${fg};cursor:pointer;text-align:center;line-height:1.2">
       <div style="font-family:var(--head);font-size:11px;letter-spacing:.8px;text-transform:uppercase;font-weight:600">${MONTHS_SHORT[m]}</div>
       <div style="font-size:10.5px;margin-top:2px;min-height:12px">${label}</div>
     </button>`;
@@ -3491,7 +3501,7 @@ function coachingCallsPanel(client, notes){
   const storeChips = stores.length > 1 ? `<div class="dlgrow" style="margin-bottom:10px;flex-wrap:wrap">${storeChip(null, !st.callsStoreFilter)}${stores.map(nm=>storeChip(nm, st.callsStoreFilter===nm)).join('')}</div>` : '';
 
   return `<div class="panel" id="coachingCallsPanel"><h2>🎧 Coaching Calls</h2>
-    <p class="small" style="margin-bottom:10px">One call per month, every month — including months with a visit. Log the call here; the strip shows which months of ${year} are covered.</p>
+    <p class="small" style="margin-bottom:10px">One touchpoint per month, every month — a logged Coaching Call, or a completed visit with notes. Log calls here; the strip shows which months of ${year} are covered.</p>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
       <button class="btn tiny" onclick="setCallsYear(${year-1})">‹ ${year-1}</button>
       <span style="font-family:var(--head);font-size:16px;letter-spacing:1px">${year}</span>
@@ -3865,10 +3875,10 @@ function renderMonthEnd(){
     `<tr style="border-top:2px solid var(--ink)"><td></td><td><b>Total</b></td><td class="num">${new Set(rev.flatMap(t=>t.rows.map(x=>x.client_id))).size}</td><td class="num">${rev.reduce((s,t)=>s+t.rows.length,0)}</td><td class="num"><b>${fmtMoney(revTotal)}</b></td><td class="num">100%</td><td></td></tr></table></div>`;
 
   h += `<div class="panel">${H('Coaching calls · '+monthLabel(p), `${cd} of ${calls.length} logged`)}
-    <p class="small" style="margin-bottom:8px">One call per client with an active contract per month. ✓ = a Coaching Call note dated in ${monthLabel(p)} exists on the client. Click a column to sort.</p>
+    <p class="small" style="margin-bottom:8px">One touchpoint per client with an active contract per month. ✓ = a Coaching Call note dated in ${monthLabel(p)}, or a completed visit with notes in ${monthLabel(p)}. Click a column to sort.</p>
     <div style="max-height:420px;overflow:auto"><table style="width:100%"><tr>${th('calls','doneN','')}${th('calls','client','Client')}${th('calls','team','Team')}${th('calls','coach','Coach')}${th('calls','last','Logged')}<th></th></tr>` +
     calls.map(c=>`<tr><td>${tick(c.done)}</td><td>${clientLink(c.client, c.client_id)}</td><td class="small">${esc(c.team||'—')}</td><td class="small">${esc(c.coach||'—')}</td>
-      <td class="small">${c.done ? `${c.calls>1?c.calls+' calls · ':''}last ${fmt(c.last)}` : '<span style="color:var(--bad)">none</span>'}</td>
+      <td class="small">${c.done ? `${c.covered_by==='visit' ? '<span class="pill" style="background:#e2f4ea;color:#186b45">via visit</span> ' : c.covered_by==='both' ? 'call + visit · ' : (c.calls>1?c.calls+' calls · ':'')}last ${fmt(c.last)}` : '<span style="color:var(--bad)">none</span>'}</td>
       <td>${c.done?'':`<button class="btn tiny" onclick="logCallDlg(${c.client_id},'${esc(c.client).replace(/'/g,"\\'")}','${p}')">Log call</button>`}</td></tr>`).join('') + `</table></div></div>`;
 
   const stateLabel = { done:'', no_notes:'<span class="pill p-due">Completed, no notes</span>', not_marked_done:'<span class="pill p-over">Not marked done</span>',

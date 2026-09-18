@@ -868,6 +868,12 @@ route('PUT', /^\/api\/settings\/notes-tracked-from$/, ['admin'], (req, res, m, b
  * panel isn't 20 red rows every 1st. Last month counts as missed once it has closed.
  * Nothing is owed for a month that ended before the client started billing. */
 const CALLS_DUE_FROM_DAY = 10;
+/* A month's coaching-call obligation is satisfied by EITHER a Coaching Call note dated in
+   the month OR a completed visit with notes in the month (Mike, 2026-09-18: a coach who was
+   in the building and wrote it up has spoken to the client). Same rule on Today, the coach
+   profile, month-end and the client-profile strip; this is the one place it is written. */
+const VISIT_NOTED_IN_MONTH_SQL = `(SELECT COUNT(*) FROM visits v WHERE v.client_id=cl.id AND v.completed=1
+      AND NOT (${NOTES_EMPTY_SQL}) AND substr(${VISIT_WHEN_SQL},1,7)=?)`;
 /* Nobody is retroactively guilty. Coaching calls were only logged in the app from the
  * day this panel shipped, so counting every prior month as "missed" would open the
  * dashboard with a red row for essentially every client — noise that trains people to
@@ -892,10 +898,12 @@ function callsOwed(today, { coachId = null, team = null, unassigned = false } = 
     SELECT cl.id AS client_id, cl.name AS client, cl.billing_start,
       (SELECT MAX(n.note_date) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call') AS last_call,
       (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_this_month,
-      (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_last_month
+      (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_last_month,
+      ${VISIT_NOTED_IN_MONTH_SQL} AS visits_this_month,
+      ${VISIT_NOTED_IN_MONTH_SQL} AS visits_last_month
     FROM clients cl
     WHERE cl.deleted_at IS NULL AND cl.archived_at IS NULL AND cl.status='active'
-      AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active')`).all(thisM, lastM);
+      AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active')`).all(thisM, lastM, thisM, lastM);
   const coachName = (() => { const cache = {}; return id => { if(!id) return null; if(!(id in cache)){ const c = db.prepare('SELECT name FROM coaches WHERE id=?').get(id); cache[id] = c ? c.name : null; } return cache[id]; }; })();
   const wanted = owner => unassigned ? !owner.coach_id
     : coachId ? owner.coach_id === coachId
@@ -905,8 +913,8 @@ function callsOwed(today, { coachId = null, team = null, unassigned = false } = 
   for(const r of rows){
     const started = (r.billing_start || '').slice(0,7);
     const owed = [];
-    if(!r.calls_last_month && lastM >= floor && (!started || started <= lastM)) owed.push({ month: lastM, kind: 'missed' });
-    if(dueThisMonth && !r.calls_this_month && (!started || started <= thisM)) owed.push({ month: thisM, kind: 'due' });
+    if(!r.calls_last_month && !r.visits_last_month && lastM >= floor && (!started || started <= lastM)) owed.push({ month: lastM, kind: 'missed' });
+    if(dueThisMonth && !r.calls_this_month && !r.visits_this_month && (!started || started <= thisM)) owed.push({ month: thisM, kind: 'due' });
     for(const o of owed){
       const owner = clientOwnerForMonth(r.client_id, o.month);
       if(!wanted(owner)) continue;
@@ -971,13 +979,17 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
                  AND (c.status='active' OR (c.status='cancelled' AND substr(COALESCE(c.cancelled_at,''),1,10) > ?)))
     ORDER BY cl.name`).all(end, end, end);
   const callQ = db.prepare(`SELECT COUNT(*) n, MAX(note_date) last FROM client_notes WHERE client_id=? AND note_type='Coaching Call' AND note_date BETWEEN ? AND ?`);
+  const visitQ = db.prepare(`SELECT COUNT(*) n, MAX(COALESCE(v.completed_date, v.scheduled_week, v.cal_week, v.due)) last FROM visits v
+    WHERE v.client_id=? AND v.completed=1 AND NOT (${NOTES_EMPTY_SQL}) AND COALESCE(v.completed_date, v.scheduled_week, v.cal_week, v.due) BETWEEN ? AND ?`);
   const calls = [];
   for(const cl of clients){
     if((cl.billing_start||'').slice(0,7) > period) continue; // not billing yet that month
     const owner = clientOwnerForMonth(cl.id, period);
     if(teamFilter && owner.team !== teamFilter) continue;
-    const r = callQ.get(cl.id, start, end);
-    calls.push({ client_id: cl.id, client: cl.name, team: owner.team || null, coach_id: owner.coach_id, coach: coachName(owner.coach_id), done: r.n > 0, calls: r.n, last: r.last || null });
+    const r = callQ.get(cl.id, start, end), vq = visitQ.get(cl.id, start, end);
+    const done = r.n > 0 || vq.n > 0;
+    calls.push({ client_id: cl.id, client: cl.name, team: owner.team || null, coach_id: owner.coach_id, coach: coachName(owner.coach_id), done, calls: r.n, visits: vq.n,
+      covered_by: r.n && vq.n ? 'both' : r.n ? 'call' : vq.n ? 'visit' : null, last: [r.last, vq.last].filter(Boolean).sort().pop() || null });
   }
   calls.sort((a,b) => (a.done - b.done) || (a.team||'').localeCompare(b.team||'') || a.client.localeCompare(b.client));
 
