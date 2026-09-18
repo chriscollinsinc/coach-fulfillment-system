@@ -1221,10 +1221,6 @@ function board(){
   // quarter starting at the month shown, so a coach can see a whole booking cycle
   // without paging. Columns are the same weeks either way — just more of them.
   const spanMonths = Array.from({length:span}, (_,i) => { const k = m+i; return [y + Math.floor(k/12), ((k%12)+12)%12]; });
-  const weeks = spanMonths.flatMap(([yy,mm]) => mondaysInMonth(yy,mm));
-  // First column of each month after the first — gets a divider so a quarter reads as
-  // three blocks rather than one undifferentiated run of 13 weeks.
-  const monthStarts = new Set(span>1 ? spanMonths.slice(1).map(([yy,mm]) => mondaysInMonth(yy,mm)[0]).filter(Boolean) : []);
   const lastMon = spanMonths[span-1];
   const rangeStart = `${y}-${String(m+1).padStart(2,'0')}-01`;
   const rangeEnd = (()=>{ const d = new Date(Date.UTC(lastMon[0], lastMon[1]+1, 0, 12)); return d.toISOString().slice(0,10); })();
@@ -1291,7 +1287,7 @@ function board(){
     </div>
     <div class="seg" style="margin-right:8px">
       <button class="${span===1?'on':''}" ${span===1?'':'onclick="setBoardSpan(1)"'} title="One month at a time">Month</button>
-      <button class="${span===3?'on':''}" ${span===3?'':'onclick="setBoardSpan(3)"'} title="Three months side by side">Quarter</button>
+      <button class="${span===3?'on':''}" ${span===3?'':'onclick="setBoardSpan(3)"'} title="Three months at once, one grid each">Quarter</button>
     </div>
     <div class="monthnav">
       <button class="btn" onclick="bMonth(-${span})">‹</button>
@@ -1299,17 +1295,18 @@ function board(){
       <button class="btn" onclick="bMonth(${span})">›</button>
       <button class="btn tiny" onclick="st.boardY=${+TODAY.slice(0,4)};st.boardM=${+TODAY.slice(5,7)-1};paintBoard()">Today</button>
     </div></div>
-  <div class="boardlayout"><div class="panel" style="margin:0">
-  <table class="bgrid${span===3?' q':''}">`;
-  if(span>1){
-    html+=`<tr class="mband"><th style="text-align:left"></th>`;
-    spanMonths.forEach(([yy,mm],i)=>{ const n=mondaysInMonth(yy,mm).length;
-      html+=`<th colspan="${n}" class="${i%2?'alt':''}${i?' mstart':''}">${MONTHS[mm]} ${yy}</th>`; });
-    html+=`</tr>`;
-  }
-  html+=`<tr><th style="text-align:left">Coach</th>`;
+  <div class="boardlayout"><div class="panel" style="margin:0">`;
+  /* A quarter is drawn as three month grids stacked, not one 13-week grid squeezed
+     sideways. Same table, same density, same cards as month view — just three of them,
+     so nothing truncates and there is no second visual language to learn. The wide
+     version fit the weeks in but cut every client name down to "Bill Luke …", which is
+     the one thing you scan a calendar for. */
+  for(const [yy,mm] of spanMonths){
+  const weeks = mondaysInMonth(yy,mm);
+  if(span>1) html+=`<div class="mhead">${MONTHS[mm]} ${yy}</div>`;
+  html+=`<table class="bgrid${span>1?' q':''}"><tr><th style="text-align:left">Coach</th>`;
   weeks.forEach(w=>{ const now=TODAY>=w&&dayDiff(TODAY,w)<7;
-    html+=`<th class="${now?'wk-now':''}${monthStarts.has(w)?' mstart':''}">${span===1?'wk of ':''}${fmtW(w)}${now?' ●':''}</th>`; });
+    html+=`<th class="${now?'wk-now':''}">wk of ${fmtW(w)}${now?' ●':''}</th>`; });
   html+=`</tr>`;
   for(const c of members){
     html+=`<tr><td class="cname">${esc(c.name)}${global?`<br><span class="small" style="color:var(--muted)">${esc(c.team)}</span>`:''}</td>`;
@@ -1331,7 +1328,7 @@ function board(){
         else if(canEditWeeks() && coachCanManage && !past) click=` onclick="cellDlg('${c.id}','${w}')"`;
       } else if(o.type==='visit'){
         const v=o.v; cls+= (v.completed?' s-done':' s-visit') + (calHit(v)?' cal-hl':'');
-        inner=`<b>${v.completed?'':healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
+        inner=`<b title="${esc(v.client)} — ${esc(v.cycle)} ${esc(v.program)}">${v.completed?'':healthDot(v.client_id)}${clientLink(v.client, v.client_id)}</b><small>${esc(v.cycle)} ${esc(v.program)}${v.completed?' · done':''}</small>${v.store?`<small class="storetag">🏬 ${esc(v.store)}</small>`:''}`;
         // Viewing a visit's detail box is read-only by itself — Complete/Move/Unschedule
         // inside it are individually gated (see the detail box below), so anyone who can
         // see the board can click through to look, but only canEdit() (or the owning
@@ -1340,16 +1337,23 @@ function board(){
       } else {
         const kindCls = o.kind==='mag'?'s-mag' : (o.kind==='visit'||o.kind==='visit_legacy')?'s-legacy' : o.kind==='launch_open'?'s-launch_open' : o.kind==='soft_pencil'?'s-soft':'s-block';
         cls+=' '+kindCls+(past?' s-past':'');
-        inner=`<b>${esc(o.label||BLOCKKINDS[o.kind]||o.kind)}</b><small>${o.kind==='visit'||o.kind==='visit_legacy'?'from sheet':esc(BLOCKKINDS[o.kind]||'')}</small>`;
+        const bLabel = o.label || BLOCKKINDS[o.kind] || o.kind;
+        const bSub = o.kind==='visit'||o.kind==='visit_legacy' ? 'from sheet' : (BLOCKKINDS[o.kind] || '');
+        // The subtitle repeated the label on every Home/Off week — the same word twice in
+        // a cell with no room for either. Only show it when it says something new.
+        inner=`<b title="${esc(bLabel + (bSub && bSub !== bLabel ? ' — ' + bSub : ''))}">${esc(bLabel)}</b>`
+          + (bSub && bSub.toLowerCase() !== String(bLabel).toLowerCase() ? `<small>${esc(bSub)}</small>` : '');
         // Coaches can only manage their own weeks
         const coachCanManage = D.user.role === 'coach' ? c.id === D.user.coach_id : true;
         if(canEditWeeks() && coachCanManage) click=` onclick="cellDlg('${c.id}','${w}')"`;
       }
-      html+=`<td class="${monthStarts.has(w)?'mstart':''}"><div class="${cls}"${click}>${inner}</div></td>`;
+      html+=`<td><div class="${cls}"${click}>${inner}</div></td>`;
     }
     html+=`</tr>`;
   }
-  html+=`</table>
+  html+=`</table>`;
+  } // end per-month grid
+  html+=`
   <div class="legend"><span><i style="background:var(--visit)"></i>Visit</span><span><i style="background:var(--done)"></i>Completed</span>
     <span><i style="background:var(--open);border:1px dashed var(--openb)"></i>Open</span><span><i style="background:var(--launch)"></i>Launch slot</span>
     <span><i style="background:#e2f0f0"></i>Mills</span><span><i style="background:var(--offc)"></i>Blocked (home/off/etc.)</span></div>
