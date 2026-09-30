@@ -2723,8 +2723,8 @@ async function programChangePreview(contractId){
     if(p.relabel.length) h += `<h3 style="margin:10px 0 4px">Kept on the calendar</h3><table><tr><th>Week of</th><th>Becomes</th><th></th></tr>${p.relabel.map(r=>row(fmtW(r.cal_week), r.untouched ? `${esc(r.from)} (unchanged — ${esc(p.to.program)} has no cycle)` : `<b>${esc(r.to)} ${esc(p.to.program)}</b> · due ${fmt(r.due)}`, `was ${esc(r.from)}${r.cal_coach?' · '+esc(coach(r.cal_coach)?.name||''):''}`)).join('')}</table>`;
     if(p.remove.length) h += `<h3 style="margin:10px 0 4px">Removed (never scheduled)</h3><table><tr><th>Due</th><th>Cycle</th><th></th></tr>${p.remove.map(r=>row(fmt(r.due), esc(r.cycle), '')).join('')}</table>`;
     if(p.create.length) h += `<h3 style="margin:10px 0 4px">New cycle</h3><table><tr><th>Due</th><th>Cycle</th><th></th></tr>${p.create.map(r=>row(fmt(r.due), `${esc(r.cycle)} ${esc(p.to.program)}`, '')).join('')}</table>`;
-    const same = p.from.program === p.to.program && +p.from.visits === +p.to.visits;
-    h += `<div class="dlgrow" style="margin-top:12px">${same ? '<span class="small">That is already the contract\'s program — pick a different one.</span>' : `<button class="btn primary" onclick="programChangeApply(${contractId})">Apply change</button>`}</div>`;
+    const noop = !p.remove.length && !p.create.length && p.relabel.every(r => r.untouched || r.to === r.from);
+    h += `<div class="dlgrow" style="margin-top:12px">${noop ? '<span class="small">Nothing would change for that program, visit count and effective date — pick different values.</span>' : `<button class="btn primary" onclick="programChangeApply(${contractId})">Apply change</button>`}</div>`;
     out.innerHTML = h;
   }catch(e){ out.innerHTML = `<p class="small" style="color:var(--bad)">${esc(e.message||'Preview failed')}</p>`; }
 }

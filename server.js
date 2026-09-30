@@ -4540,8 +4540,9 @@ route('POST', /^\/api\/contracts\/(\d+)\/program-change$/, ['admin'], (req, res,
   const c = contractForChange(m[1]); if(!c) return err(res, 404, 'contract not found');
   if(c.status !== 'active') return err(res, 400, 'Contract is not active');
   const p = parseChangeBody(body || {}); if(p.error) return err(res, 400, p.error);
-  if(p.program === c.program && p.visits === +c.visits) return err(res, 400, 'That is already the contract\'s program');
   const plan = planProgramChange(c, p.program, p.visits, p.effective);
+  const planIsNoop = plan.remove.length === 0 && plan.create.length === 0 && plan.relabel.every(r => r.untouched || r.to === r.from);
+  if(planIsNoop) return err(res, 400, 'Nothing would change for that program, visit count and effective date — pick different values');
   const team = (db.prepare('SELECT team FROM visits WHERE contract_id=? AND team IS NOT NULL AND team<>\'\' ORDER BY id DESC LIMIT 1').get(c.id) || {}).team || null;
   db.exec('BEGIN');
   try{
