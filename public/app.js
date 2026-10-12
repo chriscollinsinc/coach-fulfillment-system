@@ -670,7 +670,7 @@ function render(){
   if(r!=='coach') views.availability='Availability'; // sales-capacity tool — not a coach's concern
   if(r==='admin') views.admin='Admin';
   views.faq='FAQ';
-  const CAL_VIEWS = ['board','global','formercoaches','mysched'];
+  const CAL_VIEWS = ['board','global','allteams','formercoaches','mysched'];
   if(!views[st.view] && !CAL_VIEWS.includes(st.view) && st.view!=='clientprofile' && st.view!=='coachprofile' && !(st.view==='pending'&&hasPending)){
     // First landing: leads live on the Schedule Board day-to-day, not the capacity dashboard
     st.view = r==='lead' ? 'board' : Object.keys(views)[0];
@@ -710,6 +710,7 @@ function render(){
   if(st.view==='dashboard'){ m.innerHTML=dashboard(); loadToday(); }
   if(st.view==='board') m.innerHTML=board();
   if(st.view==='global') m.innerHTML=board();
+  if(st.view==='allteams') m.innerHTML=board();
   if(st.view==='formercoaches') m.innerHTML=board();
   if(st.view==='inventory') m.innerHTML=inventory();
   if(st.view==='pending'){ m.innerHTML=pendingView(); loadPending(); }
@@ -1214,7 +1215,9 @@ const healthDot = cid => {
 };
 /* ---------- schedule board ---------- */
 function board(){
-  const global = st.view==='global';
+  // 'allteams' is the coach-facing read-only view of every team; it draws like 'global'.
+  const allTeamsView = st.view==='allteams';
+  const global = st.view==='global' || allTeamsView;
   const t=st.boardTeam, y=st.boardY, m=st.boardM;
   const span = st.boardSpan===3 ? 3 : 1;
   // Months on screen, left to right. One month is the old behaviour; three gives the
@@ -1229,7 +1232,14 @@ function board(){
   // For coaches, only show their own row in board view, but show all team coaches in global view
   let members;
   if(D.user.role === 'coach'){
-    if(global){
+    if(allTeamsView){
+      // All teams: every active coach on every team, grouped by team (own team first).
+      // Read-only for other people's rows — coachCanManage / canPlaceHere below already
+      // limit a coach to their own row, and the server enforces the same.
+      const mine = D.user.team;
+      members = D.coaches.filter(c=>c.active).slice().sort((a,b)=>
+        ((a.team===mine?0:1)-(b.team===mine?0:1)) || (a.team||'').localeCompare(b.team||'') || a.name.localeCompare(b.name));
+    } else if(global){
       // Global view: show all coaches on this coach's team
       members = D.coaches.filter(c=>c.active && c.team === D.user.team).sort((a,b)=>a.name.localeCompare(b.name));
     } else {
@@ -1308,7 +1318,14 @@ function board(){
   weeks.forEach(w=>{ const now=TODAY>=w&&dayDiff(TODAY,w)<7;
     html+=`<th class="${now?'wk-now':''}">wk of ${fmtW(w)}${now?' ●':''}</th>`; });
   html+=`</tr>`;
+  // When several teams share one grid, a header row per team keeps it scannable.
+  const multiTeam = global && new Set(members.map(c=>c.team)).size > 1;
+  let lastTeam = null;
   for(const c of members){
+    if(multiTeam && c.team !== lastTeam){
+      lastTeam = c.team;
+      html+=`<tr class="teamrow"><td colspan="${weeks.length+1}" style="padding:10px 6px 4px;font-family:var(--head);letter-spacing:1px;text-transform:uppercase;font-size:13px;color:var(--muted);border-bottom:1px solid var(--line,#ddd)">${esc(c.team||'No team')}${c.team===D.user.team?' · your team':''}</td></tr>`;
+    }
     html+=`<tr><td class="cname">${esc(c.name)}${global?`<br><span class="small" style="color:var(--muted)">${esc(c.team)}</span>`:''}</td>`;
     for(const w of weeks){
       const o=occ[c.id+'|'+w]; const past=w<mondayOf(new Date());
@@ -1439,7 +1456,7 @@ function calSearchJump(id){
   const v=D.visits.find(x=>x.id===id); if(!v) return;
   const anchor = v.cal_week || v.due;
   if(anchor){ st.boardY=+anchor.slice(0,4); st.boardM=+anchor.slice(5,7)-1; }
-  if(st.view!=='global'){ st.view='board'; if(v.team) st.boardTeam=v.team; }
+  if(st.view!=='global' && st.view!=='allteams'){ st.view='board'; if(v.team) st.boardTeam=v.team; }
   st.detail = (v.cal_week && v.cal_coach) ? v.id : null;
   st.placing=null; render();
 }
@@ -1455,6 +1472,7 @@ function calendarSwitcher(){
   if(single){
     h += b('My calendar', v==='board', go('board'), 'Just your row, week by week');
     h += b(`Team ${esc(teams[0])}`, v==='global', go('global'), `Everyone on team ${teams[0]}`);
+    h += b('All teams', v==='allteams', go('allteams'), 'Every team and coach — view only');
   } else {
     if(teams.length > 1) h += `<span class="segl">Team</span>`;
     for(const t of teams) h += b(esc(t), v==='board' && st.boardTeam===t, go('board', `st.boardTeam='${t}';`), `Team ${t}'s calendar`);
@@ -1471,7 +1489,7 @@ function calendarSwitcher(){
  * chrome as a page transition and re-surface their "Save login?" prompt; paging months
  * a few times is enough to get it popping up over and over. Nothing outside #main
  * depends on which month is showing, so nothing outside #main gets rebuilt. */
-const CAL_MAIN_VIEWS = ['board','global','formercoaches','mysched'];
+const CAL_MAIN_VIEWS = ['board','global','allteams','formercoaches','mysched'];
 function paintBoard(){
   const m = $('#main');
   if(!m || !CAL_MAIN_VIEWS.includes(st.view)){ render(); return; }
