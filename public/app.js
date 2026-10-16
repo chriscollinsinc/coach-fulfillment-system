@@ -380,46 +380,6 @@ function toast(msg, undo){
 async function undoAction(){ if(window._undo){ const f=window._undo; window._undo=null; $('#toast').classList.remove('show'); await f(); await refresh(); toast('Undone'); } }
 function openDlg(html){ const d=$('#dlg'); d.innerHTML=html; d.showModal(); }
 function closeDlg(){ $('#dlg').close(); }
-/* Coach offboarding workflow — handles the modal for future visit disposition */
-async function showCoachOffboardingModal(coach, futureVisits){
-  const visitList = futureVisits.map(v=>`<tr><td>${esc(v.client)}</td><td>${esc(v.cycle)} ${esc(v.program)}</td><td class="mono">${fmt(v.due)}</td></tr>`).join('');
-  openDlg(`<h3>Offboard ${esc(coach.name)}?</h3>
-    <p class="small" style="margin-bottom:10px">This coach has ${futureVisits.length} future unscheduled visit(s). Choose what to do with them:</p>
-    <table style="margin-bottom:12px"><tr><th>Client</th><th>Visit</th><th>Due</th></tr>${visitList}</table>
-    <div style="margin-bottom:12px">
-      <label><input type="radio" name="offboardDisposition" value="delete" checked> Delete these visits — they won't be scheduled.</label>
-      <label style="margin-top:8px"><input type="radio" name="offboardDisposition" value="transfer"> Leave them unscheduled — mark as orphaned so someone else can pick them up later.</label>
-      <label style="margin-top:8px"><input type="radio" name="offboardDisposition" value="orphan"> Leave them exactly as-is — just remove the coach assignment.</label>
-    </div>
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary danger" onclick="confirmCoachOffboard('${coach.id}')">Confirm offboarding</button></div>`);
-}
-async function confirmCoachOffboard(coachId){
-  const disposition = document.querySelector('input[name="offboardDisposition"]:checked')?.value || 'transfer';
-  try{
-    await api('POST',`/api/coaches/${coachId}/offboard`, { disposition });
-    closeDlg();
-    await refresh();
-    const c = D.coaches.find(x=>x.id===coachId);
-    toast(`${c?.name||'Coach'} offboarded`);
-  }catch(e){
-    uiAlert(e.message || 'Could not offboard coach');
-  }
-}
-async function coachDeleteWithModal(coachId){
-  try{
-    const r = await api('DELETE',`/api/coaches/${coachId}`);
-    if(r.hasFutureVisits && r.futureVisits && r.futureVisits.length > 0){
-      await showCoachOffboardingModal(r.coach, r.futureVisits);
-    } else {
-      const c = r.coach || D.coaches.find(x=>x.id===coachId);
-      toast(`${c?.name||'Coach'} deactivated`);
-      await refresh();
-    }
-  }catch(e){
-    uiAlert(e.message || 'Could not process coach deletion');
-  }
-}
 /* Styled stand-ins for window.alert/confirm — same look as the rest of the app,
    stack safely on top of an already-open dialog (#dlg2 over #dlg). */
 function uiAlert(msg){
@@ -723,7 +683,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadTeamMismatchAudit(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadStillBilling(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadTeamMismatchAudit(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
     if(tab==='monthend'){ loadMonthEnd(); }
   }
@@ -3364,72 +3324,6 @@ function coachProfileView(data){
   }
   return html;
 }
-function coachDeactivateDlg(id, name){
-  const leaving = D.coaches.find(c=>c.id===id);
-  const teammates = D.coaches.filter(c=>c.id!==id && (!leaving || c.team===leaving.team))
-    .sort((a,b)=>(a.assigned_stores||0)-(b.assigned_stores||0)); // lightest-loaded first
-  openDlg(`<h3>Deactivate ${esc(name)}?</h3>
-    <p class="small">Their completed visit history stays intact and stays credited to them — nothing there changes.
-    Choose what happens to their ${leaving?.assigned_stores||0} current store(s) and ${leaving?.upcoming_count||0} upcoming visit(s):</p>
-    <h3>Current workload — Team ${esc(leaving?.team||'')}</h3>
-    <table style="margin-bottom:10px"><tr><th>Coach</th><th class="num">Stores</th><th class="num">Upcoming</th></tr>
-      ${teammates.map(c=>`<tr><td>${esc(c.name)}</td><td class="num">${c.assigned_stores||0}</td><td class="num">${c.upcoming_count||0}</td></tr>`).join('') || '<tr><td colspan="3" class="small">No other coaches on this team.</td></tr>'}
-    </table>
-    <label>Reassign stores &amp; upcoming visits to</label>
-    <select id="reassignTo"><option value="">— leave unassigned instead —</option>
-      ${teammates.map(c=>`<option value="${c.id}">${esc(c.name)} (${c.assigned_stores||0} stores, ${c.upcoming_count||0} upcoming)</option>`).join('')}</select>
-    <p class="small" style="margin-top:4px">Lightest-loaded teammates are listed first. All of this coach's stores go to a single pick — split manually afterward from each client's profile if you'd rather divide the book across two or three people.</p>
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary danger" onclick="doDeactivateCoach('${id}','${esc(name).replace(/'/g,"\\'")}')">Deactivate</button></div>`);
-}
-function editCoachDlg(id){
-  const c = D.coaches.find(x=>x.id===id) || st.coachProfileCoach;
-  openDlg(`<h3>Edit profile</h3>
-    <label>Name</label><input id="ecName" value="${esc(c.name)}">
-    <label>Team</label><select id="ecTeam">${teamOpts(c.team)}</select>
-    <label>Phone</label><input id="ecPhone" value="${esc(c.phone||'')}" placeholder="(555) 555-5555">
-    <label>Start date</label><input type="date" id="ecStart" value="${c.start_date||''}">
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary" onclick="saveCoachEdit('${id}')">Save</button></div>`);
-}
-async function saveCoachEdit(id){
-  const name = $('#ecName').value.trim(); if(!name){ uiAlert('Name required'); return; }
-  await api('PATCH','/api/coaches/'+id, { name, team: $('#ecTeam').value, phone: $('#ecPhone').value.trim(), start_date: $('#ecStart').value || null });
-  closeDlg(); await refresh(); toast('Profile updated');
-  if(st.view==='coachprofile') await loadCoachProfile(st.coachId);
-}
-function editUserDlg(id){
-  const u = (D.users||[]).find(x=>x.id===id); if(!u) return;
-  openDlg(`<h3>Edit user</h3>
-    <label>Name</label><input id="euName" value="${esc(u.name)}">
-    <label>Email</label><input id="euEmail" value="${esc(u.email)}" autocomplete="off">
-    <label>Role</label><select id="euRole"><option ${u.role==='admin'?'selected':''}>admin</option><option ${u.role==='lead'?'selected':''}>lead</option><option ${u.role==='sales'?'selected':''}>sales</option><option ${u.role==='coach'?'selected':''}>coach</option></select>
-    <label>Team</label><select id="euTeam">${teamOpts(u.team)}</select>
-    <label>Coach link (for coach role)</label><select id="euCoach"><option value="">—</option>${D.coaches.map(c=>`<option value="${c.id}" ${u.coach_id===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select>
-    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn primary" onclick="saveUserEdit(${u.id})">Save</button></div>`);
-}
-async function saveUserEdit(id){
-  const name = $('#euName').value.trim(); const email = $('#euEmail').value.trim();
-  if(!name || !email){ uiAlert('Name and email required'); return; }
-  await api('PATCH','/api/users/'+id, { name, email, role: $('#euRole').value, team: $('#euTeam').value, coach_id: $('#euCoach').value || null });
-  closeDlg(); await refresh(); toast('User updated');
-}
-async function doDeactivateCoach(id, name){
-  const reassignToCoachId = $('#reassignTo').value || undefined;
-  const r = await api('DELETE','/api/coaches/'+id, reassignToCoachId ? { reassignToCoachId } : undefined);
-  closeDlg(); await refresh();
-  const parts = [];
-  if(r.storesMoved) parts.push(`${r.storesMoved} store(s) ${reassignToCoachId?'reassigned':'unassigned'}`);
-  const c = r.cascade;
-  if(c){
-    if(c.keptWeek) parts.push(`${c.keptWeek} scheduled visit(s) moved with their week intact`);
-    if(c.needsReplacing) parts.push(`${c.needsReplacing} visit(s) need re-placing (the new coach's week was already taken) — check that team's to-schedule list`);
-    if(c.unscheduled) parts.push(`${c.unscheduled} visit(s) taken off the calendar`);
-  }
-  toast(`${name} deactivated${parts.length ? ' — ' + parts.join('; ') : ''}`);
-  if(st.view==='coachprofile') go('admin');
-}
 async function saveAssignedCoach(clientId, coachId){
   const r = await api('PATCH','/api/clients/'+clientId, { assigned_coach_id: coachId || null });
   if(r.cascade){
@@ -4044,8 +3938,11 @@ function adminDataView(){
   <div class="controls"><button class="btn" onclick="loadOutOfOrder()">Refresh</button></div>
   <div id="outOfOrderOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Archived clients</h2>
-  <p class="small" style="margin-bottom:12px">Clients who've left. Archiving happens automatically when Keap reports their last contract cancelled, and nightly for any client with <b>no active contract</b> who is marked cancelled or inactive or whose 30-day notice has lapsed — a client with a live contract is never archived automatically, whatever their status says. Or by hand from a profile. History is kept; open visits were removed. Reactivate if Keap was wrong or they come back.</p>
+  <p class="small" style="margin-bottom:12px">Clients who've left. Archiving happens automatically when Keap reports their last contract cancelled, and nightly for any client with <b>no active contract</b> who is marked cancelled or inactive or whose 30-day notice has lapsed — a client with a live contract is never archived automatically, whatever their status says. Or by hand from a profile, which also closes their contracts in the app so a Keap sync can't undo it. History is kept; open visits were removed. Reactivate if Keap was wrong or they come back.</p>
   <div id="archivedOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Archived, still billing in Keap</h2>
+  <p class="small" style="margin-bottom:12px">Clients archived in this app whose Keap subscription was still active at the last sync. The app won't bring them back on its own — cancel the subscription in Keap, or Reactivate here if archiving was a mistake. A row clears itself once Keap stops billing.</p>
+  <div id="stillBillingOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Recently deleted</h2>
   <p class="small" style="margin-bottom:12px">Clients deleted in the last 30 days — restorable here. After 30 days they're purged for good by the nightly job.</p>
   <div id="deletedOut" class="small">Loading…</div></div>
@@ -4507,7 +4404,75 @@ async function setTeamLead(team, coachId){
     await refresh(); toast(coachId ? 'Team lead set — their login is now a lead' : 'Lead removed');
   }catch(e){ uiAlert(e.message || 'Could not set lead'); await refresh(); }
 }
-function removeCoach(id,name){ coachDeleteWithModal(id); }
+function removeCoach(id,name){ offboardCoachDlg(id); }
+/* ---------- Offboard a coach (quit / let go) ----------
+   One screen for everything leaving involves: who takes each store, who leads the team,
+   login switched off, future Home/Off weeks cleared. Server: /api/coaches/:id/offboard. */
+async function offboardCoachDlg(id){
+  let p;
+  try{ p = await api('GET', `/api/coaches/${id}/offboard-preview`); }
+  catch(e){ uiAlert(e.message || 'Could not load'); return; }
+  st._ob = p;
+  const c = p.coach, first = esc((c.name||'').split(' ')[0] || c.name);
+  const opts = () => `<option value="">— Unassigned (team lead picks later) —</option>` +
+    p.candidates.map(x => `<option value="${x.id}">${esc(x.name)}${x.team!==c.team?` · ${esc(x.team)}`:''} (${x.stores} stores)</option>`).join('');
+  const rows = p.clients.map(cl => `<tr><td><b>${esc(cl.name)}</b><div class="small" style="color:var(--muted)">${esc(cl.programs||'—')}${cl.next_visit?` · next visit wk of ${fmtW(cl.next_visit)}`:''}${cl.on_their_calendar?` · ${cl.on_their_calendar} booked with ${first}`:''}</div></td>
+     <td><select class="obSel" data-cid="${cl.id}" style="width:100%">${opts()}</select></td></tr>`).join('');
+  const activeLogins = p.logins.filter(l => l.active && l.role !== 'admin');
+  const sameTeam = p.candidates.filter(x => x.team === c.team);
+  openDlg(`<h3>Offboard ${esc(c.name)}</h3>
+    <p class="small" style="color:var(--muted)">Team ${esc(c.team)}. Completed visits, notes and history stay credited to ${first} — nothing there changes.</p>
+    <div class="controls" style="align-items:flex-end;gap:12px;margin:10px 0;flex-wrap:wrap">
+      <div><label style="display:block;margin:0 0 3px">Last day</label><input type="date" id="obDate" value="${p.today}" style="width:150px"></div>
+      <div><label style="display:block;margin:0 0 3px">Reason</label><select id="obReason"><option>Quit</option><option>Let go</option><option>Other</option></select></div>
+      <div style="flex:1;min-width:200px"><label style="display:block;margin:0 0 3px">Note (optional)</label><input id="obNote" style="width:100%;box-sizing:border-box"></div>
+    </div>
+    <h3 style="margin:14px 0 4px">Who takes their stores (${p.clients.length})</h3>
+    ${p.clients.length ? `<div class="controls" style="gap:8px;margin-bottom:6px;flex-wrap:wrap"><span class="small">Give all to</span><select id="obAll">${opts()}</select><button class="btn tiny" onclick="obApplyAll()">Apply to all</button></div>
+      <div style="max-height:320px;overflow:auto"><table><tr><th>Client</th><th style="width:45%">New coach</th></tr>${rows}</table></div>
+      <p class="small" style="margin-top:4px">Booked visits move with the client and keep their week when the new coach is free that week; otherwise they go back to the to-schedule list. A store left unassigned has its booked visits taken off ${first}'s calendar.</p>` : `<p class="small">${first} has no stores assigned.</p>`}
+    ${p.leadsTeam ? `<h3 style="margin:14px 0 4px">New lead for Team ${esc(p.leadsTeam)}</h3>
+      <select id="obLead"><option value="">— No lead for now (set one later in Admin › Teams) —</option>${sameTeam.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>` : ''}
+    <h3 style="margin:14px 0 4px">Also happens</h3>
+    <ul class="small" style="margin:0 0 0 18px;padding:0;line-height:1.7">
+      <li>${activeLogins.length ? `Login switched off: <b>${activeLogins.map(l=>esc(l.email)).join(', ')}</b> — signed out right away.` : 'No active login to switch off.'}</li>
+      ${p.covering.length ? `<li>${p.covering.length} visit(s) ${first} was covering go back to each client's own coach if that week is free, otherwise to the to-schedule list.</li>` : ''}
+      ${p.futureBlocks ? `<li>${p.futureBlocks} future Home/Off/Training week(s) on ${first}'s calendar are cleared.</li>` : ''}
+      ${p.callsOwedNow ? `<li>${p.callsOwedNow} coaching call(s) still owed this month stay under ${first}'s name on month-end — calls follow whoever held the client on the 1st.</li>` : ''}
+      <li>Reversible: reactivate from Former coaches (login comes back; stores don't move back automatically).</li>
+    </ul>
+    <div class="dlgrow" style="margin-top:14px"><button class="btn" onclick="closeDlg()">Cancel</button>
+      <span style="flex:1"></span>
+      <button class="btn primary danger" onclick="offboardCoachGo('${c.id}')">Offboard ${first}</button></div>`);
+}
+function obApplyAll(){ const v = $('#obAll').value; document.querySelectorAll('.obSel').forEach(s => s.value = v); }
+async function offboardCoachGo(id){
+  const p = st._ob; if(!p || p.coach.id !== id) return;
+  const assignments = {};
+  document.querySelectorAll('.obSel').forEach(s => { assignments[s.dataset.cid] = s.value || ''; });
+  const unassigned = Object.values(assignments).filter(v => !v).length;
+  const reasonSel = $('#obReason').value, note = (($('#obNote')||{}).value || '').trim();
+  const leadSel = $('#obLead');
+  const warn = [];
+  if(unassigned) warn.push(`${unassigned} store(s) will be left unassigned.`);
+  if(p.leadsTeam && leadSel && !leadSel.value) warn.push(`Team ${p.leadsTeam} will have no lead.`);
+  if(!(await uiConfirm(`Offboard ${p.coach.name}?${warn.length ? '\n\n' + warn.join('\n') : ''}`, 'Offboard'))) return;
+  try{
+    const r = await api('POST', `/api/coaches/${id}/offboard`, { assignments, left_date: $('#obDate').value,
+      reason: note ? `${reasonSel} — ${note}` : reasonSel, new_lead_coach_id: leadSel ? (leadSel.value || null) : null });
+    closeDlg(); await refresh();
+    const lines = [];
+    if(r.reassigned) lines.push(`${r.reassigned} store(s) reassigned`);
+    if(r.unassigned) lines.push(`${r.unassigned} store(s) left unassigned`);
+    if(r.keptWeek + r.coveringMoved) lines.push(`${r.keptWeek + r.coveringMoved} booked visit(s) kept their week`);
+    if(r.needsReplacing + r.coveringUnscheduled) lines.push(`${r.needsReplacing + r.coveringUnscheduled} visit(s) need re-placing — they're in the to-schedule lists`);
+    if(r.blocksRemoved) lines.push(`${r.blocksRemoved} future blocked week(s) cleared`);
+    lines.push(r.loginsDisabled ? 'Login switched off' : 'No login to switch off');
+    if(r.leadTeam) lines.push(r.newLead ? `New lead set for Team ${r.leadTeam}` : `Team ${r.leadTeam} has no lead — set one in Admin › Teams`);
+    await uiAlert(`${p.coach.name} has been offboarded.\n\n• ${lines.join('\n• ')}`);
+    if(st.view === 'coachprofile') go('admin');
+  }catch(e){ uiAlert(e.message || 'Offboarding failed'); }
+}
 function renameTeamDlg(from){
   openDlg(`<h3>Rename Team ${esc(from)}</h3>
     <p class="small">The new name replaces "${esc(from)}" everywhere at once — every coach, user, visit, and board reference moves with it. Nothing else changes.</p>
@@ -4707,6 +4672,16 @@ async function loadOutOfOrder(){
       : `<p style="color:var(--ok)">Every placed visit is in cycle order. ✔</p>`;
   }catch(e){ el.innerHTML = '<p>Could not load.</p>'; }
 }
+async function loadStillBilling(){
+  const el = $('#stillBillingOut'); if(!el) return;
+  try{
+    const rows = await api('GET','/api/admin/archived-still-billing');
+    el.innerHTML = rows.length ? `<table><tr><th>Client</th><th>Contract</th><th class="num">Keap amount</th><th>Keap subscription</th><th>Archived</th><th></th></tr>` +
+      rows.map(r=>`<tr><td>${clientLink(r.name, r.client_id)}</td><td>${esc(r.program||'')}</td><td class="num">${r.price!=null?'$'+Number(r.price).toLocaleString():'—'}</td><td class="mono">${esc(r.keap_subscription_id||'—')}</td><td class="mono">${r.archived_at?fmt(r.archived_at.slice(0,10)):'—'}</td>
+        <td><button class="btn tiny" onclick="reactivateClient(${r.client_id},'${esc(r.name).replace(/'/g,"\\'")}')">Reactivate</button></td></tr>`).join('') + `</table>`
+      : `<p>Nothing here — every client archived in the app is cancelled in Keap too.</p>`;
+  }catch(e){ el.innerHTML = '<p>Could not load.</p>'; }
+}
 async function loadArchivedClients(){
   const el = $('#archivedOut'); if(!el) return;
   try{
@@ -4719,19 +4694,28 @@ async function loadArchivedClients(){
 }
 function archiveClientDlg(id, name){
   openDlg(`<h3>Archive ${esc(name)}?</h3>
-    <p class="small">They leave the Clients list, Visit List, Today, calendars and capacity. Completed visits, notes and contracts are kept. <b>Open (not completed) visits are removed</b>, including any already on a coach's calendar.</p>
+    <p class="small">They leave the Clients list, Visit List, Today, calendars and capacity. Completed visits, notes and history are kept.</p>
+    <ul class="small" style="margin:6px 0 10px 18px;padding:0;line-height:1.6">
+      <li><b>Open visits are removed</b>, including any already on a coach's calendar.</li>
+      <li>Their active contracts are <b>closed in this app</b>, so a Keap sync can't bring them back.</li>
+      <li><b>Cancel the subscription in Keap too.</b> If Keap keeps billing, they're listed under Admin › Data › "Archived, still billing in Keap".</li>
+      <li>Reactivate undoes this — the contracts reopen; use Extend visits to rebuild the schedule.</li>
+    </ul>
     <label>Reason</label><input id="arcReason" placeholder="e.g. Cancelled — moved to in-house training" style="width:100%;box-sizing:border-box">
     <div class="dlgrow" style="margin-top:12px"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="archiveClientGo(${id})">Archive</button></div>`);
 }
 async function archiveClientGo(id){
   const reason = (($('#arcReason')||{}).value||'').trim() || 'Archived by hand';
-  try{ const r = await api('POST',`/api/clients/${id}/archive`,{ reason }); closeDlg(); toast(`Archived — ${r.visitsDeleted} open visit${r.visitsDeleted===1?'':'s'} removed`); await refresh(); }
+  try{ const r = await api('POST',`/api/clients/${id}/archive`,{ reason }); closeDlg();
+    toast(`Archived — ${r.visitsDeleted} open visit${r.visitsDeleted===1?'':'s'} removed, ${r.contractsClosed||0} contract${r.contractsClosed===1?'':'s'} closed${r.keapLinked?' · cancel it in Keap too':''}`);
+    await refresh(); }
   catch(e){ uiAlert(e.message||'Archive failed'); }
 }
 async function reactivateClient(id, name){
-  if(!(await uiConfirm(`Reactivate ${name}? They return to the working lists as active. Use Extend visits on their contract afterwards to rebuild the schedule.`,'Reactivate'))) return;
-  try{ await api('POST',`/api/clients/${id}/reactivate`,{}); toast('Reactivated'); await refresh(); if($('#archivedOut')) loadArchivedClients(); }
+  if(!(await uiConfirm(`Reactivate ${name}? They return to the working lists as active, and any contracts closed when they were archived reopen. Use Extend visits on their contract afterwards to rebuild the schedule.`,'Reactivate'))) return;
+  try{ const r = await api('POST',`/api/clients/${id}/reactivate`,{}); toast(`Reactivated${r.contractsReopened?` — ${r.contractsReopened} contract${r.contractsReopened===1?'':'s'} reopened`:''}`); await refresh();
+    if($('#archivedOut')) loadArchivedClients(); if($('#stillBillingOut')) loadStillBilling(); }
   catch(e){ uiAlert(e.message||'Reactivate failed'); }
 }
 async function loadDeletedClients(){

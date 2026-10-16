@@ -146,6 +146,12 @@ function currentUser(req){
   if(age > SESSION_IDLE_MS) return null;
   const u = db.prepare('SELECT id,email,name,role,team,coach_id,active FROM users WHERE id=?').get(+id);
   if(!u || !u.active) return null;
+  // A coach who has left can't use the app, whatever the user row says — this also signs
+  // out anyone deactivated before offboarding switched logins off (2026-10-16).
+  if(u.coach_id && u.role !== 'admin'){
+    const lc = db.prepare('SELECT active FROM coaches WHERE id=?').get(u.coach_id);
+    if(lc && !lc.active) return null;
+  }
   // The coach record is the single source of truth for a coach-linked account's team:
   // that's the field a lead edits when moving someone between teams, and everything
   // downstream (nav, team overview, to-schedule list, canEditTeam) reads user.team.
@@ -292,6 +298,10 @@ route('POST', /^\/api\/login$/, null, (req, res, m, body) => {
   if(loginRateLimited(email)) return err(res, 429, 'Too many failed attempts — try again in a few minutes.');
   const u = db.prepare('SELECT * FROM users WHERE email=? AND active=1').get(email);
   if(!u || !checkPw(String(body.password || ''), u.pw)){ recordLoginFailure(email); return err(res, 401, 'Invalid email or password'); }
+  if(u.coach_id && u.role !== 'admin'){
+    const lc = db.prepare('SELECT active FROM coaches WHERE id=?').get(u.coach_id);
+    if(lc && !lc.active) return err(res, 403, 'This login belongs to a coach who is no longer active. Ask an admin if that is a mistake.');
+  }
   clearLoginFailures(email);
   log(u.email, 'login', '');
   send(res, 200, { ok: true, user: { id: u.id, email: u.email, name: u.name, role: u.role, team: u.team, coach_id: u.coach_id } },
@@ -1165,6 +1175,108 @@ route('PATCH', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bod
   log(user.email, 'coach.edit', { id: c.id, ...body });
   send(res, 200, { ok: true });
 });
+/* ----- Offboard a coach (quit / let go) — 2026-10-16 -----
+   One action that does everything leaving involves, instead of the old one-click
+   Deactivate that dumped every store into "unassigned" and left the login working:
+   - each assigned store goes to the coach picked for it (or is left unassigned), using the
+     same cascade as a single-client reassignment
+   - visits they were covering for other coaches go back to that client's coach if the week
+     is free there, else to the to-schedule list
+   - their future blocks (Home/Off/Training) are cleared
+   - their login is switched off (admins excepted) — sessions die immediately
+   - if they lead a team, the team gets the new lead picked here (or none for now)
+   - left_date / reason recorded; completed history stays credited to them
+   Current-month coaching-call ownership stays with them via the month snapshot (by design). */
+route('GET', /^\/api\/coaches\/([\w-]+)\/offboard-preview$/, ['admin','lead'], (req, res, m, body, user) => {
+  const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
+  if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  const today = new Date().toISOString().slice(0,10);
+  const thisMon = snapMonday(today);
+  const clients = db.prepare(`SELECT cl.id, cl.name,
+      (SELECT GROUP_CONCAT(DISTINCT program) FROM contracts WHERE client_id=cl.id AND status='active' AND archived_at IS NULL) AS programs,
+      (SELECT COUNT(*) FROM visits v WHERE v.client_id=cl.id AND v.completed=0) AS open_visits,
+      (SELECT COUNT(*) FROM visits v WHERE v.client_id=cl.id AND v.completed=0 AND v.cal_coach=?) AS on_their_calendar,
+      (SELECT MIN(cal_week) FROM visits v WHERE v.client_id=cl.id AND v.completed=0 AND v.cal_week>=?) AS next_visit
+    FROM clients cl WHERE cl.assigned_coach_id=? AND cl.deleted_at IS NULL AND cl.archived_at IS NULL ORDER BY cl.name`).all(c.id, thisMon, c.id);
+  const covering = db.prepare(`SELECT v.id, v.client, v.cycle, v.program, v.cal_week, co.name AS owner_name
+      FROM visits v LEFT JOIN clients cl ON cl.id=v.client_id LEFT JOIN coaches co ON co.id=cl.assigned_coach_id
+      WHERE v.cal_coach=? AND v.completed=0 AND (cl.assigned_coach_id IS NULL OR cl.assigned_coach_id<>?) ORDER BY v.cal_week`).all(c.id, c.id);
+  const candidates = db.prepare(`SELECT id, name, team,
+      (SELECT COUNT(*) FROM clients WHERE assigned_coach_id=coaches.id AND deleted_at IS NULL AND archived_at IS NULL) AS stores
+    FROM coaches WHERE active=1 AND id<>? ORDER BY team, name`).all(c.id).filter(x => canEditTeam(user, x.team));
+  send(res, 200, {
+    coach: c, today, clients, covering, candidates,
+    leadsTeam: teamLedBy(c.id),
+    logins: db.prepare('SELECT email, role, active FROM users WHERE coach_id=?').all(c.id),
+    futureBlocks: db.prepare('SELECT COUNT(*) n FROM blocks WHERE coach_id=? AND week>=?').get(c.id, thisMon).n,
+    callsOwedNow: callsOwed(today, { coachId: c.id }).length,
+  });
+});
+route('POST', /^\/api\/coaches\/([\w-]+)\/offboard$/, ['admin','lead'], (req, res, m, body, user) => {
+  const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
+  if(!c.active) return err(res, 400, 'Coach is already inactive');
+  if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
+  body = body || {};
+  const today = new Date().toISOString().slice(0,10);
+  const leftDate = /^\d{4}-\d{2}-\d{2}$/.test(body.left_date || '') ? body.left_date : today;
+  const reason = String(body.reason || '').trim().slice(0, 200) || null;
+  const assignments = body.assignments && typeof body.assignments === 'object' ? body.assignments : {};
+  const clients = db.prepare('SELECT * FROM clients WHERE assigned_coach_id=? AND deleted_at IS NULL AND archived_at IS NULL').all(c.id);
+  // Validate every destination before writing anything, so nothing half-happens.
+  const destFor = {};
+  for(const cl of clients){
+    const toId = assignments[cl.id] ? String(assignments[cl.id]) : '';
+    if(!toId){ destFor[cl.id] = null; continue; }
+    const d = getCoach(toId);
+    if(!d || !d.active || d.id === c.id) return err(res, 400, `${cl.name}: pick an active coach other than ${c.name}`);
+    if(!canEditTeam(user, d.team)) return err(res, 403, `${cl.name}: ${d.name} is not on your team`);
+    destFor[cl.id] = d;
+  }
+  const ledTeam = teamLedBy(c.id);
+  const newLeadId = ledTeam && body.new_lead_coach_id ? String(body.new_lead_coach_id) : null;
+  if(newLeadId){
+    const nl = getCoach(newLeadId);
+    if(!nl || !nl.active || nl.id === c.id) return err(res, 400, 'Pick an active coach as the new team lead');
+    const elsewhere = teamLedBy(nl.id);
+    if(elsewhere && elsewhere !== ledTeam) return err(res, 400, `${nl.name} already leads Team ${elsewhere}`);
+  }
+  const summary = { reassigned: 0, unassigned: 0, keptWeek: 0, needsReplacing: 0, teamMoved: 0, coveringMoved: 0, coveringUnscheduled: 0,
+    blocksRemoved: 0, loginsDisabled: 0, leadTeam: ledTeam || null, newLead: newLeadId, callsOwedNow: callsOwed(today, { coachId: c.id }).length };
+  // Team lead first — setTeamLead runs its own transaction and steps the old lead down.
+  if(ledTeam){
+    try{ setTeamLead(ledTeam, newLeadId, user.email); }
+    catch(e){ return err(res, 400, 'Could not change the team lead: ' + e.message); }
+  }
+  const thisMon = snapMonday(today);
+  db.exec('BEGIN');
+  try{
+    for(const cl of clients){
+      const d = destFor[cl.id];
+      const r = reassignClientCoach(cl, d, user.email, { vacateCoachId: c.id });
+      if(d){ summary.reassigned++; summary.keptWeek += r.cascade.keptWeek; summary.needsReplacing += r.cascade.needsReplacing; summary.teamMoved += r.cascade.teamMoved; }
+      else { summary.unassigned++; summary.needsReplacing += r.vacated; }
+    }
+    // Whatever is still on their calendar belongs to someone else's client (covering).
+    const left = db.prepare('SELECT v.*, cl.assigned_coach_id AS owner FROM visits v LEFT JOIN clients cl ON cl.id=v.client_id WHERE v.cal_coach=? AND v.completed=0').all(c.id);
+    for(const v of left){
+      const owner = v.owner && v.owner !== c.id ? getCoach(v.owner) : null;
+      if(owner && owner.active && cellFree(owner.id, v.cal_week, v.id)){
+        db.prepare('UPDATE visits SET cal_coach=?, team=? WHERE id=?').run(owner.id, owner.team, v.id); summary.coveringMoved++;
+      } else {
+        db.prepare('UPDATE visits SET cal_coach=NULL, cal_week=NULL WHERE id=?').run(v.id); summary.coveringUnscheduled++;
+      }
+    }
+    summary.blocksRemoved = db.prepare('DELETE FROM blocks WHERE coach_id=? AND week>=?').run(c.id, thisMon).changes;
+    summary.loginsDisabled = db.prepare("UPDATE users SET active=0 WHERE coach_id=? AND active=1 AND role<>'admin'").run(c.id).changes;
+    db.prepare('UPDATE coaches SET active=0, is_lead=0, left_date=?, reason=? WHERE id=?').run(leftDate, reason, c.id);
+    db.exec('COMMIT');
+  }catch(e){
+    db.exec('ROLLBACK');
+    return err(res, 500, `Offboarding failed and the store/calendar changes were rolled back${ledTeam ? ` (the Team ${ledTeam} lead change already went through)` : ''}: ` + (e && e.message || e));
+  }
+  log(user.email, 'coach.offboard', { id: c.id, name: c.name, team: c.team, leftDate, reason, ...summary });
+  send(res, 200, { ok: true, ...summary });
+});
 route('DELETE', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, body, user) => {
   const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
   if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
@@ -1203,7 +1315,10 @@ route('DELETE', /^\/api\/coaches\/([\w-]+)$/, ['admin','lead'], (req, res, m, bo
       cascade.unscheduled++;
     }
   }
-  db.prepare('UPDATE coaches SET active=0 WHERE id=?').run(c.id);
+  db.prepare("UPDATE users SET active=0 WHERE coach_id=? AND role<>'admin'").run(c.id);
+  const ledTeam = teamLedBy(c.id);
+  if(ledTeam){ try{ setTeamLead(ledTeam, null, user.email); }catch(e){ console.warn('coach.remove: could not clear lead', e.message); } }
+  db.prepare('UPDATE coaches SET active=0, is_lead=0, left_date=COALESCE(left_date, ?) WHERE id=?').run(new Date().toISOString().slice(0,10), c.id);
   log(user.email, 'coach.remove', { id: c.id, name: c.name, storesMoved, reassignedTo: toId || null, ...cascade });
   send(res, 200, { ok: true, storesMoved, cascade });
 });
@@ -1216,9 +1331,10 @@ route('POST', /^\/api\/coaches\/([\w-]+)\/reactivate$/, ['admin','lead'], (req, 
   const c = getCoach(m[1]); if(!c) return err(res, 404, 'not found');
   if(!canEditTeam(user, c.team)) return err(res, 403, 'Not your team');
   if(c.active) return err(res, 400, 'Coach is already active');
-  db.prepare('UPDATE coaches SET active=1 WHERE id=?').run(c.id);
-  log(user.email, 'coach.reactivate', { id: c.id, name: c.name, team: c.team });
-  send(res, 200, { ok: true });
+  db.prepare('UPDATE coaches SET active=1, left_date=NULL, reason=NULL WHERE id=?').run(c.id);
+  const loginsRestored = db.prepare('UPDATE users SET active=1 WHERE coach_id=? AND active=0').run(c.id).changes;
+  log(user.email, 'coach.reactivate', { id: c.id, name: c.name, team: c.team, loginsRestored });
+  send(res, 200, { ok: true, loginsRestored });
 });
 
 /* Permanently delete a coach (only allowed for inactive/former coaches) */
@@ -3313,6 +3429,7 @@ async function runNightlyMaintenance(actorEmail){
         : []),
       `Out-of-order placements: ${!summary.outOfOrder ? 'n/a' : summary.outOfOrder.error ? 'FAILED — ' + summary.outOfOrder.error : summary.outOfOrder.length ? `${summary.outOfOrder.length} on the calendar (review at Admin → Data → Cycle order): ${summary.outOfOrder.slice(0,8).map(o => `${o.client} ${o.cycle}`).join(', ')}${summary.outOfOrder.length>8?'…':''}` : 'none'}`,
       `Archived: ${!summary.archive ? 'n/a' : summary.archive.error ? 'FAILED — ' + summary.archive.error : summary.archive.archived ? `${summary.archive.archived} cancelled client(s) moved to the archive: ${summary.archive.clients.map(c => `${c.client} — ${c.why}${c.visitsDeleted ? `, ${c.visitsDeleted} open visit${c.visitsDeleted===1?'':'s'} removed` : ''}`).join('; ')}` : 'nothing new'}${summary.archive.held && summary.archive.held.length ? ` | held back: ${summary.archive.held.map(h => `${h.client} (${h.why})`).join('; ')}` : ''}`,
+      `Archived in app, Keap still billing: ${(() => { try{ const n = db.prepare("SELECT COUNT(*) n FROM contracts WHERE cancel_source='manual-archive' AND keap_billing_seen_at IS NOT NULL").get().n; return n ? `${n} — cancel those subscriptions in Keap (Admin › Data)` : 'none'; }catch(e){ return 'n/a'; } })()}`,
       `Revenue snapshot: ${summary.revenue.error ? 'FAILED — ' + summary.revenue.error : `$${Math.round(summary.revenue.totalRevenue).toLocaleString()} across ${summary.revenue.activeClients} active client(s)`}`,
       `Soft-delete purge: ${summary.purge.error ? 'FAILED — ' + summary.purge.error : `${summary.purge.purged} client(s) purged (past the 30-day recovery window)`}`,
       `Database backup: ${summary.backup.ok ? `sent (${Math.round((summary.backup.sizeBytes||0)/1024)} KB)` : 'FAILED — ' + (summary.backup.error || 'see results')}`,
@@ -3401,13 +3518,13 @@ route('POST', /^\/api\/client-history\/snapshot-now$/, ['admin'], (req, res, m, 
 route('GET', /^\/api\/clients\/export\.csv$/, ['admin','lead'], (req, res) => {
   const rows = db.prepare(`
     SELECT cl.*,
-      (SELECT COUNT(*) FROM contracts co WHERE co.client_id=cl.id AND co.status='active') AS active_contracts,
+      (SELECT COUNT(*) FROM contracts co WHERE co.client_id=cl.id AND co.status='active' AND co.archived_at IS NULL) AS active_contracts,
       co.name AS assigned_coach_name
     FROM clients cl
     LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
     WHERE cl.deleted_at IS NULL
     ORDER BY cl.archived_at IS NULL DESC, cl.status='active' DESC, cl.name`).all();
-  const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active'").all();
+  const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active' AND archived_at IS NULL").all();
   const byClient = {};
   for(const c of activeContracts) (byClient[c.client_id] ||= []).push(c);
   const esc = s => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
@@ -3439,13 +3556,13 @@ route('POST', /^\/api\/clients\/(\d+)\/restore$/, ['admin'], (req, res, m, body,
 route('GET', /^\/api\/clients$/, ['admin','lead','sales','coach'], (req, res, m, body, user) => {
   const rows = db.prepare(`
     SELECT cl.*,
-      (SELECT COUNT(*) FROM contracts co WHERE co.client_id=cl.id AND co.status='active') AS active_contracts,
+      (SELECT COUNT(*) FROM contracts co WHERE co.client_id=cl.id AND co.status='active' AND co.archived_at IS NULL) AS active_contracts,
       co.name AS assigned_coach_name
     FROM clients cl
     LEFT JOIN coaches co ON co.id = cl.assigned_coach_id
     WHERE cl.deleted_at IS NULL
     ORDER BY cl.status='active' DESC, cl.name`).all();
-  const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active'").all();
+  const activeContracts = db.prepare("SELECT client_id, program, price FROM contracts WHERE status='active' AND archived_at IS NULL").all();
   const byClient = {};
   for(const c of activeContracts) (byClient[c.client_id] ||= []).push(c);
   const healthMap = computeHealthMap();
@@ -3561,6 +3678,46 @@ function clientHealth(cl, contracts, visits, assignedCoach){
   const label = level === 'at_risk' ? 'At risk' : level === 'behind' ? 'Behind — recoverable' : 'On track';
   return { level, label, reasons, warnings };
 }
+/* The one write path for "this client now belongs to coach X" (or to nobody). Used by
+   the client profile and by coach offboarding, so both behave identically:
+   - unscheduled open visits move to the new coach's team (they surface in that team's
+     to-schedule list)
+   - scheduled open visits move to the new coach's calendar IF the same week is free on
+     it (the planned date survives); otherwise they're unscheduled into the new team's
+     list rather than left on the old coach — nothing is lost, it just needs re-placing
+   - unassigning (dest = null) leaves open visits alone, unless opts.vacateCoachId says
+     whose calendar they must come off (offboarding)
+   Completed visits are never touched: history keeps who really did the work. */
+function reassignClientCoach(cl, dest, actorEmail, opts = {}){
+  db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(dest ? dest.id : null, cl.id);
+  if(!dest){
+    const vacated = opts.vacateCoachId
+      ? db.prepare('UPDATE visits SET cal_coach=NULL, cal_week=NULL WHERE client_id=? AND completed=0 AND cal_coach=?').run(cl.id, opts.vacateCoachId).changes
+      : 0;
+    log(actorEmail, 'client.assign_coach', { clientId: cl.id, name: cl.name, coachId: null, vacated,
+      note: vacated ? 'unassigned — booked visits taken off the departing coach\'s calendar' : 'unassigned — open visits left untouched' });
+    return { cascade: null, vacated };
+  }
+  const cascade = { teamMoved: 0, keptWeek: 0, needsReplacing: 0 };
+  const open = db.prepare('SELECT * FROM visits WHERE client_id=? AND completed=0').all(cl.id);
+  for(const v of open){
+    if(!v.cal_week){
+      db.prepare('UPDATE visits SET team=? WHERE id=?').run(dest.team, v.id);
+      cascade.teamMoved++;
+    } else if(v.cal_coach === dest.id){
+      db.prepare('UPDATE visits SET team=? WHERE id=?').run(dest.team, v.id);
+      cascade.keptWeek++;
+    } else if(cellFree(dest.id, v.cal_week, v.id)){
+      db.prepare('UPDATE visits SET team=?, cal_coach=? WHERE id=?').run(dest.team, dest.id, v.id);
+      cascade.keptWeek++;
+    } else {
+      db.prepare('UPDATE visits SET team=?, cal_coach=NULL, cal_week=NULL WHERE id=?').run(dest.team, v.id);
+      cascade.needsReplacing++;
+    }
+  }
+  log(actorEmail, 'client.assign_coach', { clientId: cl.id, name: cl.name, coachId: dest.id, ...cascade });
+  return { cascade };
+}
 route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], async (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
@@ -3569,40 +3726,8 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], async (req, res, m, 
     const coachId = body.assigned_coach_id || null;
     const dest = coachId ? getCoach(coachId) : null;
     if(coachId && !dest) return err(res, 400, 'unknown coach');
-    db.prepare('UPDATE clients SET assigned_coach_id=? WHERE id=?').run(coachId, cl.id);
-    // Cascade to the client's OPEN visits so the Schedule Board and LID Inventory
-    // actually reflect the reassignment instead of silently keeping the old team:
-    //  - unscheduled open visits move to the new coach's team (they surface in that
-    //    team's to-schedule list)
-    //  - scheduled open visits move to the new coach's calendar IF the same week is
-    //    free on it (the planned date survives); otherwise they're unscheduled into
-    //    the new team's list rather than left on the old coach — nothing is lost,
-    //    it just needs re-placing.
-    // Completed visits are never touched: history keeps who really did the work.
-    if(dest){
-      const cascade = { teamMoved: 0, keptWeek: 0, needsReplacing: 0 };
-      const open = db.prepare('SELECT * FROM visits WHERE client_id=? AND completed=0').all(cl.id);
-      for(const v of open){
-        if(!v.cal_week){
-          db.prepare('UPDATE visits SET team=? WHERE id=?').run(dest.team, v.id);
-          cascade.teamMoved++;
-        } else if(v.cal_coach === dest.id){
-          db.prepare('UPDATE visits SET team=? WHERE id=?').run(dest.team, v.id);
-          cascade.keptWeek++;
-        } else if(cellFree(dest.id, v.cal_week, v.id)){
-          db.prepare('UPDATE visits SET team=?, cal_coach=? WHERE id=?').run(dest.team, dest.id, v.id);
-          cascade.keptWeek++;
-        } else {
-          db.prepare('UPDATE visits SET team=?, cal_coach=NULL, cal_week=NULL WHERE id=?').run(dest.team, v.id);
-          cascade.needsReplacing++;
-        }
-      }
-      result.cascade = cascade;
-      result.newTeam = dest.team;
-      log(user.email, 'client.assign_coach', { clientId: cl.id, name: cl.name, coachId, ...cascade });
-    } else {
-      log(user.email, 'client.assign_coach', { clientId: cl.id, name: cl.name, coachId: null, note: 'unassigned — open visits left untouched' });
-    }
+    const r = reassignClientCoach(cl, dest, user.email);
+    if(r.cascade){ result.cascade = r.cascade; result.newTeam = dest.team; }
   }
   if(body.name !== undefined && String(body.name).trim()){
     db.prepare('UPDATE clients SET name=? WHERE id=?').run(String(body.name).trim(), cl.id);
@@ -3641,26 +3766,52 @@ route('PATCH', /^\/api\/clients\/(\d+)$/, ['admin','lead'], async (req, res, m, 
  * flips them back and the schedule is rebuilt with Extend visits. Triggered by the Keap
  * sync when the last contract cancels, by the nightly backfill for anyone already
  * cancelled, or by hand from the profile. */
-function archiveClient(cl, reason, actor){
-  if(cl.archived_at) return { alreadyArchived: true, visitsDeleted: 0 };
+/* opts.closeContracts (hand archive): the client's active contracts are closed here too,
+   stamped cancel_source='manual-archive'. Without this the next Keap sync saw a live
+   contract and un-archived the client — the "archived clients keep coming back" bug
+   (2026-10-16). Reactivate reopens exactly those contracts. */
+function archiveClient(cl, reason, actor, opts = {}){
+  if(cl.archived_at) return { alreadyArchived: true, visitsDeleted: 0, contractsClosed: 0, keapLinked: 0, blocksRemoved: 0 };
   const now = new Date().toISOString();
   db.exec('BEGIN');
-  let visitsDeleted = 0;
+  let visitsDeleted = 0, contractsClosed = 0, keapLinked = 0;
   try{
     visitsDeleted = db.prepare('DELETE FROM visits WHERE client_id=? AND completed=0').run(cl.id).changes;
+    if(opts.closeContracts){
+      keapLinked = db.prepare("SELECT COUNT(*) n FROM contracts WHERE client_id=? AND status='active' AND COALESCE(keap_subscription_id,'')<>''").get(cl.id).n;
+      contractsClosed = db.prepare("UPDATE contracts SET status='cancelled', cancelled_at=?, cancel_source='manual-archive' WHERE client_id=? AND status='active'").run(now, cl.id).changes;
+    }
     db.prepare("UPDATE clients SET archived_at=?, archive_reason=?, archived_by=?, notice_given_date=NULL, status=CASE WHEN status='active' THEN 'cancelled' ELSE status END WHERE id=?")
       .run(now, String(reason || '').slice(0, 200), actor || 'system', cl.id);
     db.exec('COMMIT');
   }catch(e){ db.exec('ROLLBACK'); throw e; }
-  log(actor || 'system', 'client.archive', { clientId: cl.id, name: cl.name, reason, visitsDeleted });
-  return { alreadyArchived: false, visitsDeleted };
+  // Future visit cards imported from the 2026 sheet are calendar blocks, not visits, so the
+  // DELETE above never caught them and the client's name stayed on the board.
+  let blocksRemoved = 0;
+  try{
+    const match = buildSheetLabelMatcher();
+    const thisMon = snapMonday(now.slice(0, 10));
+    const del = db.prepare('DELETE FROM blocks WHERE coach_id=? AND week=?');
+    for(const b of db.prepare("SELECT coach_id, week, label FROM blocks WHERE kind IN ('visit','visit_legacy') AND week>=?").all(thisMon)){
+      const hit = match(b.label);
+      if(hit && hit.id === cl.id) blocksRemoved += del.run(b.coach_id, b.week).changes;
+    }
+  }catch(e){ console.warn('archive: sheet-block cleanup failed', e.message); }
+  log(actor || 'system', 'client.archive', { clientId: cl.id, name: cl.name, reason, visitsDeleted, contractsClosed, keapLinked, blocksRemoved });
+  return { alreadyArchived: false, visitsDeleted, contractsClosed, keapLinked, blocksRemoved };
 }
-function reactivateClient(cl, actor){
+function reactivateClient(cl, actor, opts = {}){
   db.prepare("UPDATE clients SET archived_at=NULL, archive_reason=NULL, archived_by=NULL, status='active' WHERE id=?").run(cl.id);
+  // Undo a hand archive exactly: the contracts it closed come back. Contracts Keap itself
+  // cancelled are left alone — Keap is still the source of truth for those.
+  const contractsReopened = opts.reopenContracts
+    ? db.prepare("UPDATE contracts SET status='active', cancelled_at=NULL, cancel_source=NULL, keap_billing_seen_at=NULL WHERE client_id=? AND cancel_source='manual-archive'").run(cl.id).changes
+    : 0;
   // If Keap still shows no active contract this will flip back on the next sync — that's
   // the point: reactivation is for "Keap was wrong" or "they came back and the new
   // contract is on its way".
-  log(actor || 'system', 'client.reactivate', { clientId: cl.id, name: cl.name, wasArchivedAt: cl.archived_at, wasReason: cl.archive_reason });
+  log(actor || 'system', 'client.reactivate', { clientId: cl.id, name: cl.name, wasArchivedAt: cl.archived_at, wasReason: cl.archive_reason, contractsReopened });
+  return { contractsReopened };
 }
 /* Nightly: anyone whose status is already cancelled but who was never archived (clients
  * that churned before this feature existed) gets archived, so they leave the working
@@ -3708,15 +3859,22 @@ route('POST', /^\/api\/clients\/(\d+)\/archive$/, ['admin','lead'], (req, res, m
   const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
   if(cl.archived_at) return err(res, 400, 'Already archived');
-  const r = archiveClient(cl, body && body.reason ? body.reason : 'Archived by hand', user.email);
-  send(res, 200, { ok: true, visitsDeleted: r.visitsDeleted });
+  const r = archiveClient(cl, body && body.reason ? body.reason : 'Archived by hand', user.email, { closeContracts: true });
+  send(res, 200, { ok: true, visitsDeleted: r.visitsDeleted, contractsClosed: r.contractsClosed, keapLinked: r.keapLinked, blocksRemoved: r.blocksRemoved });
 });
 route('POST', /^\/api\/clients\/(\d+)\/reactivate$/, ['admin','lead'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
   if(!cl) return err(res, 404, 'not found');
   if(!cl.archived_at) return err(res, 400, 'Not archived');
-  reactivateClient(cl, user.email);
-  send(res, 200, { ok: true });
+  const r = reactivateClient(cl, user.email, { reopenContracts: true });
+  send(res, 200, { ok: true, contractsReopened: r.contractsReopened });
+});
+route('GET', /^\/api\/admin\/archived-still-billing$/, ['admin'], (req, res) => {
+  send(res, 200, db.prepare(`SELECT c.id AS contract_id, c.program, c.price, c.keap_subscription_id, c.cancelled_at, c.keap_billing_seen_at,
+      cl.id AS client_id, cl.name, cl.archived_at, cl.archive_reason
+    FROM contracts c JOIN clients cl ON cl.id=c.client_id
+    WHERE c.cancel_source='manual-archive' AND c.keap_billing_seen_at IS NOT NULL AND cl.deleted_at IS NULL
+    ORDER BY c.keap_billing_seen_at`).all());
 });
 route('GET', /^\/api\/clients\/archived$/, ['admin','lead'], (req, res) => {
   send(res, 200, db.prepare(`SELECT cl.id, cl.name, cl.status, cl.archived_at, cl.archive_reason, cl.archived_by, co.name AS assigned_coach_name,
@@ -4368,8 +4526,20 @@ async function onSubscriptionChange(subId, eventKey, opts = {}){
     return { subId, found: false, companyName: pc && pc.company_name || '' };
   }
   let statusChanged = false, priceChanged = false, dateChanged = false;
+  // Closed by hand when the client was archived in the app: Keap still billing must NOT
+  // reopen it (that's what kept resurrecting archived clients). Flag it for the admin
+  // review list instead; the flag clears itself once Keap stops billing too.
+  const closedByArchive = contract.cancel_source === 'manual-archive';
+  if(closedByArchive){
+    if(stillActive && !contract.keap_billing_seen_at){
+      db.prepare('UPDATE contracts SET keap_billing_seen_at=? WHERE id=?').run(new Date().toISOString(), contract.id);
+      log(source, 'contract.keap_still_billing', { contractId: contract.id, subId });
+    } else if(!stillActive && contract.keap_billing_seen_at){
+      db.prepare('UPDATE contracts SET keap_billing_seen_at=NULL WHERE id=?').run(contract.id);
+    }
+  }
   const newStatus = stillActive ? 'active' : 'cancelled';
-  if(contract.status !== newStatus){
+  if(!closedByArchive && contract.status !== newStatus){
     db.prepare('UPDATE contracts SET status=?, cancelled_at=? WHERE id=?')
       .run(newStatus, newStatus === 'cancelled' ? new Date().toISOString() : null, contract.id);
     log(source, 'contract.status', { contractId: contract.id, subId, status: newStatus });

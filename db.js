@@ -165,6 +165,13 @@ ensureColumn('contracts', 'succeeds_contract_id', 'INTEGER');
 /* When a contract's Keap subscription lapsed, so the nightly archive can tell a churn
  * from a program change still in flight (the replacement is uploaded the same day). */
 ensureColumn('contracts', 'cancelled_at', 'TEXT');
+// Offboarding (2026-10-16): a contract closed because the client was archived by hand.
+// Keap sync must not reopen it; if Keap is still billing, keap_billing_seen_at marks it
+// for the admin review list until Keap stops too.
+ensureColumn('contracts', 'cancel_source', 'TEXT');
+ensureColumn('contracts', 'keap_billing_seen_at', 'TEXT');
+ensureColumn('coaches', 'left_date', 'TEXT');
+ensureColumn('coaches', 'reason', 'TEXT');
 ensureColumn('clients', 'assigned_coach_id', 'TEXT');
 /* For cases like Castle (one Keap invoice covering multiple separately-visited
    locations): the linked client's own contract price stays $0, and this field
@@ -2205,7 +2212,25 @@ function leadIssues(){
   return { noLead, strayLeads };
 }
 
+/* One-time (2026-10-16): clients archived BY HAND before the offboarding fix still have
+   'active' contracts, which is what let a Keap sync un-archive them. Close those the way a
+   hand archive does now, so the fix covers existing archives too. Auto-archived clients
+   never have an active contract, so this only touches the hand-archived leftovers. */
+function closeContractsOfArchivedClients(){
+  if(getMeta('archive_contracts_closed_v1')) return;
+  const rows = db.prepare(`SELECT c.id, c.client_id, cl.name, cl.archived_at FROM contracts c JOIN clients cl ON cl.id=c.client_id
+    WHERE cl.archived_at IS NOT NULL AND c.status='active'`).all();
+  const upd = db.prepare("UPDATE contracts SET status='cancelled', cancelled_at=COALESCE(cancelled_at, ?), cancel_source='manual-archive' WHERE id=?");
+  for(const r of rows) upd.run(r.archived_at, r.id);
+  if(rows.length){
+    log('system', 'repair.archived_contracts_closed', { contracts: rows.length, clients: [...new Set(rows.map(r => r.name))] });
+    console.log(`✅ Closed ${rows.length} active contract(s) left on archived clients: ${[...new Set(rows.map(r => r.name))].join(', ')}`);
+  }
+  setMeta('archive_contracts_closed_v1', new Date().toISOString());
+}
+
 ensureCurrentMonthSnapshot();
+closeContractsOfArchivedClients();
 migrateCoachCertifications();
 syncCoachUserTeams();
 seedTeamsFromMeta();
