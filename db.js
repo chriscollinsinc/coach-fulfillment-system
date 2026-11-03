@@ -222,6 +222,39 @@ CREATE INDEX IF NOT EXISTS icn_client ON client_notes(client_id);
 ensureColumn('client_notes', 'note_date', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('client_notes', 'note_type', "TEXT NOT NULL DEFAULT 'Coaching Call'");
 ensureColumn('client_notes', 'edited', 'TEXT');
+/* Final LID Stats (2026-11-03): the post-visit scorecard — the store's numbers for a
+   baseline period ("Before") against the visit week ("After"). Six measures, kept as
+   numbers; the difference is always computed (After − Before), never stored, so it
+   can't disagree with the inputs. client_id is NULL for history imported from the
+   Coach Master File whose store isn't (or isn't recognisably) a client in the app —
+   those wait on Admin › Data until someone links them or hides them. */
+db.exec(`
+CREATE TABLE IF NOT EXISTS lid_stats(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER,
+  visit_id INTEGER,
+  store_label TEXT DEFAULT '',        -- the store as written (imports) or the client name
+  location TEXT DEFAULT '',
+  coach_id TEXT,
+  coach_name TEXT DEFAULT '',
+  visit_label TEXT DEFAULT '',        -- e.g. "Nov 2-6, 2026"
+  visit_date TEXT,                    -- 'YYYY-MM-DD', first day of the visit week (sorting)
+  baseline_label TEXT DEFAULT '',     -- e.g. "5 Day Average", "August Avg"
+  before_elr REAL, after_elr REAL,
+  before_align REAL, after_align REAL,
+  before_fuel REAL, after_fuel REAL,
+  before_brake REAL, after_brake REAL,
+  before_marks REAL, after_marks REAL,
+  before_cp_day REAL, after_cp_day REAL,
+  notes TEXT DEFAULT '',
+  source TEXT DEFAULT 'app',          -- 'app' | 'sheet'
+  source_line INTEGER,                -- row in the sheet, for imports
+  raw TEXT,                           -- the sheet's original cells, for imports
+  unmatched_hidden INTEGER DEFAULT 0, -- import with no client that an admin chose to hide
+  created TEXT, created_by TEXT,
+  updated TEXT, updated_by TEXT);
+CREATE INDEX IF NOT EXISTS ils_client ON lid_stats(client_id);
+`);
 /* Ties a note to the specific visit it documents (set automatically when a coach
    completes a visit and writes a note in the same step) rather than only ever
    being general-purpose client commentary. Nullable — general notes still work. */

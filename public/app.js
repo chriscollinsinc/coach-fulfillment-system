@@ -683,7 +683,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadStillBilling(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadTeamMismatchAudit(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadStillBilling(); loadLidUnmatched(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadTeamMismatchAudit(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
     if(tab==='monthend'){ loadMonthEnd(); }
   }
@@ -3112,6 +3112,8 @@ function clientProfileView(data, notes){
     <p class="small" style="margin-bottom:10px">${visits.length} visit${visits.length===1?'':'s'} across ${laps.length} cycle${laps.length===1?'':'s'} — click a cycle to expand or fold it.</p>
     ${laps.length ? lapHtml : '<p class="small">No visits recorded yet.</p>'}</div>`;
 
+  html += lidStatsPanel(client, data.lidStats || [], visits);
+
   html += `<div class="panel"><h2>📋 Visit Notes</h2>
     <p class="small" style="margin-bottom:10px">Wins, issues and focus recorded when a visit is completed — one card per visit, grouped by contract. Use the arrows or dots to move between visits.</p>
     <div id="notesCarouselContainer">${renderNotesCarousel(st.clientProfile.client.id)}</div>
@@ -3139,6 +3141,156 @@ function clientProfileView(data, notes){
     <p class="small">Top Dog Underground daily tracking data — coming soon once that integration is available.</p>
   </div>`;
   return html;
+}
+/* ---------- Final LID Stats (post-visit scorecard) ----------
+   Baseline ("Before") vs the visit week ("After") on six measures. The change column is
+   always After − Before, worked out here, so it can never disagree with the inputs.
+   History imported from the Coach Master File shows with a "from sheet" tag. */
+const LID_METRICS = [
+  { k:'elr',    label:'CP ELR',         money:true },
+  { k:'align',  label:'Align / wk' },
+  { k:'fuel',   label:'Fuel / wk' },
+  { k:'brake',  label:'Brake / wk' },
+  { k:'marks',  label:'Total marks / wk' },
+  { k:'cp_day', label:'CP $ / day',     money:true },
+];
+const canAddLid = () => ['admin','lead','coach'].includes(D.user.role);
+const canEditLid = s => D.user.role==='admin' || D.user.role==='lead' || s.created_by===D.user.email;
+function lidFmt(v, money){
+  if(v===null || v===undefined || v==='') return '—';
+  const n = +v;
+  if(money) return '$' + n.toLocaleString(undefined, { minimumFractionDigits: Math.abs(n) < 1000 ? 2 : 0, maximumFractionDigits: Math.abs(n) < 1000 ? 2 : 0 });
+  return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+function lidDelta(b, a, money){
+  if(b===null || b===undefined || a===null || a===undefined) return '';
+  const d = (+a) - (+b);
+  const col = d > 0 ? 'var(--ok)' : d < 0 ? 'var(--bad)' : 'var(--muted)';
+  const txt = (d > 0 ? '+' : d < 0 ? '−' : '±') + lidFmt(Math.abs(d), money);
+  return `<div style="color:${col};font-weight:600;font-size:12.5px">${txt}</div>`;
+}
+function lidStatsPanel(client, rows, visits){
+  const latest = rows.find(r => LID_METRICS.some(m => r['before_'+m.k]!=null && r['after_'+m.k]!=null));
+  let h = `<div class="panel"><h2>📈 Final LID Stats${canAddLid() ? ` <button class="btn tiny primary" style="float:right" onclick="lidStatsDlg(${client.id})">Add stats</button>` : ''}</h2>
+    <p class="small" style="margin-bottom:10px">How the store's numbers moved after a visit — the baseline period (Before) against the visit week (After). Green is up, red is down.</p>`;
+  if(!rows.length) return h + `<p class="small">No stats recorded yet.${canAddLid() ? ' Use <b>Add stats</b> after a visit wraps up.' : ''}</p></div>`;
+  if(latest){
+    h += `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:12px">` +
+      LID_METRICS.filter(m => latest['before_'+m.k]!=null && latest['after_'+m.k]!=null).map(m => `<div class="card">
+        <div class="l">${esc(m.label)} · latest</div>
+        <div class="k" style="font-size:20px">${lidFmt(latest['after_'+m.k], m.money)}</div>
+        <div class="small" style="color:var(--muted)">from ${lidFmt(latest['before_'+m.k], m.money)}</div>${lidDelta(latest['before_'+m.k], latest['after_'+m.k], m.money)}</div>`).join('') +
+      `</div><p class="small" style="margin:-4px 0 10px;color:var(--muted)">Latest: ${esc(latest.visit_label || fmt(latest.visit_date))}${latest.coach_name ? ' · ' + esc(latest.coach_name) : ''}</p>`;
+  }
+  const LID_SHOW = 8, showAll = st.lidShowAll === client.id, shown = showAll ? rows : rows.slice(0, LID_SHOW);
+  h += `<div style="overflow-x:auto"><table class="lidtbl"><tr><th>Visit</th><th>Baseline</th>${LID_METRICS.map(m=>`<th class="num">${esc(m.label)}</th>`).join('')}<th></th></tr>` +
+    shown.map(r => `<tr>
+      <td><b>${esc(r.visit_label || (r.visit_date ? fmt(r.visit_date) : '—'))}</b>
+        <div class="small" style="color:var(--muted)">${esc(r.coach_name || '')}${r.source==='sheet' ? `${r.coach_name?' · ':''}<span title="Imported from the Coach Master File${r.store_label && r.store_label!==client.name ? ' as “'+esc(r.store_label)+'”' : ''}">from sheet</span>` : ''}</div>
+        ${r.notes ? `<div class="small" style="color:var(--muted);max-width:220px">📝 ${esc(r.notes)}</div>` : ''}</td>
+      <td class="small">${esc(r.baseline_label || '—')}</td>
+      ${LID_METRICS.map(m => (r['before_'+m.k]==null && r['after_'+m.k]==null) ? `<td class="num small" style="color:var(--muted)">—</td>` : `<td class="num" style="white-space:nowrap"><span class="small" style="color:var(--muted)">${lidFmt(r['before_'+m.k], m.money)} →</span> ${lidFmt(r['after_'+m.k], m.money)}${lidDelta(r['before_'+m.k], r['after_'+m.k], m.money)}</td>`).join('')}
+      <td style="white-space:nowrap">${canEditLid(r) ? `<button class="btn tiny" onclick="lidStatsDlg(${client.id},${r.id})">Edit</button>` : ''}
+        ${D.user.role==='admin' && r.source==='sheet' ? `<button class="btn tiny" title="Not this client? Send it back to Admin › Data to link elsewhere" onclick="lidUnlink(${client.id},${r.id})">Unlink</button>` : ''}
+        ${D.user.role==='admin' ? `<button class="btn tiny danger" onclick="lidDelete(${client.id},${r.id})">Delete</button>` : ''}</td></tr>`).join('') +
+    `</table></div>` +
+    (rows.length > LID_SHOW ? `<p class="small" style="margin-top:8px"><a style="cursor:pointer;color:var(--primary)" onclick="st.lidShowAll=${showAll ? 'null' : client.id};$('#main').innerHTML=clientProfileView(st.clientProfile, st.clientNotes);setupCarouselListeners()">${showAll ? 'Show the latest ' + LID_SHOW + ' only' : `Show all ${rows.length} visits`}</a></p>` : '') +
+    `</div>`;
+  return h;
+}
+function lidWeekLabel(week){
+  if(!week) return '';
+  const s = new Date(week+'T12:00:00Z'), e = new Date(s.getTime() + 4*864e5);
+  const sm = MO[s.getUTCMonth()], em = MO[e.getUTCMonth()];
+  return sm===em ? `${sm} ${s.getUTCDate()}-${e.getUTCDate()}, ${e.getUTCFullYear()}` : `${sm} ${s.getUTCDate()}-${em} ${e.getUTCDate()}, ${e.getUTCFullYear()}`;
+}
+function lidStatsDlg(clientId, id){
+  const data = st.clientProfile || {};
+  const row = id ? (data.lidStats || []).find(r => r.id === id) : null;
+  const done = (data.visits || []).filter(v => v.completed).map(v => ({ v, wk: v.scheduled_week || v.cal_week || v.completed_date || v.due }))
+    .filter(x => x.wk).sort((a,b) => b.wk.localeCompare(a.wk));
+  st._lidVisits = done.map(x => ({ id: x.v.id, wk: x.wk, coach: x.v.completed_by_coach_id || x.v.cal_coach || '' }));
+  const myCoach = D.user.coach_id || '';
+  const coachSel = row ? (row.coach_id || '') : myCoach;
+  const coaches = D.coaches.slice().sort((a,b) => (b.active - a.active) || a.name.localeCompare(b.name));
+  const val = k => row && row[k] != null ? row[k] : '';
+  openDlg(`<h3>${row ? 'Edit' : 'Add'} Final LID Stats</h3>
+    <p class="small" style="color:var(--muted)">${esc(data.client ? data.client.name : '')}</p>
+    <div class="controls" style="align-items:flex-end;gap:10px;flex-wrap:wrap;margin-top:8px">
+      <div style="min-width:240px"><label style="display:block;margin:0 0 3px">Visit</label>
+        <select id="lsVisit" onchange="lidVisitPicked()"><option value="">— not tied to a visit —</option>
+          ${done.map(x => `<option value="${x.v.id}" ${row && row.visit_id===x.v.id ? 'selected' : ''}>wk of ${fmt(x.wk)} — ${esc(x.v.cycle||'')} ${esc(x.v.program||'')}</option>`).join('')}</select></div>
+      <div><label style="display:block;margin:0 0 3px">Visit dates</label><input id="lsLabel" value="${esc(val('visit_label'))}" placeholder="Nov 2-6, 2026" style="width:170px"></div>
+      <div><label style="display:block;margin:0 0 3px">Week of</label><input type="date" id="lsDate" value="${esc(val('visit_date') || '')}" style="width:150px"></div>
+      <div><label style="display:block;margin:0 0 3px">Coach</label><select id="lsCoach"><option value="">—</option>${coaches.map(c => `<option value="${c.id}" ${coachSel===c.id?'selected':''}>${esc(c.name)}${c.active?'':' (former)'}</option>`).join('')}</select></div>
+      <div><label style="display:block;margin:0 0 3px">Baseline period</label><input id="lsBase" value="${esc(val('baseline_label'))}" placeholder="5 Day Average" style="width:160px"></div>
+    </div>
+    <table style="margin-top:12px"><tr><th>Measure</th><th>Before</th><th>After</th><th>Change</th></tr>
+      ${LID_METRICS.map(m => `<tr><td>${esc(m.label)}</td>
+        <td><input type="number" step="any" id="lsB_${m.k}" value="${val('before_'+m.k)}" style="width:110px" oninput="lidLiveDelta('${m.k}',${!!m.money})"></td>
+        <td><input type="number" step="any" id="lsA_${m.k}" value="${val('after_'+m.k)}" style="width:110px" oninput="lidLiveDelta('${m.k}',${!!m.money})"></td>
+        <td id="lsD_${m.k}">${lidDelta(row ? row['before_'+m.k] : null, row ? row['after_'+m.k] : null, m.money)}</td></tr>`).join('')}
+    </table>
+    <label style="margin-top:10px;display:block">Notes</label><textarea id="lsNotes" rows="2" style="width:100%;box-sizing:border-box" placeholder="Anything that explains the numbers — a CDK outage, a manager who quit…">${esc(val('notes'))}</textarea>
+    <div class="dlgrow" style="margin-top:12px"><button class="btn" onclick="closeDlg()">Cancel</button>
+      <button class="btn primary" onclick="lidStatsSave(${clientId},${id || 'null'})">Save</button></div>`);
+  if(!row && done.length){ $('#lsVisit').value = String(done[0].v.id); lidVisitPicked(); }
+}
+function lidVisitPicked(){
+  const id = +$('#lsVisit').value; const v = (st._lidVisits || []).find(x => x.id === id); if(!v) return;
+  $('#lsDate').value = v.wk; $('#lsLabel').value = lidWeekLabel(v.wk);
+  if(v.coach && $('#lsCoach')) $('#lsCoach').value = v.coach;
+}
+function lidLiveDelta(k, money){
+  const b = $('#lsB_'+k).value, a = $('#lsA_'+k).value;
+  $('#lsD_'+k).innerHTML = (b!=='' && a!=='') ? lidDelta(+b, +a, money) : '';
+}
+async function lidStatsSave(clientId, id){
+  const body = { visit_id: $('#lsVisit').value || null, visit_label: $('#lsLabel').value, visit_date: $('#lsDate').value || null,
+    coach_id: $('#lsCoach').value || null, baseline_label: $('#lsBase').value, notes: $('#lsNotes').value };
+  for(const m of LID_METRICS){ body['before_'+m.k] = $('#lsB_'+m.k).value; body['after_'+m.k] = $('#lsA_'+m.k).value; }
+  try{
+    if(id) await api('PATCH', `/api/lid-stats/${id}`, body); else await api('POST', `/api/clients/${clientId}/lid-stats`, body);
+    closeDlg(); toast(id ? 'Stats updated' : 'Stats added'); await loadClientProfile(clientId);
+  }catch(e){ uiAlert(e.message || 'Could not save'); }
+}
+async function lidDelete(clientId, id){
+  if(!(await uiConfirm('Delete this set of stats? This cannot be undone.', 'Delete'))) return;
+  try{ await api('DELETE', `/api/lid-stats/${id}`); toast('Deleted'); await loadClientProfile(clientId); }catch(e){ uiAlert(e.message || 'Could not delete'); }
+}
+async function lidUnlink(clientId, id){
+  if(!(await uiConfirm('Unlink this row from the client? It goes back to Admin › Data › Final LID Stats, where you can link it to the right client.', 'Unlink'))) return;
+  try{ await api('PATCH', `/api/lid-stats/${id}`, { client_id: null }); toast('Unlinked'); await loadClientProfile(clientId); }catch(e){ uiAlert(e.message || 'Could not unlink'); }
+}
+/* Admin › Data: imported history that didn't match a client. */
+async function loadLidUnmatched(){
+  const el = $('#lidUnmatchedOut'); if(!el) return;
+  try{
+    const [r, clients] = await Promise.all([api('GET','/api/admin/lid-stats/unmatched'), st._lidClients ? Promise.resolve(st._lidClients) : api('GET','/api/clients')]);
+    st._lidClients = clients;
+    const showHidden = !!st.lidShowHidden;
+    const groups = r.groups.filter(g => showHidden || !g.hidden);
+    const hiddenN = r.groups.filter(g => g.hidden).length;
+    const opts = `<option value="">— pick a client —</option>` + clients.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(c => `<option value="${c.id}">${esc(c.name)}${c.archived_at?' (archived)':''}</option>`).join('');
+    el.innerHTML = `<p class="small" style="margin-bottom:8px">${r.totals.linked||0} of ${r.totals.total||0} imported rows are on a client profile. ${r.groups.length} store name${r.groups.length===1?'':'s'} below didn't match a client${hiddenN ? ` (${hiddenN} hidden — <a style="cursor:pointer;color:var(--primary)" onclick="st.lidShowHidden=${!showHidden};loadLidUnmatched()">${showHidden?'hide them':'show them'}</a>)` : ''}.</p>` +
+      (groups.length ? `<div style="max-height:480px;overflow:auto"><table><tr><th>As written in the sheet</th><th class="num">Visits</th><th>Dates</th><th>Coaches</th><th>Link to client</th><th></th></tr>` +
+        groups.map((g,i) => `<tr${g.hidden?' style="opacity:.55"':''}><td>${esc(g.store_label||'(blank)')}</td><td class="num">${g.n}</td>
+          <td class="mono small">${g.first_date?fmt(g.first_date):'—'}${g.last_date && g.last_date!==g.first_date?' – '+fmt(g.last_date):''}</td>
+          <td class="small">${esc(g.coaches||'')}</td>
+          <td><select id="lidLink${i}" style="max-width:220px">${opts}</select> <button class="btn tiny primary" onclick="lidLinkGroup(${i})">Link</button></td>
+          <td><button class="btn tiny" onclick="lidHideGroup(${i},${g.hidden?'false':'true'})">${g.hidden?'Unhide':'Hide'}</button></td></tr>`).join('') + `</table></div>`
+      : '<p>Nothing waiting — every imported row is on a client.</p>');
+    st._lidGroups = groups;
+  }catch(e){ el.innerHTML = '<p>Could not load.</p>'; }
+}
+async function lidLinkGroup(i){
+  const g = st._lidGroups[i]; const cid = $('#lidLink'+i).value; if(!g || !cid){ uiAlert('Pick a client first'); return; }
+  try{ const r = await api('POST','/api/admin/lid-stats/link',{ store_label: g.store_label, client_id: +cid }); toast(`Linked ${r.linked} row${r.linked===1?'':'s'}`); loadLidUnmatched(); }
+  catch(e){ uiAlert(e.message || 'Could not link'); }
+}
+async function lidHideGroup(i, hidden){
+  const g = st._lidGroups[i]; if(!g) return;
+  try{ await api('POST','/api/admin/lid-stats/hide',{ store_label: g.store_label, hidden }); loadLidUnmatched(); }catch(e){ uiAlert(e.message || 'Could not update'); }
 }
 function openCoachProfile(id){ st.view='coachprofile'; st.coachId=id; render(); }
 async function loadCoachProfile(id){
@@ -3940,6 +4092,9 @@ function adminDataView(){
   <div class="panel"><h2>Archived clients</h2>
   <p class="small" style="margin-bottom:12px">Clients who've left. Archiving happens automatically when Keap reports their last contract cancelled, and nightly for any client with <b>no active contract</b> who is marked cancelled or inactive or whose 30-day notice has lapsed — a client with a live contract is never archived automatically, whatever their status says. Or by hand from a profile, which also closes their contracts in the app so a Keap sync can't undo it. History is kept; open visits were removed. Reactivate if Keap was wrong or they come back.</p>
   <div id="archivedOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Final LID Stats — imported history without a client</h2>
+  <p class="small" style="margin-bottom:12px">Rows imported from the Coach Master File whose store name didn't match a client in the app — often former clients, or names written differently. Link a name to the right client to move every row with that name onto their profile, or Hide names that belong to stores that were never set up here. Nothing is lost either way.</p>
+  <div id="lidUnmatchedOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Archived, still billing in Keap</h2>
   <p class="small" style="margin-bottom:12px">Clients archived in this app whose Keap subscription was still active at the last sync. The app won't bring them back on its own — cancel the subscription in Keap, or Reactivate here if archiving was a mistake. A row clears itself once Keap stops billing.</p>
   <div id="stillBillingOut" class="small">Loading…</div></div>

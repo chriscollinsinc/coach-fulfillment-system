@@ -3620,10 +3620,11 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
     const doneCommitments = db.prepare(`SELECT a.id, a.text, a.resolved_at, rv.scheduled_week AS done_on
       FROM action_items a LEFT JOIN visits rv ON rv.id=a.resolved_visit_id
       WHERE a.client_id=? AND a.status='done' ORDER BY a.resolved_at DESC LIMIT 20`).all(cl.id);
+    const lidStats = db.prepare(`SELECT ${LID_COLS} FROM lid_stats WHERE client_id=? ORDER BY COALESCE(visit_date,'') DESC, id DESC`).all(cl.id);
     send(res, 200, {
       client: cl,
       assignedCoach,
-      contracts, visits, notes, openCommitments, doneCommitments,
+      contracts, visits, notes, openCommitments, doneCommitments, lidStats,
       visitProgress: { year, total: visitsThisYear.length, completed: completedThisYear },
       health: clientHealth(cl, contracts, visits, assignedCoach),
     });
@@ -4016,6 +4017,146 @@ route('GET', /^\/api\/clients\/(\d+)\/notes-by-cycle$/, ['admin','lead','sales',
     err(res, 500, 'Failed to load notes: ' + e.message);
   }
 });
+/* ---------- Final LID Stats (2026-11-03) ----------
+   The post-visit scorecard: six measures for a baseline period ("Before") against the
+   visit week ("After"). Difference = After − Before, computed by whoever displays it.
+   Anyone who can complete a visit can add one; admins/leads or the person who entered it
+   can edit; only admins delete (same trust rule as notes). History imported from the
+   Coach Master File arrives via importLidStatsSeed() below. */
+const LID_METRICS = ['elr', 'align', 'fuel', 'brake', 'marks', 'cp_day'];
+const LID_COLS = `id, client_id, visit_id, store_label, location, coach_id, coach_name, visit_label, visit_date, baseline_label,
+  ${LID_METRICS.map(k => `before_${k}, after_${k}`).join(', ')}, notes, source, source_line, created, created_by, updated, updated_by`;
+function lidNum(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(/[$,\s]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+function lidFields(body, cl){
+  const f = {};
+  for(const k of LID_METRICS){
+    if(body['before_' + k] !== undefined) f['before_' + k] = lidNum(body['before_' + k]);
+    if(body['after_' + k] !== undefined) f['after_' + k] = lidNum(body['after_' + k]);
+  }
+  for(const k of ['visit_label', 'baseline_label', 'notes', 'location']) if(body[k] !== undefined) f[k] = String(body[k] || '').trim().slice(0, k === 'notes' ? 2000 : 120);
+  if(body.visit_date !== undefined) f.visit_date = /^\d{4}-\d{2}-\d{2}$/.test(body.visit_date || '') ? body.visit_date : null;
+  if(body.visit_id !== undefined){
+    const vid = body.visit_id ? +body.visit_id : null;
+    if(vid){
+      const v = db.prepare('SELECT id, client_id FROM visits WHERE id=?').get(vid);
+      if(!v || v.client_id !== cl.id) return { error: 'That visit does not belong to this client' };
+    }
+    f.visit_id = vid;
+  }
+  if(body.coach_id !== undefined){
+    const co = body.coach_id ? getCoach(String(body.coach_id)) : null;
+    if(body.coach_id && !co) return { error: 'unknown coach' };
+    f.coach_id = co ? co.id : null;
+    f.coach_name = co ? co.name : String(body.coach_name || '').trim().slice(0, 80);
+  }
+  return { f };
+}
+route('POST', /^\/api\/clients\/(\d+)\/lid-stats$/, ['admin','lead','coach'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  const r = lidFields(body || {}, cl); if(r.error) return err(res, 400, r.error);
+  const f = r.f;
+  if(!LID_METRICS.some(k => f['before_' + k] != null || f['after_' + k] != null)) return err(res, 400, 'Enter at least one number');
+  if(f.coach_id === undefined && user.coach_id){ const co = getCoach(user.coach_id); if(co){ f.coach_id = co.id; f.coach_name = co.name; } }
+  const now = new Date().toISOString();
+  Object.assign(f, { client_id: cl.id, store_label: cl.name, source: 'app', created: now, created_by: user.email });
+  const cols = Object.keys(f);
+  const out = db.prepare(`INSERT INTO lid_stats(${cols.join(',')}) VALUES(${cols.map(() => '?').join(',')})`).run(...cols.map(k => f[k]));
+  log(user.email, 'lid_stats.add', { clientId: cl.id, name: cl.name, id: Number(out.lastInsertRowid), visitLabel: f.visit_label || null });
+  send(res, 200, { ok: true, id: Number(out.lastInsertRowid) });
+});
+route('PATCH', /^\/api\/lid-stats\/(\d+)$/, ['admin','lead','coach'], (req, res, m, body, user) => {
+  const row = db.prepare('SELECT * FROM lid_stats WHERE id=?').get(+m[1]);
+  if(!row) return err(res, 404, 'not found');
+  if(!(user.role === 'admin' || user.role === 'lead' || row.created_by === user.email)) return err(res, 403, 'Only an admin, a lead, or the person who entered these stats can edit them');
+  body = body || {};
+  // Admin only: move an imported row to a different client, or unlink it (back to Admin › Data).
+  let clientId = row.client_id;
+  if(body.client_id !== undefined){
+    if(user.role !== 'admin') return err(res, 403, 'Only an admin can move stats to another client');
+    if(body.client_id){ const c2 = db.prepare('SELECT id FROM clients WHERE id=? AND deleted_at IS NULL').get(+body.client_id); if(!c2) return err(res, 400, 'unknown client'); clientId = c2.id; }
+    else clientId = null;
+  }
+  const cl = clientId ? db.prepare('SELECT * FROM clients WHERE id=?').get(clientId) : { id: null };
+  const r = lidFields(body, cl); if(r.error) return err(res, 400, r.error);
+  const f = r.f;
+  if(clientId !== row.client_id){ f.client_id = clientId; if(clientId === null) f.unmatched_hidden = 0; if(row.visit_id) f.visit_id = null; }
+  f.updated = new Date().toISOString(); f.updated_by = user.email;
+  const cols = Object.keys(f);
+  db.prepare(`UPDATE lid_stats SET ${cols.map(k => k + '=?').join(', ')} WHERE id=?`).run(...cols.map(k => f[k]), row.id);
+  log(user.email, 'lid_stats.edit', { id: row.id, clientId: row.client_id, movedTo: clientId !== row.client_id ? clientId : undefined, fields: cols });
+  send(res, 200, { ok: true });
+});
+route('DELETE', /^\/api\/lid-stats\/(\d+)$/, ['admin'], (req, res, m, body, user) => {
+  const row = db.prepare('SELECT * FROM lid_stats WHERE id=?').get(+m[1]);
+  if(!row) return err(res, 404, 'not found');
+  db.prepare('DELETE FROM lid_stats WHERE id=?').run(row.id);
+  log(user.email, 'lid_stats.delete', { id: row.id, clientId: row.client_id, row });
+  send(res, 200, { ok: true });
+});
+// Imported history whose store didn't match a client, grouped by how the store was written.
+route('GET', /^\/api\/admin\/lid-stats\/unmatched$/, ['admin'], (req, res) => {
+  const groups = db.prepare(`SELECT store_label, COUNT(*) n, MIN(visit_date) first_date, MAX(visit_date) last_date,
+      GROUP_CONCAT(DISTINCT NULLIF(coach_name,'')) coaches, MAX(unmatched_hidden) hidden
+    FROM lid_stats WHERE client_id IS NULL GROUP BY store_label ORDER BY MAX(COALESCE(visit_date,'')) DESC`).all();
+  const totals = db.prepare(`SELECT COUNT(*) total, SUM(CASE WHEN client_id IS NOT NULL THEN 1 ELSE 0 END) linked FROM lid_stats`).get();
+  send(res, 200, { groups, totals });
+});
+route('POST', /^\/api\/admin\/lid-stats\/link$/, ['admin'], (req, res, m, body, user) => {
+  const label = String((body && body.store_label) || '');
+  const cl = body && body.client_id ? db.prepare('SELECT id, name FROM clients WHERE id=? AND deleted_at IS NULL').get(+body.client_id) : null;
+  if(!cl) return err(res, 400, 'Pick a client');
+  const n = db.prepare('UPDATE lid_stats SET client_id=?, unmatched_hidden=0, updated=?, updated_by=? WHERE client_id IS NULL AND store_label=?')
+    .run(cl.id, new Date().toISOString(), user.email, label).changes;
+  log(user.email, 'lid_stats.link', { storeLabel: label, clientId: cl.id, client: cl.name, rows: n });
+  send(res, 200, { ok: true, linked: n });
+});
+route('POST', /^\/api\/admin\/lid-stats\/hide$/, ['admin'], (req, res, m, body, user) => {
+  const label = String((body && body.store_label) || '');
+  const n = db.prepare('UPDATE lid_stats SET unmatched_hidden=? WHERE client_id IS NULL AND store_label=?').run(body && body.hidden === false ? 0 : 1, label).changes;
+  send(res, 200, { ok: true, rows: n });
+});
+/* One-time import of the Coach Master File "Final LID Stats" tab (seed/final_lid_stats.json,
+   parsed from the sheet on 2026-11-03: 1,345 visits, 2019 → 2026, exact duplicate blocks
+   dropped). Each store is matched to a client with the same matcher Sheet Recon uses; rows
+   that don't match are kept with no client for Admin › Data. Guarded by a meta flag. */
+function importLidStatsSeed(){
+  if(getMeta('lid_stats_imported_v1')) return;
+  const file = path.join(__dirname, 'seed', 'final_lid_stats.json');
+  if(!fs.existsSync(file)) return;
+  let seed;
+  try{ seed = JSON.parse(fs.readFileSync(file, 'utf8')); }catch(e){ console.error('LID stats seed unreadable:', e.message); return; }
+  const recs = (seed && seed.records) || [];
+  const sheetMatch = buildSheetLabelMatcher();
+  // A one-word client name ("Mills -") would swallow every store that contains the word,
+  // so a match on a single-token name only counts when it is exact.
+  const match = label => { const h = sheetMatch(label); return h && (h.t.length >= 2 || h.n === reconNorm(label)) ? h : null; };
+  const cols = ['client_id','store_label','location','coach_name','visit_label','visit_date','baseline_label',
+    ...LID_METRICS.flatMap(k => ['before_' + k, 'after_' + k]), 'notes','source','source_line','raw','created','created_by'];
+  const ins = db.prepare(`INSERT INTO lid_stats(${cols.join(',')}) VALUES(${cols.map(() => '?').join(',')})`);
+  const now = new Date().toISOString();
+  let matched = 0;
+  db.exec('BEGIN');
+  try{
+    for(const r of recs){
+      const hit = match(r.store_raw || r.store) || (r.store && r.store !== r.store_raw ? match(r.store) : null);
+      if(hit) matched++;
+      const v = { client_id: hit ? hit.id : null, store_label: r.store || r.store_raw || '', location: r.location || '', coach_name: r.coach || '',
+        visit_label: r.visit_label || '', visit_date: r.visit_date || null, baseline_label: r.baseline || '', notes: r.notes || '',
+        source: 'sheet', source_line: r.line || null, raw: JSON.stringify(r.raw || null), created: now, created_by: 'import:coach-master-file' };
+      LID_METRICS.forEach((k, i) => { v['before_' + k] = r.before ? r.before[i] : null; v['after_' + k] = r.after ? r.after[i] : null; });
+      ins.run(...cols.map(c => v[c] === undefined ? null : v[c]));
+    }
+    db.exec('COMMIT');
+  }catch(e){ db.exec('ROLLBACK'); console.error('LID stats import failed:', e.message); return; }
+  setMeta('lid_stats_imported_v1', now);
+  log('system', 'lid_stats.import', { records: recs.length, matched, unmatched: recs.length - matched });
+  console.log(`✅ Final LID Stats imported: ${recs.length} visits, ${matched} matched to a client, ${recs.length - matched} waiting in Admin › Data`);
+}
 const NOTE_TYPES = ['Coaching Call', 'LID', 'General']; // LID is legacy: readable, no longer created by the UI
 /* A note's store must be one the client's contracts actually cover — the UI only offers
  * those, and anything else (a stale dropdown, a hand-rolled request) is dropped rather
@@ -4838,6 +4979,7 @@ function migrateCastleStores(){
 }
 migrateCastleStores();
 
+try{ importLidStatsSeed(); }catch(e){ console.error('LID stats import error:', e.message); }
 server.listen(PORT, () => console.log(`Coach Fulfillment System running → http://localhost:${PORT}`));
 
 // Re-check daily (in addition to the check db.js already runs at startup) so a new
