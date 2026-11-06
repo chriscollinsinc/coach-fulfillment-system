@@ -896,6 +896,13 @@ function callsTrackedFrom(today){
 }
 function monthKey(d){ return d.slice(0,7); }
 function prevMonthKey(k){ const [y,m] = k.split('-').map(Number); return m === 1 ? `${y-1}-12` : `${y}-${String(m-1).padStart(2,'0')}`; }
+/* Winding-down clients: nothing owed from the notice month on if they opted out of the
+   final visit/calls (the usual case); otherwise owed through their paid-through month. */
+function windDownExempt(cl, month){
+  if(!cl.notice_given_date) return false;
+  if(cl.final_optout === 0) return month > (cl.paid_through_date || addDays(cl.notice_given_date, 30)).slice(0,7);
+  return month >= cl.notice_given_date.slice(0,7);
+}
 function callsOwed(today, { coachId = null, team = null, unassigned = false } = {}){
   const thisM = monthKey(today), lastM = prevMonthKey(thisM);
   const floor = callsTrackedFrom(today);
@@ -905,7 +912,7 @@ function callsOwed(today, { coachId = null, team = null, unassigned = false } = 
   // That is what makes a handoff clean: August's missed call stays with the launch coach
   // even after Carl takes the client in September.
   const rows = db.prepare(`
-    SELECT cl.id AS client_id, cl.name AS client, cl.billing_start,
+    SELECT cl.id AS client_id, cl.name AS client, cl.billing_start, cl.notice_given_date, cl.paid_through_date, cl.final_optout,
       (SELECT MAX(n.note_date) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call') AS last_call,
       (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_this_month,
       (SELECT COUNT(*) FROM client_notes n WHERE n.client_id=cl.id AND n.note_type='Coaching Call' AND substr(n.note_date,1,7)=?) AS calls_last_month,
@@ -926,6 +933,9 @@ function callsOwed(today, { coachId = null, team = null, unassigned = false } = 
     if(!r.calls_last_month && !r.visits_last_month && lastM >= floor && (!started || started <= lastM)) owed.push({ month: lastM, kind: 'missed' });
     if(dueThisMonth && !r.calls_this_month && !r.visits_this_month && (!started || started <= thisM)) owed.push({ month: thisM, kind: 'due' });
     for(const o of owed){
+      // Winding down (notice given): the client declines the final month — no call owed
+      // from the notice month on (Mike, 2026-11-05).
+      if(windDownExempt(r, o.month)) continue;
       const owner = clientOwnerForMonth(r.client_id, o.month);
       if(!wanted(owner)) continue;
       const key = r.client_id + '|' + (owner.coach_id || '');
@@ -982,7 +992,7 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
 
   // --- Coaching calls: every client active in the month; done = a Coaching Call note dated in the month
   const clients = db.prepare(`
-    SELECT cl.id, cl.name, cl.billing_start FROM clients cl
+    SELECT cl.id, cl.name, cl.billing_start, cl.notice_given_date, cl.paid_through_date, cl.final_optout FROM clients cl
     WHERE cl.deleted_at IS NULL AND (cl.archived_at IS NULL OR substr(cl.archived_at,1,10) > ?)
       AND EXISTS(SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.archived_at IS NULL
                  AND COALESCE(c.start_date,'0000') <= ?
@@ -994,6 +1004,7 @@ route('GET', /^\/api\/admin\/month-end\/(\d{4}-\d{2})$/, ['admin','lead'], (req,
   const calls = [];
   for(const cl of clients){
     if((cl.billing_start||'').slice(0,7) > period) continue; // not billing yet that month
+    if(windDownExempt(cl, period)) continue; // winding down — no call owed this month
     const owner = clientOwnerForMonth(cl.id, period);
     if(teamFilter && owner.team !== teamFilter) continue;
     const r = callQ.get(cl.id, start, end), vq = visitQ.get(cl.id, start, end);
@@ -3590,8 +3601,8 @@ function computeHealthMap(){
   const progs = {};
   for(const c of cs) (progs[c.client_id] ||= []).push(c.program);
   const out = {};
-  for(const r of db.prepare('SELECT id, status, assigned_coach_id FROM clients WHERE deleted_at IS NULL').all()){
-    if(r.status !== 'active'){ out[r.id] = 'inactive'; continue; }
+  for(const r of db.prepare('SELECT id, status, assigned_coach_id, notice_given_date FROM clients WHERE deleted_at IS NULL').all()){
+    if(r.status !== 'active' || r.notice_given_date){ out[r.id] = 'inactive'; continue; }
     const p = progs[r.id] || [];
     if(p.length && p.every(x => x === 'Coaching Only')){ out[r.id] = r.assigned_coach_id ? 'on_track' : 'behind'; continue; }
     const stale = (!mLastDone[r.id] || mLastDone[r.id] < cut60) && !mScheduled[r.id];
@@ -3641,6 +3652,15 @@ function clientHealth(cl, contracts, visits, assignedCoach){
   const cut60 = new Date(Date.now()-60*24*60*60*1000).toISOString().slice(0,10);
   const plus30 = new Date(Date.now()+30*24*60*60*1000).toISOString().slice(0,10);
   const reasons = [], warnings = [];
+  if(cl.status === 'active' && cl.notice_given_date){
+    const pt = cl.paid_through_date || addDays(cl.notice_given_date, 30);
+    return { level:'inactive', label:'Winding down',
+      reasons: [`Cancelling — notice given ${cl.notice_given_date}, paid through ${pt}.`,
+        cl.final_optout === 0
+          ? `Taking their final visit / calls: anything due through ${pt} stays on; nothing is scheduled after that. Their revenue keeps counting until then.`
+          : 'Opted out of the final visit / calls: off the calendar, nothing owed. Their revenue keeps counting until then.',
+        `Archived automatically after ${pt}, or sooner if Keap cancels the subscription.`], warnings: [] };
+  }
   if(cl.status !== 'active'){
     return { level:'inactive', label: cl.status === 'cancelled' ? 'Cancelled' : 'Inactive',
       reasons: ['No active contracts — history is preserved below.'], warnings: [] };
@@ -3782,27 +3802,56 @@ function archiveClient(cl, reason, actor, opts = {}){
       keapLinked = db.prepare("SELECT COUNT(*) n FROM contracts WHERE client_id=? AND status='active' AND COALESCE(keap_subscription_id,'')<>''").get(cl.id).n;
       contractsClosed = db.prepare("UPDATE contracts SET status='cancelled', cancelled_at=?, cancel_source='manual-archive' WHERE client_id=? AND status='active'").run(now, cl.id).changes;
     }
-    db.prepare("UPDATE clients SET archived_at=?, archive_reason=?, archived_by=?, notice_given_date=NULL, status=CASE WHEN status='active' THEN 'cancelled' ELSE status END WHERE id=?")
+    db.prepare("UPDATE clients SET archived_at=?, archive_reason=?, archived_by=?, status=CASE WHEN status='active' THEN 'cancelled' ELSE status END WHERE id=?")
       .run(now, String(reason || '').slice(0, 200), actor || 'system', cl.id);
     db.exec('COMMIT');
   }catch(e){ db.exec('ROLLBACK'); throw e; }
   // Future visit cards imported from the 2026 sheet are calendar blocks, not visits, so the
   // DELETE above never caught them and the client's name stayed on the board.
-  let blocksRemoved = 0;
-  try{
-    const match = buildSheetLabelMatcher();
-    const thisMon = snapMonday(now.slice(0, 10));
-    const del = db.prepare('DELETE FROM blocks WHERE coach_id=? AND week=?');
-    for(const b of db.prepare("SELECT coach_id, week, label FROM blocks WHERE kind IN ('visit','visit_legacy') AND week>=?").all(thisMon)){
-      const hit = match(b.label);
-      if(hit && hit.id === cl.id) blocksRemoved += del.run(b.coach_id, b.week).changes;
-    }
-  }catch(e){ console.warn('archive: sheet-block cleanup failed', e.message); }
+  const blocksRemoved = removeFutureSheetBlocks(cl.id);
   log(actor || 'system', 'client.archive', { clientId: cl.id, name: cl.name, reason, visitsDeleted, contractsClosed, keapLinked, blocksRemoved });
   return { alreadyArchived: false, visitsDeleted, contractsClosed, keapLinked, blocksRemoved };
 }
+function removeFutureSheetBlocks(clientId, afterDate){
+  let removed = 0;
+  try{
+    const match = buildSheetLabelMatcher();
+    let thisMon = snapMonday(new Date().toISOString().slice(0, 10));
+    if(afterDate && afterDate >= thisMon) thisMon = addDays(afterDate, 1);
+    const del = db.prepare('DELETE FROM blocks WHERE coach_id=? AND week=?');
+    for(const b of db.prepare("SELECT coach_id, week, label FROM blocks WHERE kind IN ('visit','visit_legacy') AND week>=?").all(thisMon)){
+      const hit = match(b.label);
+      if(hit && hit.id === clientId) removed += del.run(b.coach_id, b.week).changes;
+    }
+  }catch(e){ console.warn('sheet-block cleanup failed', e.message); }
+  return removed;
+}
+/* Wind-down (2026-11-05): the client has cancelled but is still paying out their notice.
+   They stay ACTIVE — contract open, revenue counted — through paid_through_date, but come
+   off the calendar today: open visits deleted, future sheet cards cleared, no new visits
+   generated (rolling schedule and Extend skip them), no coaching calls owed (they decline
+   the final month — Mike). The nightly job archives them after paid_through_date, or once
+   Keap cancels, whichever comes first. A client already archived (e.g. "Archive" was used
+   instead) is brought back first so their revenue counts again for the notice period. */
+function windDownClient(cl, noticeDate, paidThrough, actor, optOut = true){
+  let unarchived = 0;
+  if(cl.archived_at){ reactivateClient(cl, actor, { reopenContracts: true }); unarchived = 1; }
+  const pt = paidThrough || addDays(noticeDate, 30);
+  db.prepare('UPDATE clients SET notice_given_date=?, paid_through_date=?, final_optout=? WHERE id=?').run(noticeDate, pt, optOut ? 1 : 0, cl.id);
+  // Opted out: every open visit goes. Taking the final visit: keep what's due or booked
+  // on/before the paid-through date, drop everything after it.
+  const visitsDeleted = optOut
+    ? db.prepare('DELETE FROM visits WHERE client_id=? AND completed=0').run(cl.id).changes
+    : db.prepare("DELETE FROM visits WHERE client_id=? AND completed=0 AND COALESCE(cal_week, due, '9999-12-31') > ?").run(cl.id, pt).changes;
+  const visitsKept = optOut ? 0 : db.prepare('SELECT COUNT(*) n FROM visits WHERE client_id=? AND completed=0').get(cl.id).n;
+  const blocksRemoved = removeFutureSheetBlocks(cl.id, optOut ? null : pt);
+  log(actor || 'system', 'client.wind_down', { clientId: cl.id, name: cl.name, noticeDate, paidThrough: pt, optedOut: !!optOut, visitsDeleted, visitsKept, blocksRemoved, unarchived });
+  return { clientId: cl.id, name: cl.name, visitsDeleted, visitsKept, blocksRemoved, unarchived, paidThrough: pt, optedOut: !!optOut };
+}
 function reactivateClient(cl, actor, opts = {}){
   db.prepare("UPDATE clients SET archived_at=NULL, archive_reason=NULL, archived_by=NULL, status='active' WHERE id=?").run(cl.id);
+  // A hand reactivation means they're staying after all — drop any wind-down marker.
+  if(opts.reopenContracts) db.prepare('UPDATE clients SET notice_given_date=NULL, paid_through_date=NULL WHERE id=?').run(cl.id);
   // Undo a hand archive exactly: the contracts it closed come back. Contracts Keap itself
   // cancelled are left alone — Keap is still the source of truth for those.
   const contractsReopened = opts.reopenContracts
@@ -3854,6 +3903,25 @@ function archiveCancelledClients(){
     const r = archiveClient(cl, `Nightly: ${why}, no active contract`, 'system.nightly');
     done.push({ client: cl.name, why, visitsDeleted: r.visitsDeleted });
   }
+  // Wind-downs past their paid-through date finish even if Keap still shows the
+  // subscription active: the contract is closed in the app (revenue stops) and, if Keap
+  // keeps billing, the client lands on "Archived, still billing in Keap" for a human.
+  const today = new Date().toISOString().slice(0, 10);
+  const finished = db.prepare(`
+    SELECT cl.* FROM clients cl
+    WHERE cl.deleted_at IS NULL AND cl.archived_at IS NULL AND cl.notice_given_date IS NOT NULL
+      AND COALESCE(cl.paid_through_date, date(cl.notice_given_date, '+30 days')) < ?
+      AND EXISTS (SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active')`).all(today);
+  for(const cl of finished){
+    if((cl.keap_id && pendingCompanies.has(String(cl.keap_id))) || pendingNames.has(cl.norm)){
+      held.push({ client: cl.name, why: 'wind-down finished, but a replacement subscription is waiting in Unassigned Clients' });
+      continue;
+    }
+    const pt = cl.paid_through_date || addDays(cl.notice_given_date, 30);
+    const why = `wind-down finished — paid through ${pt}`;
+    const r = archiveClient(cl, `Nightly: ${why}`, 'system.nightly', { closeContracts: true });
+    done.push({ client: cl.name, why, visitsDeleted: r.visitsDeleted });
+  }
   return { archived: done.length, clients: done, held };
 }
 route('POST', /^\/api\/clients\/(\d+)\/archive$/, ['admin','lead'], (req, res, m, body, user) => {
@@ -3898,19 +3966,29 @@ route('POST', /^\/api\/clients\/notice$/, ['admin','lead'], (req, res, m, body, 
   const ids = Array.isArray(body.clientIds) ? [...new Set(body.clientIds.map(Number).filter(Boolean))] : [];
   if(!ids.length) return err(res, 400, 'clientIds required');
   const noticeDate = /^\d{4}-\d{2}-\d{2}$/.test(body.noticeDate || '') ? body.noticeDate : new Date().toISOString().slice(0,10);
+  const paidThrough = /^\d{4}-\d{2}-\d{2}$/.test(body.paidThroughDate || '') ? body.paidThroughDate : null;
   let clientsUpdated = 0, visitsDeleted = 0;
   const results = [];
   for(const id of ids){
     const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(id);
     if(!cl) continue;
-    db.prepare('UPDATE clients SET notice_given_date=? WHERE id=?').run(noticeDate, cl.id);
-    const del = db.prepare('DELETE FROM visits WHERE client_id=? AND completed=0').run(cl.id);
+    const r = windDownClient(cl, noticeDate, paidThrough, user.email, body.optedOut !== false);
     clientsUpdated++;
-    visitsDeleted += del.changes;
-    results.push({ clientId: cl.id, name: cl.name, visitsDeleted: del.changes });
+    visitsDeleted += r.visitsDeleted;
+    results.push(r);
   }
   log(user.email, 'client.give_notice', { noticeDate, clientsUpdated, visitsDeleted, clients: results.map(r => r.name) });
   send(res, 200, { ok: true, clientsUpdated, visitsDeleted, results });
+});
+route('POST', /^\/api\/clients\/(\d+)\/wind-down$/, ['admin','lead'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT * FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  body = body || {};
+  const noticeDate = /^\d{4}-\d{2}-\d{2}$/.test(body.notice_date || '') ? body.notice_date : new Date().toISOString().slice(0,10);
+  const paidThrough = /^\d{4}-\d{2}-\d{2}$/.test(body.paid_through_date || '') ? body.paid_through_date : null;
+  if(paidThrough && paidThrough < noticeDate) return err(res, 400, 'Paid-through date is before the notice date');
+  const r = windDownClient(cl, noticeDate, paidThrough, user.email, body.opted_out !== false);
+  send(res, 200, { ok: true, ...r });
 });
 route('POST', /^\/api\/clients\/(\d+)\/notice\/clear$/, ['admin','lead'], (req, res, m, body, user) => {
   const cl = db.prepare('SELECT * FROM clients WHERE id=?').get(+m[1]);
@@ -3918,7 +3996,7 @@ route('POST', /^\/api\/clients\/(\d+)\/notice\/clear$/, ['admin','lead'], (req, 
   // Clears the marker only — does not recreate any visits that were removed when
   // notice was given. Use this when notice was entered on the wrong client, or a
   // client rescinds and coaching resumes (schedule their next visits normally after).
-  db.prepare('UPDATE clients SET notice_given_date=NULL WHERE id=?').run(cl.id);
+  db.prepare('UPDATE clients SET notice_given_date=NULL, paid_through_date=NULL WHERE id=?').run(cl.id);
   log(user.email, 'client.notice_clear', { clientId: cl.id, name: cl.name });
   send(res, 200, { ok: true });
 });
@@ -4775,6 +4853,8 @@ route('GET', /^\/api\/contracts\/(\d+)\/extend\/preview$/, ['admin','lead'], (re
 route('POST', /^\/api\/contracts\/(\d+)\/extend$/, ['admin','lead'], (req, res, m, body, user) => {
   const c = contractForExtend(m[1]); if(!c) return err(res, 404, 'contract not found');
   if(c.status !== 'active') return err(res, 400, 'Contract is not active');
+  const wd = db.prepare('SELECT notice_given_date FROM clients WHERE id=?').get(c.client_id);
+  if(wd && wd.notice_given_date) return err(res, 400, 'This client is winding down (notice given) — no new visits. Use "Undo wind-down" on their profile first if they are staying.');
   const r = extendRollingSchedule(c, { dryRun: false });
   log(user.email, 'contract.extend_visits', { contractId: c.id, clientId: c.client_id, program: c.program, created: r.created });
   send(res, 200, { ok: true, horizon: rollingHorizon(), ...r });

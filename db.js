@@ -172,6 +172,12 @@ ensureColumn('contracts', 'cancel_source', 'TEXT');
 ensureColumn('contracts', 'keap_billing_seen_at', 'TEXT');
 ensureColumn('coaches', 'left_date', 'TEXT');
 ensureColumn('coaches', 'reason', 'TEXT');
+// Wind-down (2026-11-05): a cancelling client stays active (their revenue counts) through
+// paid_through_date, but is off the calendar and owes no visits or coaching calls.
+ensureColumn('clients', 'paid_through_date', 'TEXT');
+// 1 = the client opted out of the final visit / coaching calls (the usual case): nothing is
+// owed from the notice month on. 0 = they still get service through paid_through_date.
+ensureColumn('clients', 'final_optout', 'INTEGER DEFAULT 1');
 ensureColumn('clients', 'assigned_coach_id', 'TEXT');
 /* For cases like Castle (one Keap invoice covering multiple separately-visited
    locations): the linked client's own contract price stays $0, and this field

@@ -2480,11 +2480,50 @@ const healthPill = h =>
   : h==='behind' ? '<span class="pill p-due">Behind</span>'
   : h==='on_track' ? '<span class="pill p-done">On track</span>'
   : '<span class="pill p-fut">—</span>';
+function paidThrough(c){
+  if(c.paid_through_date) return c.paid_through_date;
+  if(!c.notice_given_date) return null;
+  const d = new Date(c.notice_given_date+'T12:00:00Z'); d.setUTCDate(d.getUTCDate()+30); return d.toISOString().slice(0,10);
+}
 function noticePill(c){
-  if(!c.notice_given_date || c.status==='cancelled') return '';
-  const daysSince = Math.floor((Date.now() - new Date(c.notice_given_date+'T12:00:00').getTime()) / 86400000);
-  return daysSince > 30 ? ' <span class="pill p-over">Notice expired — follow up</span>'
-    : ` <span class="pill p-due">On notice — day ${daysSince}/30</span>`;
+  if(!c.notice_given_date || c.status==='cancelled' || c.archived_at) return '';
+  const pt = paidThrough(c);
+  return pt < TODAY ? ` <span class="pill p-over" title="Archived tonight by the nightly job">Wind-down finished — archiving tonight</span>`
+    : ` <span class="pill p-due" title="Notice given ${fmt(c.notice_given_date)} — off the calendar, revenue still counts">Winding down — paid through ${fmtW(pt)}</span>`;
+}
+/* Cancel — wind down: off the calendar now, revenue counted until they're paid up. */
+function windDownDlg(id, name, noticeDate){
+  const nd = noticeDate || TODAY;
+  const plus30 = iso => { const d = new Date(iso+'T12:00:00Z'); d.setUTCDate(d.getUTCDate()+30); return d.toISOString().slice(0,10); };
+  openDlg(`<h3>Cancel ${esc(name)} — wind down</h3>
+    <p class="small">For a client who has cancelled but is still paying out their notice.</p>
+    <div class="controls" style="align-items:flex-end;gap:12px;margin:10px 0">
+      <div><label style="display:block;margin:0 0 3px">Notice given</label><input type="date" id="wdNotice" value="${nd}" style="width:160px" onchange="$('#wdPaid').value=(${plus30.toString()})(this.value)"></div>
+      <div><label style="display:block;margin:0 0 3px">Paid through</label><input type="date" id="wdPaid" value="${plus30(nd)}" style="width:160px"></div>
+    </div>
+    <label style="display:flex;gap:8px;align-items:center;margin:4px 0 8px;font-size:14px;text-transform:none;letter-spacing:0">
+      <input type="checkbox" id="wdOptOut" checked style="width:auto"> Client has opted out of final visit / calls</label>
+    <ul class="small" style="margin:6px 0 10px 18px;padding:0;line-height:1.6">
+      <li><b>Ticked (the usual case):</b> off the calendar today — every open visit is removed, and no visits or monthly coaching calls are owed from the notice month on.</li>
+      <li><b>Unticked:</b> visits and calls due through the paid-through date stay on; everything after it is removed.</li>
+      <li><b>No new visits</b> are scheduled either way.</li>
+      <li><b>Revenue keeps counting</b> — they stay an active client through the paid-through date.</li>
+      <li><b>Archived automatically</b> the day after the paid-through date, or sooner if Keap cancels. If Keap is still billing by then, they show up under Admin › Data › "Archived, still billing in Keap".</li>
+    </ul>
+    <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
+      <button class="btn danger" onclick="windDownGo(${id})">Wind down</button></div>`);
+}
+async function windDownGo(id){
+  const notice_date = $('#wdNotice').value || TODAY, paid_through_date = $('#wdPaid').value || null, opted_out = !!($('#wdOptOut')||{}).checked;
+  try{
+    const r = await api('POST', `/api/clients/${id}/wind-down`, { notice_date, paid_through_date, opted_out });
+    closeDlg();
+    toast(`Winding down — ${r.visitsDeleted} open visit${r.visitsDeleted===1?'':'s'} removed${r.visitsKept?`, ${r.visitsKept} kept through ${fmt(r.paidThrough)}`:''}, paid through ${fmt(r.paidThrough)}${r.unarchived?' (brought back from the archive)':''}`);
+    await refresh();
+    if(st.view==='clientprofile') await loadClientProfile(id);
+    if($('#stillBillingOut')) loadStillBilling();
+    if($('#archivedOut')) loadArchivedClients();
+  }catch(e){ uiAlert(e.message || 'Could not wind down'); }
 }
 function renderClientTable(){
   const box = $('#clientsOut'); if(!box) return;
@@ -2510,7 +2549,7 @@ function renderClientTable(){
   const bulkOut = $('#cliBulkOut');
   if(bulkOut) bulkOut.innerHTML = (canBulk && sel.size) ? `<div class="panel" style="border-left:4px solid var(--primary);padding:10px 14px;margin-bottom:12px">
     <b>${sel.size} selected</b>
-    <button class="btn tiny danger" style="margin-left:10px" onclick="giveNoticeDlg()">Give 30-day notice</button>
+    <button class="btn tiny danger" style="margin-left:10px" onclick="giveNoticeDlg()">Cancel — wind down</button>
     <button class="btn tiny" onclick="st.cliSel=new Set();renderClientTable()">Clear selection</button></div>` : '';
   box.innerHTML = `<table><tr>${canBulk?`<th style="width:26px"><input type="checkbox" ${rows.length&&rows.every(c=>sel.has(c.id))?'checked':''} onclick="toggleClientAll(this.checked)"></th>`:''}${CLIENT_COLS.map(th).join('')}<th></th></tr>` +
     rows.map(c=>`<tr>${canBulk?`<td onclick="event.stopPropagation()"><input type="checkbox" ${sel.has(c.id)?'checked':''} onclick="toggleClientSel(${c.id},this.checked)"></td>`:''}<td><b>${clientLink(c.name, c.id)}</b>${noticePill(c)}</td>
@@ -2536,29 +2575,34 @@ function giveNoticeDlg(){
   const ids = [...st.cliSel];
   if(!ids.length) return;
   const names = (st.clientsList||[]).filter(c=>ids.includes(c.id)).map(c=>c.name);
-  openDlg(`<h3>Give 30-day notice</h3>
+  openDlg(`<h3>Cancel — wind down</h3>
     <p class="small" style="margin-bottom:10px">For: ${names.map(esc).join(', ')}</p>
     <label>Date the notice email came in</label><input type="date" id="noticeDate" value="${TODAY}">
-    <p class="small" style="margin:10px 0;color:var(--bad,#c23b3b)"><b>This deletes every one of their upcoming/unscheduled visits right now — permanently, not a soft delete.</b> The client's status and revenue are untouched (they're still active through their last paid month); this only stops scheduling new coaching work for them. If notice gets rescinded later, new visits have to be added by hand.</p>
+    <label style="display:flex;gap:8px;align-items:center;margin:10px 0 0;font-size:14px;text-transform:none;letter-spacing:0">
+      <input type="checkbox" id="noticeOptOut" checked style="width:auto"> Clients have opted out of final visit / calls</label>
+    <p class="small" style="margin:6px 0 0">Each is paid through 30 days after the notice date, kept as active (revenue counts) until then, and archived automatically after. Ticked: no visits or coaching calls owed from the notice month on. Unticked: anything due through the paid-through date stays on. To set a different paid-through date, use <b>Cancel — wind down</b> on the client's profile.</p>
+    <p class="small" style="margin:10px 0;color:var(--bad,#c23b3b)"><b>Visits removed here are deleted permanently, not soft-deleted.</b> The client's status and revenue are untouched (they're still active through their last paid month); this only stops scheduling new coaching work for them. If notice gets rescinded later, new visits have to be added by hand.</p>
     <div class="dlgrow"><button class="btn" onclick="closeDlg()">Cancel</button>
-    <button class="btn danger" onclick="doGiveNotice()">Confirm — remove their LIDs</button></div>`);
+    <button class="btn danger" onclick="doGiveNotice()">Wind down</button></div>`);
 }
 async function doGiveNotice(){
   const ids = [...st.cliSel];
   const noticeDate = $('#noticeDate').value || TODAY;
+  const optedOut = !!($('#noticeOptOut')||{}).checked;
   closeDlg();
   try{
-    const r = await api('POST','/api/clients/notice',{ clientIds: ids, noticeDate });
+    const r = await api('POST','/api/clients/notice',{ clientIds: ids, noticeDate, optedOut });
     st.cliSel = new Set();
     await refresh();
-    toast(`${r.clientsUpdated} client(s) marked on notice — ${r.visitsDeleted} visit(s) removed`);
+    toast(`${r.clientsUpdated} client(s) winding down — ${r.visitsDeleted} visit(s) removed`);
   }catch(e){}
 }
 async function clearClientNotice(id){
-  if(!(await uiConfirm('Clear the notice marker for this client? This does not restore any visits that were already removed.','Clear notice'))) return;
+  if(!(await uiConfirm('Undo the wind-down? They go back to a normal active client. Visits that were removed are not restored — use Extend visits on their contract to rebuild the schedule.','Undo wind-down'))) return;
   await api('POST',`/api/clients/${id}/notice/clear`,{});
   await refresh();
-  toast('Notice cleared');
+  if(st.view==='clientprofile') await loadClientProfile(id);
+  toast('Wind-down undone');
 }
 /* Per-contract Keap resync/relink — see the "Keap link" column in the Assignment
  * &amp; Keap details table. Resync re-checks the currently-linked subscription;
@@ -2989,7 +3033,8 @@ function clientProfileView(data, notes){
     <div class="controls">
       <button class="btn tiny" onclick="go('clients')">← All clients</button>
       <span style="flex:1"></span>
-      ${canEdit() && client.notice_given_date && client.status!=='cancelled' ? `<button class="btn tiny" onclick="clearClientNotice(${client.id})">Clear notice</button>` : ''}
+      ${canEdit() && client.notice_given_date && client.status!=='cancelled' && !client.archived_at ? `<button class="btn tiny" onclick="clearClientNotice(${client.id})">Undo wind-down</button>` : ''}
+      ${canEdit() && !client.notice_given_date && !client.archived_at && client.status==='active' ? `<button class="btn tiny" title="Cancelled but still paying out their notice: off the calendar now, revenue counted until they're paid up" onclick="windDownDlg(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Cancel — wind down</button>` : ''}
       ${canEdit() && !client.archived_at ? `<button class="btn tiny" title="Move to the archive: history kept, open visits removed, hidden from working lists" onclick="archiveClientDlg(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Archive client</button>` : ''}
       ${canEdit() && client.archived_at ? `<button class="btn tiny primary" onclick="reactivateClient(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Reactivate</button>` : ''}
       ${D.user.role==='admin' ? `<button class="btn tiny danger" onclick="deleteClientDlg(${client.id},'${esc(client.name).replace(/'/g,"\\'")}')">Delete client</button>` : ''}
@@ -3001,7 +3046,7 @@ function clientProfileView(data, notes){
     <h2 style="margin-top:8px">${esc(client.name)}
       ${client.archived_at?'<span class="pill" style="background:#e8e8ea;color:#55555c">archived</span>':client.status==='active'?'<span class="pill p-done">active</span>':client.status==='cancelled'?'<span class="pill p-over">cancelled</span>':'<span class="pill">inactive</span>'}${noticePill(client)}
     </h2>
-    ${client.notice_given_date ? `<p class="small" style="color:var(--muted)">30-day notice given ${fmt(client.notice_given_date)}${client.status!=='cancelled'?' — no open visits are scheduled for them':''}</p>` : ''}
+    ${client.notice_given_date && (client.archived_at || client.status==='cancelled') ? `<p class="small" style="color:var(--muted)">Notice given ${fmt(client.notice_given_date)}${client.paid_through_date?` · paid through ${fmt(client.paid_through_date)}`:''}</p>` : ''}
     <div class="cards" style="margin-top:12px">
       <div class="card"><div class="k">${visitProgress.completed}/${visitProgress.total}</div><div class="l">Visits completed — ${visitProgress.year}</div></div>
       <div class="card"><div class="k">${contracts.filter(c=>c.status==='active'&&!c.archived_at).length}</div><div class="l">Active contracts</div></div>
@@ -4833,7 +4878,8 @@ async function loadStillBilling(){
     const rows = await api('GET','/api/admin/archived-still-billing');
     el.innerHTML = rows.length ? `<table><tr><th>Client</th><th>Contract</th><th class="num">Keap amount</th><th>Keap subscription</th><th>Archived</th><th></th></tr>` +
       rows.map(r=>`<tr><td>${clientLink(r.name, r.client_id)}</td><td>${esc(r.program||'')}</td><td class="num">${r.price!=null?'$'+Number(r.price).toLocaleString():'—'}</td><td class="mono">${esc(r.keap_subscription_id||'—')}</td><td class="mono">${r.archived_at?fmt(r.archived_at.slice(0,10)):'—'}</td>
-        <td><button class="btn tiny" onclick="reactivateClient(${r.client_id},'${esc(r.name).replace(/'/g,"\\'")}')">Reactivate</button></td></tr>`).join('') + `</table>`
+        <td style="white-space:nowrap"><button class="btn tiny" title="Still paying out a notice: bring their revenue back, keep them off the calendar" onclick="windDownDlg(${r.client_id},'${esc(r.name).replace(/'/g,"\\'")}','${r.archived_at?r.archived_at.slice(0,10):TODAY}')">Wind down</button>
+          <button class="btn tiny" onclick="reactivateClient(${r.client_id},'${esc(r.name).replace(/'/g,"\\'")}')">Reactivate</button></td></tr>`).join('') + `</table>`
       : `<p>Nothing here — every client archived in the app is cancelled in Keap too.</p>`;
   }catch(e){ el.innerHTML = '<p>Could not load.</p>'; }
 }
@@ -4856,6 +4902,9 @@ function archiveClientDlg(id, name){
       <li><b>Cancel the subscription in Keap too.</b> If Keap keeps billing, they're listed under Admin › Data › "Archived, still billing in Keap".</li>
       <li>Reactivate undoes this — the contracts reopen; use Extend visits to rebuild the schedule.</li>
     </ul>
+    <div style="background:#fdeecd;border-left:4px solid var(--warn);padding:8px 12px;margin:0 0 10px;font-size:13px">
+      <b>Still paying out their notice?</b> Archiving stops their revenue today. Use wind-down instead — off the calendar now, revenue counted until they're paid up.
+      <div style="margin-top:6px"><button class="btn tiny" onclick="closeDlg();windDownDlg(${id},'${esc(name).replace(/'/g,"\\'")}')">Wind down instead</button></div></div>
     <label>Reason</label><input id="arcReason" placeholder="e.g. Cancelled — moved to in-house training" style="width:100%;box-sizing:border-box">
     <div class="dlgrow" style="margin-top:12px"><button class="btn" onclick="closeDlg()">Cancel</button>
     <button class="btn primary" onclick="archiveClientGo(${id})">Archive</button></div>`);
