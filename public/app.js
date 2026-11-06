@@ -4060,7 +4060,8 @@ function adminPeopleView(){
     <div class="controls"><button class="btn primary" onclick="coachDlg()">＋ Add coach</button>
     <button class="btn" onclick="teamDlg()">＋ Add team</button></div>`;
   for(const t of D.teams){
-    const members=D.coaches.filter(c=>c.team===t);
+    const members=D.coaches.filter(c=>c.team===t && c.active);
+    const former=D.coaches.filter(c=>c.team===t && !c.active);
     const info = teamInfoFor(t);
     const leadPick = `<select onchange="setTeamLead('${esc(t).replace(/'/g,"\\'")}',this.value)" title="Who leads this team">
         <option value="">${info.lead_coach_id ? '— remove lead —' : '— pick a lead —'}</option>
@@ -4070,16 +4071,18 @@ function adminPeopleView(){
       ${leadPick}
       <span style="flex:1"></span>
       <button class="btn tiny" onclick="renameTeamDlg('${esc(t).replace(/'/g,"\\'")}')">Rename</button>
-      ${members.length?'':`<button class="btn tiny danger" onclick="deleteTeam('${esc(t).replace(/'/g,"\\'")}')">Delete</button>`}
+      ${members.length?'':`<button class="btn tiny danger" title="Former coaches stay in the history; the team name stays on their completed visits" onclick="deleteTeam('${esc(t).replace(/'/g,"\\'")}')">Delete team</button>`}
     </h3><table><tr><th>Coach</th><th class="num">Future visits</th><th>Move to</th><th></th></tr>`;
     members.forEach(c=>{
       const fv=D.visits.filter(v=>!v.completed&&v.cal_coach===c.id&&v.cal_week>=TODAY).length;
       const isLead = c.id===info.lead_coach_id;
       html+=`<tr><td><a onclick="openCoachProfile('${c.id}')" style="cursor:pointer;color:var(--ink);text-decoration:none;display:flex;align-items:center;gap:8px">${avatarHtml(c.name,c.team,26)}<b style="text-decoration:underline;color:var(--primary)">${esc(c.name)}</b>${isLead?' <span title="Team lead" style="color:#c77d0a">★</span>':''}</a></td><td class="num">${fv}</td>
         <td>${isLead ? `<span class="small" style="color:var(--muted)" title="Pick a new lead for Team ${esc(t)} first">leads this team</span>` : `<select onchange="moveCoach('${c.id}',this.value)"><option></option>${D.teams.filter(x=>x!==t).map(x=>`<option>${x}</option>`).join('')}</select>`}</td>
-        <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')" >Deactivate</button></td></tr>`;
+        <td><button class="btn tiny danger" onclick="removeCoach('${c.id}','${esc(c.name)}')" >Offboard</button></td></tr>`;
     });
+    if(!members.length) html+=`<tr><td colspan="4" class="small" style="color:var(--muted)">No active coaches.${former.length ? ' Delete the team once nobody active is left on it.' : ''}</td></tr>`;
     html+=`</table>`;
+    if(former.length) html+=`<p class="small" style="margin:6px 0 14px;color:var(--muted)">Former coaches (${former.length}): ${former.map(c=>`<a style="cursor:pointer;color:var(--primary)" onclick="openCoachProfile('${c.id}')">${esc(c.name)}</a> <a style="cursor:pointer;color:var(--muted);font-size:11px" title="Bring ${esc(c.name)} back as an active coach" onclick="reactivateCoach('${c.id}','${esc(c.name).replace(/'/g,"\\'")}')">(reactivate)</a>`).join(' · ')} — history kept, not shown on calendars.</p>`;
   }
   // Onboarding: which coaches can actually sign in? One row per active coach, with
   // a one-click SSO account creator for the ones who can't yet.
@@ -4087,7 +4090,7 @@ function adminPeopleView(){
   <p class="small" style="margin-bottom:8px">Every coach needs a user account with their real work email before Google sign-in works for them.
   Type the email and click Create — no password needed, they'll use the Google button. Their view of the app is automatically scoped to their own visits and stores.</p>
   <table><tr><th>Coach</th><th>Team</th><th>Sign-in account</th><th></th></tr>`;
-  for(const c of D.coaches){
+  for(const c of D.coaches.filter(c=>c.active)){
     const u = (D.users||[]).find(u=>u.coach_id===c.id && u.active);
     html += `<tr><td style="display:flex;align-items:center;gap:8px">${avatarHtml(c.name,c.team,24)}<b>${esc(c.name)}</b></td><td>${esc(c.team)}</td>` +
       (u ? `<td><span class="pill p-done">✓</span> <span class="mono small">${esc(u.email)}</span></td><td></td>`
@@ -4612,6 +4615,7 @@ async function offboardCoachDlg(id){
   let p;
   try{ p = await api('GET', `/api/coaches/${id}/offboard-preview`); }
   catch(e){ uiAlert(e.message || 'Could not load'); return; }
+  if(!p.coach.active){ uiAlert(`${p.coach.name} is already a former coach — nothing to offboard. Reactivate them from Admin › Teams if they're coming back.`); return; }
   st._ob = p;
   const c = p.coach, first = esc((c.name||'').split(' ')[0] || c.name);
   const opts = () => `<option value="">— Unassigned (team lead picks later) —</option>` +
