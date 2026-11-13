@@ -15,3 +15,7 @@ services:
         value: /opt/render/project/src/data/coach.db
       - key: KEAP_TOKEN
         sync: false
+      - key: TDU_API_TOKEN
+        sync: false
+      - key: TDU_BASE
+        value: https://topdogunderground.com

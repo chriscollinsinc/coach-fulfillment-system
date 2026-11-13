@@ -2895,6 +2895,40 @@ async function doDeleteContract(contractId){
     toast(`Contract deleted${parts.length?' — '+parts.join(', '):''}`);
   }catch(e){ uiAlert(e.message||'Delete failed'); }
 }
+
+/* ---------- Top Dog Underground panel (bottom of client profile) ---------- */
+const TDU_MONEY = n => (n===null||n===undefined||n==='') ? '—' : '$' + Number(n).toLocaleString(undefined,{maximumFractionDigits:0});
+function tduMonthLabel(ym){ if(!ym) return ''; const [y,m]=ym.split('-'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m-1]+' '+y; }
+async function loadTduPanel(id){
+  const box = document.getElementById('tdu-panel'); if(!box) return;
+  let r;
+  try{ r = await api('GET','/api/clients/'+id+'/topdog'); }
+  catch(e){ if(st.clientId===id) box.innerHTML = '<h2>Top Dog Underground</h2><p class="small">Could not load Top Dog data.</p>'; return; }
+  const box2 = document.getElementById('tdu-panel'); if(!box2 || st.clientId!==id) return;
+  box2.innerHTML = tduPanelHtml(r);
+}
+function tduPanelHtml(r){
+  let h = '<h2>Top Dog Underground</h2>';
+  if(!r.available) return h + `<p class="small">${esc(r.reason||'Not available right now.')}</p>`;
+  if(!r.matched) return h + `<p class="small">No Top Dog match for this client (${esc(r.reason||'')}). The client name here must match the Top Dog team name exactly.</p>`;
+  const t = r.tdu || {};
+  h += `<p class="small" style="margin:0 0 10px">Read-only from Top Dog Underground · team “${esc(t.name||'')}”${t.league?' · '+esc(t.league):''}</p>`;
+  const dash = Array.isArray(t.dashboard) ? t.dashboard : [];
+  h += `<h3 style="margin:10px 0 6px">${esc(tduMonthLabel(t.prior_month))} dashboard</h3>`;
+  h += dash.length
+    ? '<table><tr><th>Metric</th><th style="text-align:right">Value</th></tr>' + dash.map(d=>`<tr><td>${esc(d.name||('Field '+d.field_id))}</td><td class="mono" style="text-align:right">${esc(d.value===null||d.value===undefined?'—':String(d.value))}</td></tr>`).join('') + '</table>'
+    : '<p class="small">No dashboard data entered for that month yet.</p>';
+  const days = Array.isArray(t.daily_trackings) ? t.daily_trackings : [];
+  h += `<h3 style="margin:16px 0 6px">${esc(tduMonthLabel(t.current_month))} daily tracking</h3>`;
+  if(!days.length) return h + '<p class="small">No daily tracking submitted this month.</p>';
+  const num = v => Number(v)||0;
+  const sales = d => num(d.actual_customer_sales)+num(d.actual_warranty_sales)+num(d.actual_internal_sales);
+  const gross = d => num(d.actual_customer_gross)+num(d.actual_warranty_gross)+num(d.actual_internal_gross);
+  h += '<table><tr><th>Day</th><th style="text-align:right">Labor sales (actual)</th><th style="text-align:right">Labor gross (actual)</th><th style="text-align:right">Working days</th></tr>'
+    + days.map(d=>`<tr><td class="mono">${esc(String(d.day))}</td><td class="mono" style="text-align:right">${TDU_MONEY(sales(d))}</td><td class="mono" style="text-align:right">${TDU_MONEY(gross(d))}</td><td class="mono" style="text-align:right">${esc(d.working_days_elapsed===null||d.working_days_elapsed===undefined?'—':String(d.working_days_elapsed))}</td></tr>`).join('')
+    + '</table>';
+  return h;
+}
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
 async function attachCompanyId(clientId){
   const companyId = $('#cliCompanyId').value.trim();
@@ -2918,7 +2952,7 @@ async function detachCompanyId(clientId){
   }catch(e){ uiAlert(e.message||'Could not remove company ID'); }
 }
 // Re-render the profile from cached data (no refetch) — for fold/unfold and similar UI-only toggles.
-function rerenderClientProfile(){ if(st.clientProfile && st.view==='clientprofile'){ $('#main').innerHTML = clientProfileView(st.clientProfile, st.clientNotes || []); setupCarouselListeners(); } }
+function rerenderClientProfile(){ if(st.clientProfile && st.view==='clientprofile'){ $('#main').innerHTML = clientProfileView(st.clientProfile, st.clientNotes || []); setupCarouselListeners(); loadTduPanel(st.clientId); } }
 async function loadClientProfile(id){
   try{
     const data = await api('GET','/api/clients/'+id);
@@ -2928,6 +2962,7 @@ async function loadClientProfile(id){
     await loadNotesCarousel(id);
     $('#main').innerHTML = clientProfileView(data, notes);
     setupCarouselListeners();
+    loadTduPanel(id);
   }catch(e){
     console.error('Failed to load client:', id, e);
     $('#main').innerHTML = '<div class="panel"><p class="small">Could not load this client: ' + esc(e.message || e) + '</p></div>';
@@ -3183,8 +3218,8 @@ function clientProfileView(data, notes){
 
   html += `<div class="panel"><h2>Coming soon</h2>
     <p class="small">Zoom coaching call recordings/transcripts — coming soon once Zoom API access is set up.</p>
-    <p class="small">Top Dog Underground daily tracking data — coming soon once that integration is available.</p>
   </div>`;
+  html += `<div class="panel" id="tdu-panel"><h2>Top Dog Underground</h2><p class="small">Loading…</p></div>`;
   return html;
 }
 /* ---------- Final LID Stats (post-visit scorecard) ----------

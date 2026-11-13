@@ -3644,6 +3644,65 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
     err(res, 500, 'database error: ' + e.message);
   }
 });
+/* ---------- Top Dog Underground (TDU) read-only integration ----------
+   Server-side only: the bearer token never reaches the browser. Clients are matched to
+   TDU teams by EXACT normalized name (normName). No fuzzy matching: a wrong match would show
+   another dealership's numbers. Unmatched / ambiguous names are reported, not guessed. */
+const TDU_BASE = (process.env.TDU_BASE || 'https://topdogunderground.com').replace(/\/+$/, '');
+const TDU_TOKEN = process.env.TDU_API_TOKEN || '';
+let tduListCache = { at: 0, data: null };
+async function tduFetch(p){
+  if(!TDU_TOKEN) return { ok:false, status:0, error:'TDU_API_TOKEN is not set' };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('timeout after 15s')), 15000);
+  try{
+    const r = await fetch(TDU_BASE + p, { headers: { Authorization: 'Bearer ' + TDU_TOKEN, Accept: 'application/json' }, signal: ctrl.signal });
+    const t = await r.text(); let j = null; try{ j = JSON.parse(t); }catch(e){}
+    return { ok: r.ok, status: r.status, json: j };
+  }catch(e){ return { ok:false, status:0, error:String(e && e.message || e) }; }
+  finally{ clearTimeout(timer); }
+}
+async function tduClientList(){
+  if(tduListCache.data && Date.now() - tduListCache.at < 5*60*1000) return tduListCache.data;
+  const r = await tduFetch('/api/v1/clients');
+  if(!r.ok || !r.json || !Array.isArray(r.json.clients)) return null;
+  tduListCache = { at: Date.now(), data: r.json.clients };
+  return tduListCache.data;
+}
+function tduMatch(clientName, list){
+  const key = normName(clientName);
+  const hits = list.filter(t => normName(t.name) === key);
+  if(hits.length === 1) return { match: hits[0] };
+  return { match: null, reason: hits.length > 1 ? 'ambiguous (more than one TDU team has this name)' : 'no TDU team with this exact name' };
+}
+route('GET', /^\/api\/clients\/(\d+)\/topdog$/, ['admin','lead','sales','coach'], async (req, res, m) => {
+  try{
+    const cl = db.prepare('SELECT id, name FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
+    if(!cl) return err(res, 404, 'not found');
+    const list = await tduClientList();
+    if(!list) return send(res, 200, { available:false, reason:'Top Dog Underground is not reachable right now' });
+    const { match, reason } = tduMatch(cl.name, list);
+    if(!match) return send(res, 200, { available:true, matched:false, reason });
+    const r = await tduFetch('/api/v1/clients/' + match.id);
+    if(!r.ok || !r.json) return send(res, 200, { available:false, reason:'Top Dog Underground returned an error (' + (r.status || r.error) + ')' });
+    return send(res, 200, { available:true, matched:true, tdu: r.json });
+  }catch(e){
+    console.error('[/api/clients/:id/topdog]', e.message);
+    return err(res, 500, 'Top Dog lookup failed');
+  }
+});
+/* Monthly review helper: active clients here with no exact TDU name match. */
+route('GET', /^\/api\/admin\/topdog-unmatched$/, ['admin'], async (req, res) => {
+  try{
+    const list = await tduClientList();
+    if(!list) return err(res, 502, 'Top Dog Underground is not reachable');
+    const rows = db.prepare("SELECT id, name FROM clients WHERE deleted_at IS NULL AND archived_at IS NULL AND status='active' ORDER BY name").all();
+    const unmatched = rows.map(c => ({ id:c.id, name:c.name, ...tduMatch(c.name, list) })).filter(x => !x.match).map(x => ({ id:x.id, name:x.name, reason:x.reason }));
+    const keys = new Set(rows.map(c => normName(c.name)));
+    const tduOnly = list.filter(t => !keys.has(normName(t.name))).map(t => ({ tdu_id:t.id, name:t.name }));
+    return send(res, 200, { checked: rows.length, unmatched, tdu_only: tduOnly });
+  }catch(e){ return err(res, 500, 'Server error'); }
+});
 /* One computed answer to "is this client okay?" — shown as the banner at the top
    of every client profile. level: on_track | behind | at_risk | inactive.
    reasons[] explains WHY in plain language; fixes[] hints at the next action. */
