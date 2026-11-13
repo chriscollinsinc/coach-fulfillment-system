@@ -2907,6 +2907,17 @@ async function loadTduPanel(id){
   const box2 = document.getElementById('tdu-panel'); if(!box2 || st.clientId!==id) return;
   box2.innerHTML = tduPanelHtml(r);
 }
+
+/* Format one TDU dashboard metric. The type flag (money/sum/percentage) is not fully reliable
+   (e.g. SPOP% is stored as "sum"), so metric names are used as a fallback. */
+function tduFmtValue(d){
+  if(d.value===null||d.value===undefined||d.value==='') return '—';
+  const n = Number(d.value); if(!isFinite(n)) return String(d.value);
+  const name = String(d.name||''), f = String(d.format||'').toLowerCase();
+  if(/%\s*$/.test(name) || f==='percentage' || f==='percent') return n.toLocaleString(undefined,{maximumFractionDigits:1}) + '%';
+  if(f==='money' || /^SPOP\b/.test(name)) return '$' + n.toLocaleString(undefined, Math.abs(n)<1000 ? {minimumFractionDigits:2,maximumFractionDigits:2} : {maximumFractionDigits:0});
+  return n.toLocaleString(undefined,{maximumFractionDigits:2});
+}
 function tduPanelHtml(r){
   let h = '<h2>Top Dog Underground</h2>';
   if(!r.available) return h + `<p class="small">${esc(r.reason||'Not available right now.')}</p>`;
@@ -2916,7 +2927,7 @@ function tduPanelHtml(r){
   const dash = Array.isArray(t.dashboard) ? t.dashboard : [];
   h += `<h3 style="margin:10px 0 6px">${esc(tduMonthLabel(t.prior_month))} dashboard</h3>`;
   h += dash.length
-    ? '<table><tr><th>Metric</th><th style="text-align:right">Value</th></tr>' + dash.map(d=>`<tr><td>${esc(d.name||('Field '+d.field_id))}</td><td class="mono" style="text-align:right">${esc(d.value===null||d.value===undefined?'—':String(d.value))}</td></tr>`).join('') + '</table>'
+    ? '<table><tr><th>Metric</th><th style="text-align:right">Value</th></tr>' + dash.map(d=>`<tr><td>${esc(d.name||('Field '+d.field_id))}</td><td class="mono" style="text-align:right">${esc(tduFmtValue(d))}</td></tr>`).join('') + '</table>'
     : '<p class="small">No dashboard data entered for that month yet.</p>';
   const days = Array.isArray(t.daily_trackings) ? t.daily_trackings : [];
   h += `<h3 style="margin:16px 0 6px">${esc(tduMonthLabel(t.current_month))} daily tracking</h3>`;
