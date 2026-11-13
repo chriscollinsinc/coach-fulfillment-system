@@ -3651,6 +3651,7 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
 const TDU_BASE = (process.env.TDU_BASE || 'https://topdogunderground.com').replace(/\/+$/, '');
 const TDU_TOKEN = process.env.TDU_API_TOKEN || '';
 let tduListCache = { at: 0, data: null };
+let tduLastError = '';
 async function tduFetch(p){
   if(!TDU_TOKEN) return { ok:false, status:0, error:'TDU_API_TOKEN is not set' };
   const ctrl = new AbortController();
@@ -3665,7 +3666,11 @@ async function tduFetch(p){
 async function tduClientList(){
   if(tduListCache.data && Date.now() - tduListCache.at < 5*60*1000) return tduListCache.data;
   const r = await tduFetch('/api/v1/clients');
-  if(!r.ok || !r.json || !Array.isArray(r.json.clients)) return null;
+  if(!r.ok || !r.json || !Array.isArray(r.json.clients)){
+    tduLastError = !TDU_TOKEN ? 'TDU_API_TOKEN is not set on this server' : r.status ? ('Top Dog answered HTTP ' + r.status + (r.status===401 ? ' (token rejected)' : '')) : ('could not connect: ' + (r.error || 'unknown'));
+    console.error('[TDU] list failed:', tduLastError);
+    return null;
+  }
   tduListCache = { at: Date.now(), data: r.json.clients };
   return tduListCache.data;
 }
@@ -3680,7 +3685,7 @@ route('GET', /^\/api\/clients\/(\d+)\/topdog$/, ['admin','lead','sales','coach']
     const cl = db.prepare('SELECT id, name FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
     if(!cl) return err(res, 404, 'not found');
     const list = await tduClientList();
-    if(!list) return send(res, 200, { available:false, reason:'Top Dog Underground is not reachable right now' });
+    if(!list) return send(res, 200, { available:false, reason:'Top Dog Underground is not reachable right now' + (tduLastError ? ' (' + tduLastError + ')' : '') });
     const { match, reason } = tduMatch(cl.name, list);
     if(!match) return send(res, 200, { available:true, matched:false, reason });
     const r = await tduFetch('/api/v1/clients/' + match.id);
