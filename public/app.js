@@ -3285,9 +3285,6 @@ function clientProfileView(data, notes){
     <div style="margin-top:14px">${generalNotes.length ? generalNotes.map(n=>clientNoteCard(client.id, n)).join('') : '<p class="small">No general notes yet.</p>'}</div>
   </div>`;
 
-  html += `<div class="panel"><h2>Coming soon</h2>
-    <p class="small">Zoom coaching call recordings/transcripts — coming soon once Zoom API access is set up.</p>
-  </div>`;
   html += `<div class="panel" id="tdu-panel"><h2>Top Dog Underground</h2><p class="small">Loading…</p></div>`;
   return html;
 }
