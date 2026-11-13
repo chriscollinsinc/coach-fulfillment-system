@@ -2899,15 +2899,6 @@ async function doDeleteContract(contractId){
 /* ---------- Top Dog Underground panel (bottom of client profile) ---------- */
 const TDU_MONEY = n => (n===null||n===undefined||n==='') ? '—' : '$' + Number(n).toLocaleString(undefined,{maximumFractionDigits:0});
 function tduMonthLabel(ym){ if(!ym) return ''; const [y,m]=ym.split('-'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m-1]+' '+y; }
-async function loadTduPanel(id){
-  const box = document.getElementById('tdu-panel'); if(!box) return;
-  let r;
-  try{ r = await api('GET','/api/clients/'+id+'/topdog'); }
-  catch(e){ if(st.clientId===id) box.innerHTML = '<h2>Top Dog Underground</h2><p class="small">Could not load Top Dog data.</p>'; return; }
-  const box2 = document.getElementById('tdu-panel'); if(!box2 || st.clientId!==id) return;
-  box2.innerHTML = tduPanelHtml(r);
-}
-
 /* Format one TDU dashboard metric. The type flag (money/sum/percentage) is not fully reliable
    (e.g. SPOP% is stored as "sum"), so metric names are used as a fallback. */
 function tduFmtValue(d){
@@ -2918,12 +2909,41 @@ function tduFmtValue(d){
   if(f==='money' || /^SPOP\b/.test(name)) return '$' + n.toLocaleString(undefined, Math.abs(n)<1000 ? {minimumFractionDigits:2,maximumFractionDigits:2} : {maximumFractionDigits:0});
   return n.toLocaleString(undefined,{maximumFractionDigits:2});
 }
-function tduPanelHtml(r){
-  let h = '<h2>Top Dog Underground</h2>';
+async function loadTduPanel(id){
+  const box = document.getElementById('tdu-panel'); if(!box) return;
+  let r;
+  try{ r = await api('GET','/api/clients/'+id+'/topdog'); }
+  catch(e){ if(st.clientId===id) box.innerHTML = '<h2>Top Dog Underground</h2><p class="small">Could not load Top Dog data.</p>'; return; }
+  if(st.clientId!==id || !document.getElementById('tdu-panel')) return;
+  if(st.tduTabFor!==id){ st.tduTab = 0; st.tduTabFor = id; }
+  st.tduData = r;
+  renderTduPanel();
+}
+function renderTduPanel(){
+  const box = document.getElementById('tdu-panel'); if(!box || !st.tduData) return;
+  box.innerHTML = tduPanelHtml(st.tduData, st.tduTab||0);
+}
+function tduSelectTab(i){ st.tduTab = i; renderTduPanel(); }
+function tduPanelHtml(r, idx){
+  const adminBtn = D.user.role==='admin' ? `<button class="btn tiny" title="Choose which Top Dog teams belong to this client (for groups with several rooftops)" onclick="tduLinksDlg(${st.clientId})">Manage links</button>` : '';
+  let h = `<div style="display:flex;align-items:center;gap:8px"><h2 style="flex:1;margin:0">Top Dog Underground</h2>${adminBtn}</div>`;
   if(!r.available) return h + `<p class="small">${esc(r.reason||'Not available right now.')}</p>`;
-  if(!r.matched) return h + `<p class="small">No Top Dog match for this client (${esc(r.reason||'')}). The client name here must match the Top Dog team name exactly.</p>`;
-  const t = r.tdu || {};
-  h += `<p class="small" style="margin:0 0 10px">Read-only from Top Dog Underground · team “${esc(t.name||'')}”${t.league?' · '+esc(t.league):''}</p>`;
+  if(!r.matched) return h + `<p class="small">No Top Dog match for this client (${esc(r.reason||'')}). The client name here must match the Top Dog team name exactly${D.user.role==='admin' ? ', or use <b>Manage links</b> to pick the team(s) by hand' : ''}.</p>`;
+  const teams = r.teams || [];
+  const i = Math.min(idx, teams.length-1);
+  if(teams.length>1){
+    h += `<div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">` + teams.map((t,k)=>`<button class="btn tiny${k===i?' primary':''}" onclick="tduSelectTab(${k})">${esc(t.name)}</button>`).join('') + `</div>`;
+    h += `<p class="small" style="margin:0 0 6px">${teams.length} rooftops linked to this client. Use the tabs to switch.</p>`;
+  }
+  return h + tduTeamHtml(teams[i]);
+}
+function tduTeamHtml(team){
+  if(!team) return '';
+  if(team.error) return `<p class="small">${esc(team.name)}: ${esc(team.error)}</p>`;
+  const t = team.tdu || {};
+  let h = '';
+  if(team.status && team.status!=='active') h += `<p class="small" style="background:#fdeecd;border:1px solid var(--warn);padding:8px 10px;border-radius:6px;margin:8px 0"><b>Heads up:</b> Top Dog lists this team as ${team.status==='past_client'?'a <b>Past Client</b>':'<b>not assigned to a league</b>'}. Check which system is out of date. The figures below may be stale.</p>`;
+  h += `<p class="small" style="margin:8px 0 10px">Read-only from Top Dog Underground · team “${esc(t.name||team.name||'')}”${t.league?' · '+esc(t.league):''}${team.source==='manual'?' · linked by hand':''}</p>`;
   const dash = Array.isArray(t.dashboard) ? t.dashboard : [];
   h += `<h3 style="margin:10px 0 6px">${esc(tduMonthLabel(t.prior_month))} dashboard</h3>`;
   h += dash.length
@@ -2935,10 +2955,48 @@ function tduPanelHtml(r){
   const num = v => Number(v)||0;
   const sales = d => num(d.actual_customer_sales)+num(d.actual_warranty_sales)+num(d.actual_internal_sales);
   const gross = d => num(d.actual_customer_gross)+num(d.actual_warranty_gross)+num(d.actual_internal_gross);
-  h += '<table><tr><th>Day</th><th style="text-align:right">Labor sales (actual)</th><th style="text-align:right">Labor gross (actual)</th><th style="text-align:right">Working days</th></tr>'
+  return h + '<table><tr><th>Day</th><th style="text-align:right">Labor sales (actual)</th><th style="text-align:right">Labor gross (actual)</th><th style="text-align:right">Working days</th></tr>'
     + days.map(d=>`<tr><td class="mono">${esc(String(d.day))}</td><td class="mono" style="text-align:right">${TDU_MONEY(sales(d))}</td><td class="mono" style="text-align:right">${TDU_MONEY(gross(d))}</td><td class="mono" style="text-align:right">${esc(d.working_days_elapsed===null||d.working_days_elapsed===undefined?'—':String(d.working_days_elapsed))}</td></tr>`).join('')
     + '</table>';
-  return h;
+}
+/* Admin: pick which Top Dog teams belong to a client (multi-rooftop groups). */
+async function tduLinksDlg(clientId){
+  let teams, links;
+  try{ [teams, links] = await Promise.all([ api('GET','/api/admin/topdog-teams'), api('GET','/api/clients/'+clientId+'/topdog-links') ]); }
+  catch(e){ alert('Could not load Top Dog teams: ' + (e.message||e)); return; }
+  const cname = (st.clientProfile && st.clientProfile.client && st.clientProfile.client.name) || '';
+  st.tduPick = { clientId, teams, sel: new Set(links.team_ids||[]), q: cname.split(/\s+/).slice(0,2).join(' ') };
+  const ov = document.createElement('div');
+  ov.id = 'tdu-links-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;display:flex;align-items:center;justify-content:center';
+  ov.innerHTML = `<div style="background:#fff;border-radius:10px;padding:18px;width:min(620px,94vw);max-height:84vh;display:flex;flex-direction:column;gap:10px">
+    <h2 style="margin:0">Top Dog teams for ${esc(cname)}</h2>
+    <p class="small" style="margin:0">Tick every Top Dog team (rooftop) that belongs to this client. With none ticked, the client is matched by exact name instead.</p>
+    <input id="tdu-pick-q" type="text" value="${esc(st.tduPick.q)}" placeholder="Search Top Dog teams…" oninput="tduPickFilter(this.value)" style="padding:8px;border:1px solid var(--line);border-radius:6px">
+    <div id="tdu-pick-list" style="overflow:auto;border:1px solid var(--line);border-radius:6px;padding:6px 10px;min-height:120px"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="tduPickClose()">Cancel</button>
+      <button class="btn primary" onclick="tduPickSave()">Save links</button>
+    </div></div>`;
+  document.body.appendChild(ov);
+  tduPickRender();
+}
+function tduPickClose(){ const ov = document.getElementById('tdu-links-overlay'); if(ov) ov.remove(); st.tduPick = null; }
+function tduPickFilter(q){ if(st.tduPick){ st.tduPick.q = q; tduPickRender(); } }
+function tduPickToggle(id, on){ if(!st.tduPick) return; if(on) st.tduPick.sel.add(id); else st.tduPick.sel.delete(id); tduPickRender(); }
+function tduPickRender(){
+  const p = st.tduPick; const box = document.getElementById('tdu-pick-list'); if(!p || !box) return;
+  const words = (p.q||'').toLowerCase().split(/\s+/).filter(Boolean);
+  const match = t => words.every(w => t.name.toLowerCase().includes(w));
+  const picked = p.teams.filter(t => p.sel.has(t.id));
+  const rest = p.teams.filter(t => !p.sel.has(t.id) && match(t)).slice(0, 80);
+  box.innerHTML = [...picked, ...rest].map(t => `<label style="display:flex;gap:8px;padding:4px 0;align-items:center;cursor:pointer"><input type="checkbox" ${p.sel.has(t.id)?'checked':''} onchange="tduPickToggle(${t.id},this.checked)"><span>${esc(t.name)}</span><span class="small" style="opacity:.65">${esc(t.league||'')}${t.status!=='active' ? ' · '+esc(t.status.replace('_',' ')) : ''}</span></label>`).join('') || '<p class="small">No teams match.</p>';
+}
+async function tduPickSave(){
+  const p = st.tduPick; if(!p) return;
+  try{ await api('PUT','/api/clients/'+p.clientId+'/topdog-links', { team_ids: [...p.sel] }); }
+  catch(e){ alert('Could not save: ' + (e.message||e)); return; }
+  const id = p.clientId; tduPickClose(); st.tduTab = 0; loadTduPanel(id);
 }
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
 async function attachCompanyId(clientId){

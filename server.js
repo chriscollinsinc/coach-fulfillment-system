@@ -3404,6 +3404,8 @@ async function runNightlyMaintenance(actorEmail){
   catch(e){ summary.outOfOrder = { error: String(e && e.message || e) }; }
   try{ summary.health = snapshotClientHealth(); }
   catch(e){ summary.health = { error: String(e && e.message || e) }; }
+  try{ summary.tdu = await runTduSync(actorEmail); }
+  catch(e){ summary.tdu = { ok:false, error: String(e && e.message || e) }; }
   try{ summary.backup = await takeBackupAndEmail(actorEmail); }
   catch(e){ summary.backup = { error: String(e && e.message || e) }; }
 
@@ -3485,6 +3487,7 @@ async function runNightlyMaintenance(actorEmail){
       if(noKeapClients) integrity.push(`${noKeapClients} active client(s) with no Keap company id linked`);
       if(integrity.length){ lines.push('', 'Data integrity — worth a cleanup pass:'); integrity.forEach(x => lines.push('  - ' + x)); }
     }catch(e){ lines.push('Data integrity check failed: ' + e.message); }
+    try{ for(const l of tduDigestLines(summary.tdu)) lines.push(l); }catch(e){ lines.push('Top Dog sync summary failed: ' + e.message); }
     if(overdue > 0 || stalePending > 0 || syncErrors > 0 || noticeOverdue.length > 0 || !summary.backup.ok) lines.push('', 'One or more of the above needs a look.');
     const admins = ADMIN_EMAILS();
     let digestSent = 0;
@@ -3645,11 +3648,19 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
   }
 });
 /* ---------- Top Dog Underground (TDU) read-only integration ----------
-   Server-side only: the bearer token never reaches the browser. Clients are matched to
-   TDU teams by EXACT normalized name (normName). No fuzzy matching: a wrong match would show
-   another dealership's numbers. Unmatched / ambiguous names are reported, not guessed. */
+   Server-side only: the bearer token never reaches the browser. A client is linked to TDU teams
+   either by an admin-set manual link (needed for multi-rooftop groups: one client, several teams)
+   or by EXACT normalized name (normName). No fuzzy matching: a wrong match would show another
+   dealership's numbers. A nightly sync (runTduSync, called from runNightlyMaintenance) records the
+   match state of every active client and reports changes in the admin digest email. */
 const TDU_BASE = (process.env.TDU_BASE || 'https://topdogunderground.com').replace(/\/+$/, '');
-const TDU_TOKEN = process.env.TDU_API_TOKEN || '';
+const TDU_TOKEN = (process.env.TDU_API_TOKEN || '').trim();
+db.exec(`CREATE TABLE IF NOT EXISTS tdu_links(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL, tdu_team_id INTEGER NOT NULL,
+  tdu_team_name TEXT, created TEXT, created_by TEXT, UNIQUE(client_id, tdu_team_id));
+CREATE TABLE IF NOT EXISTS tdu_sync_state(
+  client_id INTEGER PRIMARY KEY, state TEXT, detail TEXT, team_ids TEXT,
+  first_seen TEXT, state_since TEXT, last_checked TEXT);`);
 let tduListCache = { at: 0, data: null };
 let tduLastError = '';
 async function tduFetch(p){
@@ -3663,8 +3674,8 @@ async function tduFetch(p){
   }catch(e){ return { ok:false, status:0, error:String(e && e.message || e) }; }
   finally{ clearTimeout(timer); }
 }
-async function tduClientList(){
-  if(tduListCache.data && Date.now() - tduListCache.at < 5*60*1000) return tduListCache.data;
+async function tduClientList(force){
+  if(!force && tduListCache.data && Date.now() - tduListCache.at < 5*60*1000) return tduListCache.data;
   const r = await tduFetch('/api/v1/clients');
   if(!r.ok || !r.json || !Array.isArray(r.json.clients)){
     tduLastError = !TDU_TOKEN ? 'TDU_API_TOKEN is not set on this server' : r.status ? ('Top Dog answered HTTP ' + r.status + (r.status===401 ? ' (token rejected)' : '')) : ('could not connect: ' + (r.error || 'unknown'));
@@ -3677,36 +3688,162 @@ async function tduClientList(){
 function tduMatch(clientName, list){
   const key = normName(clientName);
   const hits = list.filter(t => normName(t.name) === key);
+  if(!hits.length) return { match: null, reason: 'no TDU team with this exact name' };
+  const act = hits.filter(t => t.status === 'active');
+  if(act.length === 1) return { match: act[0] };
+  if(act.length > 1) return { match: null, reason: 'ambiguous (more than one active TDU team has this name)' };
   if(hits.length === 1) return { match: hits[0] };
-  return { match: null, reason: hits.length > 1 ? 'ambiguous (more than one TDU team has this name)' : 'no TDU team with this exact name' };
+  return { match: null, reason: 'ambiguous (several TDU teams share this name, none active)' };
+}
+/* Teams linked to a client: manual links win; otherwise a single exact-name match. */
+function tduResolveTeams(cl, list){
+  const byId = new Map(list.map(t => [t.id, t]));
+  const manual = db.prepare('SELECT tdu_team_id, tdu_team_name FROM tdu_links WHERE client_id=? ORDER BY tdu_team_name').all(cl.id);
+  if(manual.length){
+    return { teams: manual.map(l => {
+      const t = byId.get(l.tdu_team_id);
+      return t ? { id:t.id, name:t.name, status:t.status || 'active', source:'manual', league:t.league || '' }
+               : { id:l.tdu_team_id, name:l.tdu_team_name || ('Team ' + l.tdu_team_id), status:'missing', source:'manual', league:'' };
+    }) };
+  }
+  const { match, reason } = tduMatch(cl.name, list);
+  if(match) return { teams: [{ id:match.id, name:match.name, status:match.status || 'active', source:'name', league:match.league || '' }] };
+  return { teams: [], reason };
+}
+function tduClassify(cl, resolved){
+  const names = resolved.teams.map(t => t.name).join(' + ');
+  if(cl.notice_given_date) return { state:'on_notice', detail: resolved.teams.length ? names : (resolved.reason || '') };
+  if(!resolved.teams.length) return { state:'unmatched', detail: resolved.reason || '' };
+  const bad = resolved.teams.filter(t => t.status !== 'active');
+  if(bad.length) return { state:'status_mismatch', detail: bad.map(t => t.name + ': ' + t.status.replace('_',' ')).join('; ') };
+  return { state:'matched', detail: names };
+}
+const tduActiveClients = () => db.prepare("SELECT id, name, status, archived_at, notice_given_date FROM clients WHERE deleted_at IS NULL AND status='active' AND archived_at IS NULL ORDER BY name").all();
+
+/* Nightly: record each active client's Top Dog match state; report what changed since last night. */
+async function runTduSync(actor){
+  const list = await tduClientList(true);
+  if(!list) return { ok:false, error: tduLastError || 'Top Dog Underground is not reachable' };
+  const now = new Date().toISOString();
+  const clients = tduActiveClients();
+  const prev = new Map(db.prepare('SELECT * FROM tdu_sync_state').all().map(r => [r.client_id, r]));
+  const up = db.prepare(`INSERT INTO tdu_sync_state(client_id,state,detail,team_ids,first_seen,state_since,last_checked) VALUES(?,?,?,?,?,?,?)
+    ON CONFLICT(client_id) DO UPDATE SET state=excluded.state, detail=excluded.detail, team_ids=excluded.team_ids, state_since=excluded.state_since, last_checked=excluded.last_checked`);
+  const counts = { matched:0, unmatched:0, status_mismatch:0, on_notice:0 };
+  const newlyMatched = [], regressed = [], unmatched = [], mismatch = [];
+  for(const c of clients){
+    const resolved = tduResolveTeams(c, list);
+    const { state, detail } = tduClassify(c, resolved);
+    const p = prev.get(c.id);
+    const since = p && p.state === state ? p.state_since : now;
+    up.run(c.id, state, detail, JSON.stringify(resolved.teams.map(t => t.id)), p ? p.first_seen : now, since, now);
+    counts[state]++;
+    if(p && p.state !== 'matched' && state === 'matched') newlyMatched.push(`${c.name} → ${detail}`);
+    if(p && p.state === 'matched' && (state === 'unmatched' || state === 'status_mismatch')) regressed.push(`${c.name}: ${state === 'unmatched' ? 'no longer matches a Top Dog team' : detail}`);
+    if(state === 'unmatched') unmatched.push({ name:c.name, since: since.slice(0,10), detail });
+    if(state === 'status_mismatch') mismatch.push({ name:c.name, since: since.slice(0,10), detail });
+  }
+  const ids = clients.map(c => c.id);
+  if(ids.length) db.prepare(`DELETE FROM tdu_sync_state WHERE client_id NOT IN (${ids.map(() => '?').join(',')})`).run(...ids);
+  const activeNow = list.filter(t => t.status === 'active');
+  let newTduTeams = [];
+  try{
+    const known = JSON.parse(getMeta('tdu_known_active_ids') || 'null');
+    if(Array.isArray(known)){ const ks = new Set(known); newTduTeams = activeNow.filter(t => !ks.has(t.id)).map(t => t.name); }
+  }catch(e){}
+  setMeta('tdu_known_active_ids', JSON.stringify(activeNow.map(t => t.id)));
+  const summary = { ok:true, at: now, checked: clients.length, counts, newlyMatched, regressed, unmatched, mismatch, newTduTeams, tduActive: activeNow.length };
+  setMeta('tdu_last_sync_at', now);
+  setMeta('tdu_last_sync_summary', JSON.stringify(summary));
+  return summary;
+}
+function tduDigestLines(s){
+  if(!s) return [];
+  if(!s.ok) return ['', 'Top Dog link: sync FAILED — ' + (s.error || 'unknown')];
+  const L = ['', `Top Dog link: ${s.checked} active client(s) checked — ${s.counts.matched} matched, ${s.counts.unmatched} with no Top Dog team, ${s.counts.status_mismatch} status mismatch, ${s.counts.on_notice} on notice (${s.tduActive} active teams in Top Dog)`];
+  const add = (title, arr, fmt) => { if(arr && arr.length){ L.push('  ' + title); arr.slice(0,20).forEach(x => L.push('    - ' + fmt(x))); if(arr.length > 20) L.push(`    …and ${arr.length - 20} more`); } };
+  add('Newly matched since last night:', s.newlyMatched, x => x);
+  add('No longer matching since last night:', s.regressed, x => x);
+  add('Still no Top Dog team (since):', s.unmatched, x => `${x.name} (since ${x.since})`);
+  add('Status mismatch — Top Dog does not list them as active (since):', s.mismatch, x => `${x.name}: ${x.detail} (since ${x.since})`);
+  add('New active teams in Top Dog since last night:', s.newTduTeams, x => x);
+  return L;
 }
 route('GET', /^\/api\/clients\/(\d+)\/topdog$/, ['admin','lead','sales','coach'], async (req, res, m) => {
   try{
-    const cl = db.prepare('SELECT id, name FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
+    const cl = db.prepare('SELECT id, name, notice_given_date FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
     if(!cl) return err(res, 404, 'not found');
     const list = await tduClientList();
     if(!list) return send(res, 200, { available:false, reason:'Top Dog Underground is not reachable right now' + (tduLastError ? ' (' + tduLastError + ')' : '') });
-    const { match, reason } = tduMatch(cl.name, list);
-    if(!match) return send(res, 200, { available:true, matched:false, reason });
-    const r = await tduFetch('/api/v1/clients/' + match.id);
-    if(!r.ok || !r.json) return send(res, 200, { available:false, reason:'Top Dog Underground returned an error (' + (r.status || r.error) + ')' });
-    return send(res, 200, { available:true, matched:true, tdu: r.json });
+    const resolved = tduResolveTeams(cl, list);
+    if(!resolved.teams.length) return send(res, 200, { available:true, matched:false, reason: resolved.reason });
+    const teams = await Promise.all(resolved.teams.map(async t => {
+      if(t.status === 'missing') return { ...t, tdu:null, error:'This team is no longer in the Top Dog list (archived or hidden)' };
+      const r = await tduFetch('/api/v1/clients/' + t.id);
+      if(!r.ok || !r.json) return { ...t, tdu:null, error:'Top Dog returned an error (' + (r.status || r.error) + ')' };
+      return { ...t, tdu: r.json };
+    }));
+    return send(res, 200, { available:true, matched:true, teams });
   }catch(e){
     console.error('[/api/clients/:id/topdog]', e.message);
     return err(res, 500, 'Top Dog lookup failed');
   }
 });
-/* Monthly review helper: active clients here with no exact TDU name match. */
-route('GET', /^\/api\/admin\/topdog-unmatched$/, ['admin'], async (req, res) => {
+/* Manual links (admin): one ccicoach client -> one or more Top Dog teams. */
+route('GET', /^\/api\/admin\/topdog-teams$/, ['admin'], async (req, res) => {
+  const list = await tduClientList();
+  if(!list) return err(res, 502, 'Top Dog Underground is not reachable' + (tduLastError ? ' (' + tduLastError + ')' : ''));
+  return send(res, 200, list.filter(t => t.status !== 'unassigned' || true).map(t => ({ id:t.id, name:t.name, status:t.status || 'active', league:t.league || '' })).sort((a,b) => a.name.localeCompare(b.name)));
+});
+route('GET', /^\/api\/clients\/(\d+)\/topdog-links$/, ['admin'], (req, res, m) => {
+  const rows = db.prepare('SELECT tdu_team_id FROM tdu_links WHERE client_id=? ORDER BY tdu_team_name').all(+m[1]);
+  return send(res, 200, { team_ids: rows.map(r => r.tdu_team_id) });
+});
+route('PUT', /^\/api\/clients\/(\d+)\/topdog-links$/, ['admin'], async (req, res, m, body, user) => {
   try{
+    const cl = db.prepare('SELECT id, name FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
+    if(!cl) return err(res, 404, 'not found');
+    const idsIn = Array.isArray(body && body.team_ids) ? body.team_ids.map(x => parseInt(x, 10)).filter(Number.isInteger) : null;
+    if(!idsIn || idsIn.length > 25) return err(res, 400, 'team_ids (up to 25) required');
     const list = await tduClientList();
     if(!list) return err(res, 502, 'Top Dog Underground is not reachable');
-    const rows = db.prepare("SELECT id, name FROM clients WHERE deleted_at IS NULL AND archived_at IS NULL AND status='active' ORDER BY name").all();
-    const unmatched = rows.map(c => ({ id:c.id, name:c.name, ...tduMatch(c.name, list) })).filter(x => !x.match).map(x => ({ id:x.id, name:x.name, reason:x.reason }));
-    const keys = new Set(rows.map(c => normName(c.name)));
-    const tduOnly = list.filter(t => !keys.has(normName(t.name))).map(t => ({ tdu_id:t.id, name:t.name }));
-    return send(res, 200, { checked: rows.length, unmatched, tdu_only: tduOnly });
-  }catch(e){ return err(res, 500, 'Server error'); }
+    const byId = new Map(list.map(t => [t.id, t]));
+    const ids = [...new Set(idsIn)].filter(id => byId.has(id));
+    db.exec('BEGIN');
+    try{
+      db.prepare('DELETE FROM tdu_links WHERE client_id=?').run(cl.id);
+      const ins = db.prepare('INSERT INTO tdu_links(client_id, tdu_team_id, tdu_team_name, created, created_by) VALUES(?,?,?,?,?)');
+      for(const id of ids) ins.run(cl.id, id, byId.get(id).name, new Date().toISOString(), user.email);
+      db.exec('COMMIT');
+    }catch(e){ db.exec('ROLLBACK'); throw e; }
+    log(user.email, 'tdu.links', { clientId: cl.id, name: cl.name, teamIds: ids });
+    return send(res, 200, { ok:true, team_ids: ids });
+  }catch(e){ console.error('[tdu links]', e.message); return err(res, 500, 'Server error'); }
+});
+/* Monthly-review helper (live) and manual "run the sync now". */
+route('GET', /^\/api\/admin\/topdog-unmatched$/, ['admin'], async (req, res) => {
+  try{
+    const list = await tduClientList(true);
+    if(!list) return err(res, 502, 'Top Dog Underground is not reachable' + (tduLastError ? ' (' + tduLastError + ')' : ''));
+    const clients = tduActiveClients();
+    const out = { checked_active: clients.length, last_sync_at: getMeta('tdu_last_sync_at'), unmatched: [], status_mismatch: [], on_notice: [], tdu_only: [] };
+    const linked = new Set();
+    for(const c of clients){
+      const resolved = tduResolveTeams(c, list);
+      resolved.teams.forEach(t => linked.add(t.id));
+      const { state, detail } = tduClassify(c, resolved);
+      if(state === 'unmatched') out.unmatched.push({ id:c.id, name:c.name, reason:detail });
+      else if(state === 'status_mismatch') out.status_mismatch.push({ id:c.id, name:c.name, detail });
+      else if(state === 'on_notice') out.on_notice.push({ id:c.id, name:c.name });
+    }
+    const allNames = new Set(db.prepare('SELECT name FROM clients WHERE deleted_at IS NULL').all().map(c => normName(c.name)));
+    out.tdu_only = list.filter(t => t.status === 'active' && !linked.has(t.id) && !allNames.has(normName(t.name))).map(t => ({ tdu_id:t.id, name:t.name, league:t.league || '' }));
+    return send(res, 200, out);
+  }catch(e){ console.error('[TDU] report', e.message); return err(res, 500, 'Server error'); }
+});
+route('POST', /^\/api\/admin\/topdog-sync$/, ['admin'], async (req, res, m, body, user) => {
+  try{ const s = await runTduSync(user.email); return send(res, s.ok ? 200 : 502, s); }
+  catch(e){ console.error('[TDU] manual sync', e.message); return err(res, 500, 'Server error'); }
 });
 /* One computed answer to "is this client okay?" — shown as the banner at the top
    of every client profile. level: on_track | behind | at_risk | inactive.
