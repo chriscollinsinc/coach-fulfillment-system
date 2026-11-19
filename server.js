@@ -3874,7 +3874,14 @@ route('GET', /^\/api\/clients\/(\d+)\/topdog$/, ['admin','lead','sales','coach']
       const year = qYear >= 2015 && qYear <= 2100 ? qYear : (Array.isArray(r.json.dashboards) ? askYear : +String(r.json.prior_month || new Date().toISOString()).slice(0, 4));
       let yearData = null;
       try{ yearData = await tduTeamYear(t.id, year, r.json); }catch(e){ console.error('[TDU] year', e.message); }
-      return { ...t, tdu: r.json, year: yearData };
+      // The year before, for coloring January (vs December) and same-month-last-year.
+      // Only when Top Dog answers whole years in one call, so this stays a single extra request.
+      let prevYear = null;
+      if(yearData && yearData.mode === 'year'){
+        try{ prevYear = await tduTeamYear(t.id, year - 1, null); }catch(e){ console.error('[TDU] prev year', e.message); }
+        if(prevYear && prevYear.mode !== 'year') prevYear = null;
+      }
+      return { ...t, tdu: r.json, year: yearData, prev_year: prevYear };
     }));
     return send(res, 200, { available:true, matched:true, teams });
   }catch(e){

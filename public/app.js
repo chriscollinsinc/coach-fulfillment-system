@@ -2901,29 +2901,67 @@ const TDU_MONEY = n => (n===null||n===undefined||n==='') ? '—' : '$' + Number(
 /* Calendar-year dashboard: one row per metric, one column per month. Stores report a month
    behind, so the latest filled column is usually two months back — that is normal. */
 function tduSetYear(y){ st.tduYear = y; const box = document.getElementById('tdu-panel'); if(box) box.style.opacity = '.6'; loadTduPanel(st.clientId).then(()=>{ const b = document.getElementById('tdu-panel'); if(b) b.style.opacity=''; }); }
+/* Which way is "better" for a metric: 1 = higher is better, -1 = lower is better (rankings),
+   0 = not colored (headcounts — more people is not automatically better or worse). */
+function tduDir(name){ const n = String(name||''); if(/rank/i.test(n)) return -1; if(/^(number|#|no\.?)\s*of\b|headcount/i.test(n)) return 0; return 1; }
+function tduNum(d){ if(!d || d.value===null || d.value===undefined || d.value==='') return null; const n = Number(d.value); return isFinite(n) ? n : null; }
+function tduSetCmp(c){ st.tduCmp = c; renderTduPanel(); }
 function tduYearHtml(team, t){
   const yd = team.year || { year: +(String(t.prior_month||TODAY).slice(0,4)), mode:'single', months: t.prior_month ? [{ month: t.prior_month, dashboard: t.dashboard || [] }] : [] };
   const y = yd.year, MO3 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const byMonth = {}; (yd.months||[]).forEach(m => { if(m.dashboard && m.dashboard.length) byMonth[m.month] = m.dashboard; });
+  const toMap = arr => { const o = {}; (arr||[]).forEach(m => { if(m.dashboard && m.dashboard.length) o[m.month] = m.dashboard; }); return o; };
+  const byMonth = toMap(yd.months), prevMonths = toMap(team.prev_year && team.prev_year.months);
   const filled = Object.keys(byMonth).sort();
   const latest = filled[filled.length-1] || null;
   // Metric rows in Top Dog's order, taken from the most recent month that has them.
   const fields = []; const seen = new Set();
   for(const k of filled.slice().reverse()) for(const d of byMonth[k]){ const id = d.field_id ?? d.name; if(!seen.has(id)){ seen.add(id); fields.push({ id, name: d.name || ('Field '+d.field_id), format: d.format }); } }
-  const thisYear = +TODAY.slice(0,4);
+  const thisYear = +TODAY.slice(0,4), thisMonth = +TODAY.slice(5,7);
+  // Stores report a month behind, so in the current year only months up to last month can
+  // have numbers. Later months are left off instead of showing empty columns.
+  const latestNo = latest ? +latest.slice(5,7) : 0;
+  const nCols = y < thisYear ? 12 : Math.min(12, Math.max(y === thisYear ? thisMonth - 1 : 0, latestNo));
+  const cmp = st.tduCmp || 'mom';
+  const hasPrev = Object.keys(prevMonths).length > 0;
+  const cmpBtn = (k, label) => `<button class="btn tiny${cmp===k?' primary':''}" onclick="tduSetCmp('${k}')">${label}</button>`;
   let h = `<div style="display:flex;align-items:center;gap:8px;margin:12px 0 6px;flex-wrap:wrap">
     <h3 style="margin:0;flex:1">${y} dashboard</h3>
+    <span class="small" style="color:var(--muted)">Color by</span>${cmpBtn('mom','Month over month')}${cmpBtn('yoy','Same month last year')}${cmpBtn('off','Off')}
+    <span style="width:8px"></span>
     <button class="btn tiny" onclick="tduSetYear(${y-1})">‹ ${y-1}</button>
     ${y < thisYear ? `<button class="btn tiny" onclick="tduSetYear(${y+1})">${y+1} ›</button>` : ''}</div>`;
+  if(!nCols) return h + `<p class="small">No ${y} months have reported yet — January numbers arrive during February.</p>`;
   if(!fields.length) return h + (yd.mode==='single' && y===+(String(t.prior_month||'').slice(0,4))
     ? `<p class="small">Top Dog hasn't received ${esc(tduMonthLabel(t.prior_month))} numbers for this store yet — stores report a month behind. Earlier months will show here once Top Dog sends the whole year.</p>`
     : `<p class="small">No dashboard numbers in Top Dog for ${y}.</p>`);
-  const cell = (k, f) => { const d = (byMonth[k]||[]).find(x => (x.field_id ?? x.name) === f.id); return d ? esc(tduFmtValue(d)) : '<span style="color:var(--muted)">—</span>'; };
-  const cols = MO3.map((m,i) => `${y}-${String(i+1).padStart(2,'0')}`);
-  h += `<div style="overflow-x:auto"><table style="font-size:12.5px"><tr><th style="position:sticky;left:0;background:var(--card,#fff)">Metric</th>${cols.map((k,i)=>`<th style="text-align:right;${k===latest?'color:var(--primary)':''}">${MO3[i]}</th>`).join('')}</tr>` +
-    fields.map(f => `<tr><td style="position:sticky;left:0;background:var(--card,#fff);white-space:nowrap">${esc(f.name)}</td>${cols.map(k => `<td class="mono" style="text-align:right;white-space:nowrap;${k===latest?'font-weight:600':''}">${byMonth[k] ? cell(k, f) : '<span style="color:var(--muted)">—</span>'}</td>`).join('')}</tr>`).join('') +
+  const find = (dash, f) => (dash||[]).find(x => (x.field_id ?? x.name) === f.id) || (dash||[]).find(x => x.name === f.name);
+  const ym = (yy, mm) => `${yy}-${String(mm).padStart(2,'0')}`;
+  // The month a cell is compared against, and where to find it.
+  const compareTo = mm => cmp === 'yoy' ? { key: ym(y-1, mm), src: prevMonths }
+    : mm === 1 ? { key: ym(y-1, 12), src: prevMonths } : { key: ym(y, mm-1), src: byMonth };
+  const GOOD = 'rgba(30,142,90,.26)', BAD = 'rgba(194,59,59,.26)';
+  const cell = (mm, f) => {
+    const k = ym(y, mm), d = find(byMonth[k], f);
+    if(!d) return `<td class="mono" style="text-align:right;color:var(--muted)">—</td>`;
+    const txt = esc(tduFmtValue(d)), bold = k===latest ? 'font-weight:600;' : '';
+    const dir = tduDir(f.name), v = tduNum(d);
+    if(cmp === 'off' || !dir || v === null) return `<td class="mono" style="text-align:right;white-space:nowrap;${bold}">${txt}</td>`;
+    const c = compareTo(mm), pd = find(c.src[c.key], f), pv = tduNum(pd);
+    if(pv === null || pv === v) return `<td class="mono" style="text-align:right;white-space:nowrap;${bold}" title="${pv===v?'No change':'Nothing to compare'} vs ${esc(tduMonthLabel(c.key))}">${txt}</td>`;
+    const good = (v > pv) === (dir > 0);
+    let diff = tduFmtValue({ ...d, value: Math.abs(v - pv) });
+    if(/%$/.test(diff)) diff = diff.replace(/%$/, ' pts');
+    const pct = pv !== 0 && !/ pts$/.test(diff) && !/rank/i.test(f.name) ? ` (${v>pv?'+':'−'}${Math.abs((v-pv)/pv*100).toFixed(1)}%)` : '';
+    const tip = `${v>pv?'Up':'Down'} ${diff}${pct} vs ${tduMonthLabel(c.key)} (${tduFmtValue(pd)})`;
+    return `<td class="mono" style="text-align:right;white-space:nowrap;background:${good?GOOD:BAD};${bold}" title="${esc(tip)}">${txt}</td>`;
+  };
+  const pending = y === thisYear && nCols === thisMonth - 1 && latestNo < nCols ? nCols : 0;
+  h += `<div style="overflow-x:auto"><table style="font-size:12.5px;border-collapse:separate;border-spacing:0 2px"><tr><th style="position:sticky;left:0;background:var(--panel,#fff)">Metric</th>` +
+    Array.from({length:nCols}, (_,i) => { const k = ym(y, i+1); return `<th style="text-align:right;${k===latest?'color:var(--primary)':''}${i+1===pending?'color:var(--muted);font-style:italic':''}" ${i+1===pending?`title="${MO3[i]} numbers arrive during ${MO3[i+1]||'January'}"`:''}>${MO3[i]}${i+1===pending?' <span style="font-weight:400">(due)</span>':''}</th>`; }).join('') + `</tr>` +
+    fields.map(f => `<tr><td style="position:sticky;left:0;background:var(--panel,#fff);white-space:nowrap">${esc(f.name)}${tduDir(f.name)<0?' <span class="small" style="color:var(--muted)">(lower is better)</span>':''}</td>${Array.from({length:nCols}, (_,i) => cell(i+1, f)).join('')}</tr>`).join('') +
     `</table></div>`;
-  h += `<p class="small" style="margin-top:6px;color:var(--muted)">Latest month entered: <b>${esc(tduMonthLabel(latest))}</b>. Stores report a month behind, so the newest month fills in during the following month.${yd.mode==='single' ? ' Top Dog is currently sending only its latest month, so earlier months stay blank until Top Dog sends them.' : ''}</p>`;
+  const legend = cmp === 'off' ? '' : `<span style="display:inline-block;width:10px;height:10px;background:${GOOD};border-radius:2px;vertical-align:middle"></span> better &nbsp;<span style="display:inline-block;width:10px;height:10px;background:${BAD};border-radius:2px;vertical-align:middle"></span> worse than ${cmp==='yoy'?'the same month last year':'the month before'}. Hover a cell for the change. Headcounts aren't colored.${!hasPrev && (cmp==='yoy') ? ` ${y-1} numbers aren't available, so nothing is colored.` : !hasPrev ? ` January isn't colored because ${y-1} numbers aren't available.` : ''} `;
+  h += `<p class="small" style="margin-top:6px;color:var(--muted)">${legend}Latest month entered: <b>${esc(tduMonthLabel(latest))}</b>. Stores report a month behind, so the newest month fills in during the following month.${yd.mode==='single' ? ' Top Dog is currently sending only its latest month, so earlier months stay blank until Top Dog sends them.' : ''}</p>`;
   return h;
 }
 function tduMonthLabel(ym){ if(!ym) return ''; const [y,m]=ym.split('-'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m-1]+' '+y; }
@@ -2941,7 +2979,9 @@ async function loadTduPanel(id){
   const box = document.getElementById('tdu-panel'); if(!box) return;
   let r;
   if(st.tduYearFor!==id){ st.tduYear = null; st.tduYearFor = id; }
-  try{ r = await api('GET','/api/clients/'+id+'/topdog'+(st.tduYear ? '?year='+st.tduYear : '')); }
+  // In January nothing for the new year has reported yet, so open on last year.
+  const askYear = st.tduYear || (TODAY.slice(5,7)==='01' ? +TODAY.slice(0,4) - 1 : null);
+  try{ r = await api('GET','/api/clients/'+id+'/topdog'+(askYear ? '?year='+askYear : '')); }
   catch(e){ if(st.clientId===id) box.innerHTML = '<h2>Top Dog Underground</h2><p class="small">Could not load Top Dog data.</p>'; return; }
   if(st.clientId!==id || !document.getElementById('tdu-panel')) return;
   if(st.tduTabFor!==id){ st.tduTab = 0; st.tduTabFor = id; }
