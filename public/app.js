@@ -683,7 +683,7 @@ function render(){
     m.innerHTML=adminView();
     const tab = st.adminTab || 'people';
     if(tab==='people'){ loadFormerCoaches(); }
-    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadStillBilling(); loadLidUnmatched(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadTeamMismatchAudit(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
+    if(tab==='data'){ loadCancelledContracts(); loadDeletedClients(); loadArchivedClients(); loadStillBilling(); loadLidUnmatched(); loadTduReview(); loadOutOfOrder(); loadRevenueHistory(); loadBackupStatus(); loadKeapEvents(); loadTeamMismatchAudit(); loadDuplicateVisitsAudit(); loadPhantomContractsAudit(); loadContractSplitsAudit(); loadOrphanedVisitsAudit(); loadSheetRecon2026(); loadResyncPreview(); }
     if(tab==='history'){ loadAudit(); loadClientHistoryPeriods(); }
     if(tab==='monthend'){ loadMonthEnd(); }
   }
@@ -2898,6 +2898,34 @@ async function doDeleteContract(contractId){
 
 /* ---------- Top Dog Underground panel (bottom of client profile) ---------- */
 const TDU_MONEY = n => (n===null||n===undefined||n==='') ? '—' : '$' + Number(n).toLocaleString(undefined,{maximumFractionDigits:0});
+/* Calendar-year dashboard: one row per metric, one column per month. Stores report a month
+   behind, so the latest filled column is usually two months back — that is normal. */
+function tduSetYear(y){ st.tduYear = y; const box = document.getElementById('tdu-panel'); if(box) box.style.opacity = '.6'; loadTduPanel(st.clientId).then(()=>{ const b = document.getElementById('tdu-panel'); if(b) b.style.opacity=''; }); }
+function tduYearHtml(team, t){
+  const yd = team.year || { year: +(String(t.prior_month||TODAY).slice(0,4)), mode:'single', months: t.prior_month ? [{ month: t.prior_month, dashboard: t.dashboard || [] }] : [] };
+  const y = yd.year, MO3 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const byMonth = {}; (yd.months||[]).forEach(m => { if(m.dashboard && m.dashboard.length) byMonth[m.month] = m.dashboard; });
+  const filled = Object.keys(byMonth).sort();
+  const latest = filled[filled.length-1] || null;
+  // Metric rows in Top Dog's order, taken from the most recent month that has them.
+  const fields = []; const seen = new Set();
+  for(const k of filled.slice().reverse()) for(const d of byMonth[k]){ const id = d.field_id ?? d.name; if(!seen.has(id)){ seen.add(id); fields.push({ id, name: d.name || ('Field '+d.field_id), format: d.format }); } }
+  const thisYear = +TODAY.slice(0,4);
+  let h = `<div style="display:flex;align-items:center;gap:8px;margin:12px 0 6px;flex-wrap:wrap">
+    <h3 style="margin:0;flex:1">${y} dashboard</h3>
+    <button class="btn tiny" onclick="tduSetYear(${y-1})">‹ ${y-1}</button>
+    ${y < thisYear ? `<button class="btn tiny" onclick="tduSetYear(${y+1})">${y+1} ›</button>` : ''}</div>`;
+  if(!fields.length) return h + (yd.mode==='single' && y===+(String(t.prior_month||'').slice(0,4))
+    ? `<p class="small">Top Dog hasn't received ${esc(tduMonthLabel(t.prior_month))} numbers for this store yet — stores report a month behind. Earlier months will show here once Top Dog sends the whole year.</p>`
+    : `<p class="small">No dashboard numbers in Top Dog for ${y}.</p>`);
+  const cell = (k, f) => { const d = (byMonth[k]||[]).find(x => (x.field_id ?? x.name) === f.id); return d ? esc(tduFmtValue(d)) : '<span style="color:var(--muted)">—</span>'; };
+  const cols = MO3.map((m,i) => `${y}-${String(i+1).padStart(2,'0')}`);
+  h += `<div style="overflow-x:auto"><table style="font-size:12.5px"><tr><th style="position:sticky;left:0;background:var(--card,#fff)">Metric</th>${cols.map((k,i)=>`<th style="text-align:right;${k===latest?'color:var(--primary)':''}">${MO3[i]}</th>`).join('')}</tr>` +
+    fields.map(f => `<tr><td style="position:sticky;left:0;background:var(--card,#fff);white-space:nowrap">${esc(f.name)}</td>${cols.map(k => `<td class="mono" style="text-align:right;white-space:nowrap;${k===latest?'font-weight:600':''}">${byMonth[k] ? cell(k, f) : '<span style="color:var(--muted)">—</span>'}</td>`).join('')}</tr>`).join('') +
+    `</table></div>`;
+  h += `<p class="small" style="margin-top:6px;color:var(--muted)">Latest month entered: <b>${esc(tduMonthLabel(latest))}</b>. Stores report a month behind, so the newest month fills in during the following month.${yd.mode==='single' ? ' Top Dog is currently sending only its latest month, so earlier months stay blank until Top Dog sends them.' : ''}</p>`;
+  return h;
+}
 function tduMonthLabel(ym){ if(!ym) return ''; const [y,m]=ym.split('-'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m-1]+' '+y; }
 /* Format one TDU dashboard metric. The type flag (money/sum/percentage) is not fully reliable
    (e.g. SPOP% is stored as "sum"), so metric names are used as a fallback. */
@@ -2912,7 +2940,8 @@ function tduFmtValue(d){
 async function loadTduPanel(id){
   const box = document.getElementById('tdu-panel'); if(!box) return;
   let r;
-  try{ r = await api('GET','/api/clients/'+id+'/topdog'); }
+  if(st.tduYearFor!==id){ st.tduYear = null; st.tduYearFor = id; }
+  try{ r = await api('GET','/api/clients/'+id+'/topdog'+(st.tduYear ? '?year='+st.tduYear : '')); }
   catch(e){ if(st.clientId===id) box.innerHTML = '<h2>Top Dog Underground</h2><p class="small">Could not load Top Dog data.</p>'; return; }
   if(st.clientId!==id || !document.getElementById('tdu-panel')) return;
   if(st.tduTabFor!==id){ st.tduTab = 0; st.tduTabFor = id; }
@@ -2943,12 +2972,8 @@ function tduTeamHtml(team){
   const t = team.tdu || {};
   let h = '';
   if(team.status && team.status!=='active') h += `<p class="small" style="background:#fdeecd;border:1px solid var(--warn);padding:8px 10px;border-radius:6px;margin:8px 0"><b>Heads up:</b> Top Dog lists this team as ${team.status==='past_client'?'a <b>Past Client</b>':'<b>not assigned to a league</b>'}. Check which system is out of date. The figures below may be stale.</p>`;
-  h += `<p class="small" style="margin:8px 0 10px">Read-only from Top Dog Underground · team “${esc(t.name||team.name||'')}”${t.league?' · '+esc(t.league):''}${team.source==='manual'?' · linked by hand':''}</p>`;
-  const dash = Array.isArray(t.dashboard) ? t.dashboard : [];
-  h += `<h3 style="margin:10px 0 6px">${esc(tduMonthLabel(t.prior_month))} dashboard</h3>`;
-  h += dash.length
-    ? '<table><tr><th>Metric</th><th style="text-align:right">Value</th></tr>' + dash.map(d=>`<tr><td>${esc(d.name||('Field '+d.field_id))}</td><td class="mono" style="text-align:right">${esc(tduFmtValue(d))}</td></tr>`).join('') + '</table>'
-    : '<p class="small">No dashboard data entered for that month yet.</p>';
+  h += `<p class="small" style="margin:8px 0 10px">Read-only from Top Dog Underground · team “${esc(t.name||team.name||'')}”${t.league?' · '+esc(t.league):''}${team.source==='manual'?' · linked by hand':team.source==='stores'?' · linked from the contract’s store list':''}</p>`;
+  h += tduYearHtml(team, t);
   const days = Array.isArray(t.daily_trackings) ? t.daily_trackings : [];
   h += `<h3 style="margin:16px 0 6px">${esc(tduMonthLabel(t.current_month))} daily tracking</h3>`;
   if(!days.length) return h + '<p class="small">No daily tracking submitted this month.</p>';
@@ -2960,11 +2985,11 @@ function tduTeamHtml(team){
     + '</table>';
 }
 /* Admin: pick which Top Dog teams belong to a client (multi-rooftop groups). */
-async function tduLinksDlg(clientId){
+async function tduLinksDlg(clientId, clientName){
   let teams, links;
   try{ [teams, links] = await Promise.all([ api('GET','/api/admin/topdog-teams'), api('GET','/api/clients/'+clientId+'/topdog-links') ]); }
   catch(e){ alert('Could not load Top Dog teams: ' + (e.message||e)); return; }
-  const cname = (st.clientProfile && st.clientProfile.client && st.clientProfile.client.name) || '';
+  const cname = clientName || (st.clientProfile && st.clientProfile.client && st.clientProfile.client.name) || '';
   st.tduPick = { clientId, teams, sel: new Set(links.team_ids||[]), q: cname.split(/\s+/).slice(0,2).join(' ') };
   const ov = document.createElement('div');
   ov.id = 'tdu-links-overlay';
@@ -2996,7 +3021,8 @@ async function tduPickSave(){
   const p = st.tduPick; if(!p) return;
   try{ await api('PUT','/api/clients/'+p.clientId+'/topdog-links', { team_ids: [...p.sel] }); }
   catch(e){ alert('Could not save: ' + (e.message||e)); return; }
-  const id = p.clientId; tduPickClose(); st.tduTab = 0; loadTduPanel(id);
+  const id = p.clientId; tduPickClose(); st.tduTab = 0;
+  if(document.getElementById('tduReviewOut')) loadTduReview(); else loadTduPanel(id);
 }
 function openClientProfile(id){ st.view='clientprofile'; st.clientId=id; render(); }
 async function attachCompanyId(clientId){
@@ -3409,6 +3435,42 @@ async function lidUnlink(clientId, id){
   try{ await api('PATCH', `/api/lid-stats/${id}`, { client_id: null }); toast('Unlinked'); await loadClientProfile(clientId); }catch(e){ uiAlert(e.message || 'Could not unlink'); }
 }
 /* Admin › Data: imported history that didn't match a client. */
+async function loadTduReview(){
+  const el = $('#tduReviewOut'); if(!el) return;
+  let r;
+  try{ r = await api('GET','/api/admin/topdog-unmatched'); }
+  catch(e){ el.innerHTML = `<p>Could not reach Top Dog: ${esc(e.message||e)}</p>`; return; }
+  st._tduRev = r;
+  const mb = r.matched_by || {};
+  const linkedN = r.checked_active - r.unmatched.length - r.on_notice.length - r.status_mismatch.length;
+  let h = `<p style="margin-bottom:8px"><b>${linkedN} of ${r.checked_active}</b> active clients are linked to Top Dog — ${mb.name||0} by name, ${mb.stores||0} from a contract's store list, ${mb.manual||0} by hand. ${r.on_notice.length} winding down.${r.last_sync_at ? ` Last nightly check ${fmt(r.last_sync_at.slice(0,10))}.` : ''}</p>`;
+  if(r.unmatched.length){
+    h += `<h3 style="margin:12px 0 6px">Needs a link (${r.unmatched.length})</h3><table><tr><th>Client</th><th>Likely Top Dog team(s)</th><th></th></tr>` +
+      r.unmatched.map((u,i) => `<tr><td>${clientLink(u.name, u.id)}${u.start && u.start > TODAY ? `<div class="small" style="color:var(--muted)">starts ${fmt(u.start)}</div>` : ''}</td>
+        <td>${u.suggestions.length ? u.suggestions.map(sg => `<label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px;margin:2px 0"><input type="checkbox" class="tduSug${i}" value="${sg.id}" ${sg.score===1?'checked':''} style="width:auto"> ${esc(sg.name)}</label>`).join('')
+          : `<span class="small" style="color:var(--muted)">No similar team in Top Dog — create it there, then Run check now.</span>`}</td>
+        <td style="white-space:nowrap">${u.suggestions.length ? `<button class="btn tiny primary" onclick="tduLinkTicked(${i})">Link ticked</button> ` : ''}<button class="btn tiny" onclick="tduLinksDlg(${u.id},'${esc(u.name).replace(/'/g,"\\'")}')">Search…</button></td></tr>`).join('') + `</table>`;
+  } else h += `<p>Every active client is linked. 🎉</p>`;
+  if(r.partial && r.partial.length){
+    h += `<h3 style="margin:14px 0 6px">Store list partly matched (${r.partial.length})</h3><p class="small" style="margin:-2px 0 6px">These contracts name stores that aren't in Top Dog under that name. Linked stores still show; use Search… to add the rest by hand (that replaces the automatic list).</p><table><tr><th>Client</th><th>Linked</th><th>Not found in Top Dog</th><th></th></tr>` +
+      r.partial.map(p => `<tr><td>${clientLink(p.name, p.id)}</td><td class="small">${p.linked.map(esc).join(', ')}</td><td class="small" style="color:var(--bad)">${p.missing.map(esc).join(', ')}</td>
+        <td><button class="btn tiny" onclick="tduLinksDlg(${p.id},'${esc(p.name).replace(/'/g,"\\'")}')">Search…</button></td></tr>`).join('') + `</table>`;
+  }
+  if(r.tdu_only && r.tdu_only.length) h += `<h3 style="margin:14px 0 6px">In Top Dog but not linked to a client (${r.tdu_only.length})</h3><p class="small">${r.tdu_only.map(t=>esc(t.name)).join(' · ')}</p>`;
+  el.innerHTML = h;
+}
+async function tduLinkTicked(i){
+  const u = st._tduRev && st._tduRev.unmatched[i]; if(!u) return;
+  const ids = [...document.querySelectorAll('.tduSug'+i)].filter(x => x.checked).map(x => +x.value);
+  if(!ids.length){ uiAlert('Tick at least one team'); return; }
+  try{ await api('PUT', `/api/clients/${u.id}/topdog-links`, { team_ids: ids }); toast(`Linked ${u.name} to ${ids.length} Top Dog team${ids.length===1?'':'s'}`); loadTduReview(); }
+  catch(e){ uiAlert(e.message || 'Could not link'); }
+}
+async function tduRunCheck(){
+  try{ const r = await api('POST','/api/admin/topdog-sync',{}); toast(`Checked ${r.checked} clients — ${r.counts.matched} linked`); }
+  catch(e){ uiAlert(e.message || 'Check failed'); }
+  loadTduReview();
+}
 async function loadLidUnmatched(){
   const el = $('#lidUnmatchedOut'); if(!el) return;
   try{
@@ -4241,6 +4303,10 @@ function adminDataView(){
   <div class="panel"><h2>Archived clients</h2>
   <p class="small" style="margin-bottom:12px">Clients who've left. Archiving happens automatically when Keap reports their last contract cancelled, and nightly for any client with <b>no active contract</b> who is marked cancelled or inactive or whose 30-day notice has lapsed — a client with a live contract is never archived automatically, whatever their status says. Or by hand from a profile, which also closes their contracts in the app so a Keap sync can't undo it. History is kept; open visits were removed. Reactivate if Keap was wrong or they come back.</p>
   <div id="archivedOut" class="small">Loading…</div></div>
+  <div class="panel"><h2>Top Dog Underground links</h2>
+  <p class="small" style="margin-bottom:10px">Which Top Dog team(s) feed each client's profile. Clients link automatically when the names match (filler words like “and” / “of” ignored) or when a multi-store contract lists the store names. Anything left needs a link by hand — tick the right team(s) below.</p>
+  <div class="controls"><button class="btn" onclick="tduRunCheck()">Run check now</button></div>
+  <div id="tduReviewOut" class="small">Loading…</div></div>
   <div class="panel"><h2>Final LID Stats — imported history without a client</h2>
   <p class="small" style="margin-bottom:12px">Rows imported from the Coach Master File whose store name didn't match a client in the app — often former clients, or names written differently. Link a name to the right client to move every row with that name onto their profile, or Hide names that belong to stores that were never set up here. Nothing is lost either way.</p>
   <div id="lidUnmatchedOut" class="small">Loading…</div></div>

@@ -3685,11 +3685,19 @@ async function tduClientList(force){
   tduListCache = { at: Date.now(), data: r.json.clients };
   return tduListCache.data;
 }
+/* Same words, ignoring filler: "Blackstone Cadillac and Chevrolet" = "Blackstone Cadillac
+   Chevrolet", "Lamborghini Newport Beach" = "Lamborghini of Newport Beach". Every
+   meaningful word must be on both sides, so this never pairs two different dealerships. */
+const TDU_FILLER = new Set(['and','of','the','inc','llc','co','dealership','dealerships']);
+const TDU_ALIAS = { vw:'volkswagen', chevy:'chevrolet', chev:'chevrolet', cad:'cadillac', dt:'downtown', mb:'mercedes' };
+const tduWords = s => normName(String(s||'').replace(/&/g,' and ')).split(' ').map(w => TDU_ALIAS[w] || w).filter(w => w && !TDU_FILLER.has(w));
+const tduWordKey = s => tduWords(s).sort().join(' ');
 function tduMatch(clientName, list){
   const key = normName(clientName);
-  const hits = list.filter(t => normName(t.name) === key);
+  let hits = list.filter(t => normName(t.name) === key);
+  if(!hits.length){ const wk = tduWordKey(clientName); if(wk) hits = list.filter(t => tduWordKey(t.name) === wk); }
   if(!hits.length) return { match: null, reason: 'no TDU team with this exact name' };
-  const act = hits.filter(t => t.status === 'active');
+  const act = hits.filter(t => (t.status || 'active') === 'active');
   if(act.length === 1) return { match: act[0] };
   if(act.length > 1) return { match: null, reason: 'ambiguous (more than one active TDU team has this name)' };
   if(hits.length === 1) return { match: hits[0] };
@@ -3706,9 +3714,39 @@ function tduResolveTeams(cl, list){
                : { id:l.tdu_team_id, name:l.tdu_team_name || ('Team ' + l.tdu_team_id), status:'missing', source:'manual', league:'' };
     }) };
   }
+  // Multi-store contracts list their rooftops (contracts.stores); each store name that matches a
+  // Top Dog team is linked automatically — Steven Auto Group, Speck Family, Easterns, etc.
+  const storeNames = tduContractStores(cl.id);
+  if(storeNames.length > 1){
+    const teams = [], missing = [];
+    for(const sn of storeNames){
+      const { match } = tduMatch(sn, list);
+      if(match){ if(!teams.some(t => t.id === match.id)) teams.push({ id:match.id, name:match.name, status:match.status || 'active', source:'stores', league:match.league || '' }); }
+      else missing.push(sn);
+    }
+    if(teams.length) return { teams, missingStores: missing };
+  }
   const { match, reason } = tduMatch(cl.name, list);
   if(match) return { teams: [{ id:match.id, name:match.name, status:match.status || 'active', source:'name', league:match.league || '' }] };
   return { teams: [], reason };
+}
+function tduContractStores(clientId){
+  const out = [];
+  for(const c of db.prepare("SELECT stores FROM contracts WHERE client_id=? AND status='active' AND archived_at IS NULL AND stores IS NOT NULL AND stores<>''").all(clientId)){
+    try{ for(const sn of JSON.parse(c.stores) || []) if(sn && !out.includes(String(sn))) out.push(String(sn)); }catch(e){}
+  }
+  return out;
+}
+/* Ranked guesses for the admin review screen — never applied without a click. */
+function tduSuggest(name, list, n = 5){
+  const words = s => tduWords(s).filter(w => !['motors','motor','auto','automotive','group','family'].includes(w));
+  const cw = words(name); if(!cw.length) return [];
+  // Either the dealer family name (first meaningful word) is shared — "Castle", "Speck",
+  // "Ressler" — or most of the words are (a store listed under its group, e.g. "Murgado:").
+  return list.map(t => { const tw = words(t.name); const hit = cw.filter(w => tw.includes(w)).length; return { t, tw, hit, score: hit / Math.max(cw.length, tw.length, 1) }; })
+    .filter(x => x.hit > 0 && (x.tw.includes(cw[0]) || (x.score >= 0.6 && x.hit >= 3)))
+    .sort((a,b) => b.score - a.score || b.hit - a.hit).slice(0, n)
+    .map(x => ({ id:x.t.id, name:x.t.name, score: Math.round(x.score*100)/100 }));
 }
 function tduClassify(cl, resolved){
   const names = resolved.teams.map(t => t.name).join(' + ');
@@ -3718,7 +3756,10 @@ function tduClassify(cl, resolved){
   if(bad.length) return { state:'status_mismatch', detail: bad.map(t => t.name + ': ' + t.status.replace('_',' ')).join('; ') };
   return { state:'matched', detail: names };
 }
-const tduActiveClients = () => db.prepare("SELECT id, name, status, archived_at, notice_given_date FROM clients WHERE deleted_at IS NULL AND status='active' AND archived_at IS NULL ORDER BY name").all();
+const tduActiveClients = () => db.prepare(`SELECT id, name, status, archived_at, notice_given_date FROM clients cl
+  WHERE deleted_at IS NULL AND status='active' AND archived_at IS NULL
+    AND EXISTS (SELECT 1 FROM contracts c WHERE c.client_id=cl.id AND c.status='active' AND c.archived_at IS NULL)
+  ORDER BY name`).all();
 
 /* Nightly: record each active client's Top Dog match state; report what changed since last night. */
 async function runTduSync(actor){
@@ -3745,7 +3786,7 @@ async function runTduSync(actor){
   }
   const ids = clients.map(c => c.id);
   if(ids.length) db.prepare(`DELETE FROM tdu_sync_state WHERE client_id NOT IN (${ids.map(() => '?').join(',')})`).run(...ids);
-  const activeNow = list.filter(t => t.status === 'active');
+  const activeNow = list.filter(t => (t.status || 'active') === 'active');
   let newTduTeams = [];
   try{
     const known = JSON.parse(getMeta('tdu_known_active_ids') || 'null');
@@ -3769,8 +3810,56 @@ function tduDigestLines(s){
   add('New active teams in Top Dog since last night:', s.newTduTeams, x => x);
   return L;
 }
+/* Calendar-year dashboard (2026-11-19). Stores report a month behind, so "last month" is often
+   still empty; the profile shows every month of the year instead. Top Dog's API is asked, in
+   order: ?year=YYYY (returns dashboards:[{month, dashboard}]), else ?month=YYYY-MM per month
+   (honoured only if the reply's prior_month echoes the month asked for), else the single
+   month it sends by default. Which of these Top Dog supports is probed and remembered for an
+   hour, so turning the parameter on in Top Dog lights this up with no change here. */
+const tduYearCache = new Map();
+const tduParam = { year: null, yearAt: 0, month: null, monthAt: 0 };
+async function tduTeamYear(teamId, year, base){
+  const key = teamId + '|' + year;
+  const hit = tduYearCache.get(key);
+  if(hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.data;
+  const stale = at => Date.now() - at > 60 * 60 * 1000;
+  let months = null, mode = 'single';
+  // The main call already asked for ?year=; if Top Dog answered with the year, use it as-is.
+  if(base && Array.isArray(base.dashboards) && (!base.year || +base.year === +year)){
+    tduParam.year = true; tduParam.yearAt = Date.now(); mode = 'year';
+    months = base.dashboards.filter(d => d && /^\d{4}-\d{2}$/.test(d.month || '') && d.month.startsWith(year + '-')).map(d => ({ month: d.month, dashboard: d.dashboard || d.fields || [] }));
+  }
+  if(!months && (tduParam.year !== false || stale(tduParam.yearAt))){
+    const r = await tduFetch(`/api/v1/clients/${teamId}?year=${year}`);
+    tduParam.yearAt = Date.now();
+    if(r.ok && r.json && Array.isArray(r.json.dashboards)){
+      tduParam.year = true; mode = 'year';
+      months = r.json.dashboards.filter(d => d && /^\d{4}-\d{2}$/.test(d.month || '')).map(d => ({ month: d.month, dashboard: d.dashboard || d.fields || [] }));
+    } else if(r.ok) tduParam.year = false;
+  }
+  if(!months && (tduParam.month !== false || stale(tduParam.monthAt))){
+    const last = base && base.prior_month && base.prior_month.startsWith(year + '-') ? base.prior_month : null;
+    const want = [];
+    for(let mo = 1; mo <= 12; mo++){ const k = `${year}-${String(mo).padStart(2,'0')}`; if(last && k > last) break; want.push(k); }
+    const probe = want.find(k => k !== last);
+    if(probe){
+      const pr = await tduFetch(`/api/v1/clients/${teamId}?month=${probe}`);
+      tduParam.monthAt = Date.now();
+      if(pr.ok && pr.json && pr.json.prior_month === probe){
+        tduParam.month = true; mode = 'month';
+        const rs = await Promise.all(want.map(k => k === probe ? pr : k === last ? { ok:true, json:base } : tduFetch(`/api/v1/clients/${teamId}?month=${k}`)));
+        months = want.map((k, i) => ({ month: k, dashboard: rs[i].ok && rs[i].json && rs[i].json.prior_month === k ? (rs[i].json.dashboard || []) : [] }));
+      } else if(pr.ok) tduParam.month = false;
+    }
+  }
+  if(!months) months = base && base.prior_month && base.prior_month.startsWith(year + '-') ? [{ month: base.prior_month, dashboard: base.dashboard || [] }] : [];
+  const data = { year, mode, months };
+  tduYearCache.set(key, { at: Date.now(), data });
+  return data;
+}
 route('GET', /^\/api\/clients\/(\d+)\/topdog$/, ['admin','lead','sales','coach'], async (req, res, m) => {
   try{
+    const qYear = parseInt(new URL(req.url, 'http://x').searchParams.get('year') || '', 10);
     const cl = db.prepare('SELECT id, name, notice_given_date FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
     if(!cl) return err(res, 404, 'not found');
     const list = await tduClientList();
@@ -3779,9 +3868,13 @@ route('GET', /^\/api\/clients\/(\d+)\/topdog$/, ['admin','lead','sales','coach']
     if(!resolved.teams.length) return send(res, 200, { available:true, matched:false, reason: resolved.reason });
     const teams = await Promise.all(resolved.teams.map(async t => {
       if(t.status === 'missing') return { ...t, tdu:null, error:'This team is no longer in the Top Dog list (archived or hidden)' };
-      const r = await tduFetch('/api/v1/clients/' + t.id);
+      const askYear = qYear >= 2015 && qYear <= new Date().getFullYear() + 1 ? qYear : new Date().getFullYear();
+      const r = await tduFetch('/api/v1/clients/' + t.id + '?year=' + askYear);
       if(!r.ok || !r.json) return { ...t, tdu:null, error:'Top Dog returned an error (' + (r.status || r.error) + ')' };
-      return { ...t, tdu: r.json };
+      const year = qYear >= 2015 && qYear <= 2100 ? qYear : (Array.isArray(r.json.dashboards) ? askYear : +String(r.json.prior_month || new Date().toISOString()).slice(0, 4));
+      let yearData = null;
+      try{ yearData = await tduTeamYear(t.id, year, r.json); }catch(e){ console.error('[TDU] year', e.message); }
+      return { ...t, tdu: r.json, year: yearData };
     }));
     return send(res, 200, { available:true, matched:true, teams });
   }catch(e){
@@ -3826,18 +3919,26 @@ route('GET', /^\/api\/admin\/topdog-unmatched$/, ['admin'], async (req, res) => 
     const list = await tduClientList(true);
     if(!list) return err(res, 502, 'Top Dog Underground is not reachable' + (tduLastError ? ' (' + tduLastError + ')' : ''));
     const clients = tduActiveClients();
-    const out = { checked_active: clients.length, last_sync_at: getMeta('tdu_last_sync_at'), unmatched: [], status_mismatch: [], on_notice: [], tdu_only: [] };
+    const out = { checked_active: clients.length, last_sync_at: getMeta('tdu_last_sync_at'), unmatched: [], status_mismatch: [], on_notice: [], tdu_only: [], partial: [], matched_by: { manual:0, stores:0, name:0 } };
     const linked = new Set();
     for(const c of clients){
       const resolved = tduResolveTeams(c, list);
       resolved.teams.forEach(t => linked.add(t.id));
+      if(resolved.teams.length) out.matched_by[resolved.teams[0].source] = (out.matched_by[resolved.teams[0].source] || 0) + 1;
+      if(resolved.missingStores && resolved.missingStores.length) out.partial.push({ id:c.id, name:c.name, linked: resolved.teams.map(t => t.name), missing: resolved.missingStores });
       const { state, detail } = tduClassify(c, resolved);
-      if(state === 'unmatched') out.unmatched.push({ id:c.id, name:c.name, reason:detail });
+      if(state === 'unmatched'){
+        const sug = [];
+        for(const sn of [c.name, ...tduContractStores(c.id)]) for(const x of tduSuggest(sn, list)) if(!sug.some(y => y.id === x.id)) sug.push(x);
+        out.unmatched.push({ id:c.id, name:c.name, reason:detail, start: (db.prepare("SELECT MIN(start_date) d FROM contracts WHERE client_id=? AND status='active'").get(c.id) || {}).d || null, suggestions: sug.slice(0, 6) });
+      }
       else if(state === 'status_mismatch') out.status_mismatch.push({ id:c.id, name:c.name, detail });
       else if(state === 'on_notice') out.on_notice.push({ id:c.id, name:c.name });
     }
     const allNames = new Set(db.prepare('SELECT name FROM clients WHERE deleted_at IS NULL').all().map(c => normName(c.name)));
-    out.tdu_only = list.filter(t => t.status === 'active' && !linked.has(t.id) && !allNames.has(normName(t.name))).map(t => ({ tdu_id:t.id, name:t.name, league:t.league || '' }));
+    // Internal Top Dog teams (tests, strategy sessions, comp sheets) aren't dealerships.
+    const internal = /\btest\b|strategy session|coaches comp|sales team|projection/i;
+    out.tdu_only = list.filter(t => (t.status || 'active') === 'active' && !internal.test(t.name) && !linked.has(t.id) && !allNames.has(normName(t.name))).map(t => ({ tdu_id:t.id, name:t.name, league:t.league || '' }));
     return send(res, 200, out);
   }catch(e){ console.error('[TDU] report', e.message); return err(res, 500, 'Server error'); }
 });

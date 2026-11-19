@@ -8,3 +8,7 @@ data/
 keap_*.json
 recon*.json
 Keap_*.xlsx
+
+# Local safety copies made while editing — never part of the deployed app.
+*.backup_pre_*
+*.my_conflicting_edit
