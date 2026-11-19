@@ -90,8 +90,26 @@ function vmPayload(){
   return { wins: val('visit_wins'), issues: val('visit_issues'), focus: val('visit_focus'), commitments, resolvedCommitmentIds: resolved,
     completed_date: val('visit_date') || undefined, store: ($('#visit_store') ? $('#visit_store').value : undefined) };
 }
+/* Commitments are short action items. A pasted visit report (many lines, or long
+   paragraphs) would turn every line into its own commitment, so offer to move it to Focus. */
+async function vmCheckCommitments(p){
+  const lines = p.commitments;
+  if(!(lines.length > 10 || lines.some(l => l.length > 200))) return true;
+  const k = await uiChoice(`The commitments box has ${lines.length} line${lines.length>1?'s':''}${lines.some(l=>l.length>200)?', some of them long paragraphs':''}. That looks like a visit report.\n\nEach line becomes its own commitment for the dealer to check off, so long write-ups belong in "Focus for next visit". Commitments should be short action items, e.g. "Post walkaround videos daily".`,
+    [{ key:'keep', label:'Keep as commitments' }, { key:'move', label:'Move it to Focus', primary:true }]);
+  if(!k) return false;
+  if(k === 'move'){
+    const text = lines.join('\n');
+    p.focus = p.focus ? p.focus + '\n\n' + text : text;
+    p.commitments = [];
+    const f = $('#visit_focus'), c = $('#visit_commitments');
+    if(f) f.value = p.focus; if(c) c.value = '';
+  }
+  return true;
+}
 async function saveVisitNotes(id, draft) {
   const p = vmPayload();
+  if(!(await vmCheckCommitments(p))) return;
   try{
     await api('PATCH', `/api/visits/${id}`, { notes_wins: p.wins, notes_issues: p.issues, notes_focus: p.focus, notes_commitments: p.commitments.join('\n') });
     toast(draft ? 'Draft saved — visit still open' : 'Notes saved');
@@ -100,6 +118,7 @@ async function saveVisitNotes(id, draft) {
 }
 async function completeVisitFromModal(id) {
   const p = vmPayload();
+  if(!(await vmCheckCommitments(p))) return;
   if(!p.wins && !p.issues && !p.focus){
     if(!(await uiConfirm('No notes yet — complete the visit anyway? It will show up under "You owe a note" until you add them.', 'Complete without notes'))) return;
   }
@@ -162,8 +181,8 @@ function renderVisitSide(v, cycleVisits, prep){
     </div>
     <div class="vm-block">
       <div class="vm-label">Promised last time ${commits.length ? `<span class="pill p-due" style="margin-left:6px">${commits.length} open</span>` : ''}</div>
-      ${commits.length ? `<div class="small" style="margin-bottom:6px">Tick what the dealer actually did — the rest carries forward.</div>` +
-        commits.map(c => `<label class="vm-commit-row"><input type="checkbox" class="vm-commit" value="${c.id}" ${v.completed?'disabled':''}><span>${esc(c.text)}<br><span class="small">from visit ${c.from_due ? 'due '+fmt(c.from_due) : ''}</span></span></label>`).join('')
+      ${commits.length ? `<div class="small" style="margin-bottom:6px">Tick what the dealer actually did — the rest carries forward.</div><div style="max-height:320px;overflow-y:auto">` +
+        commits.map(c => `<label class="vm-commit-row"><input type="checkbox" class="vm-commit" value="${c.id}" ${v.completed?'disabled':''}><span>${esc(c.text)}<br><span class="small">from visit ${c.from_due ? 'due '+fmt(c.from_due) : ''}</span></span></label>`).join('') + '</div>'
         : `<div class="small">No open commitments from previous visits.</div>`}
     </div>
     ${last ? `<details class="vm-block"><summary class="vm-label" style="cursor:pointer">Last visit's notes · ${fmt(last.note_date)}</summary>
@@ -402,6 +421,18 @@ function uiConfirm(msg, yesLabel){
     $('#uc-no').onclick=()=>{ d.close(); res(false); };
     $('#uc-yes').onclick=()=>{ d.close(); res(true); };
     d.oncancel=()=>res(false);
+  });
+}
+
+/* Pick one of several buttons. buttons: [{key, label, primary}]; Cancel / Esc resolves null. */
+function uiChoice(msg, buttons){
+  return new Promise(res=>{
+    const d=$('#dlg2');
+    d.innerHTML=`<p style="font-size:13.5px;white-space:pre-wrap">${esc(msg)}</p>
+      <div class="dlgrow"><button class="btn" data-k="">Cancel</button>${buttons.map(b=>`<button class="btn${b.primary?' primary':''}" data-k="${esc(b.key)}">${esc(b.label)}</button>`).join('')}</div>`;
+    d.showModal();
+    d.querySelectorAll('button[data-k]').forEach(btn => btn.onclick = () => { d.close(); res(btn.dataset.k || null); });
+    d.oncancel=()=>res(null);
   });
 }
 
@@ -3194,6 +3225,81 @@ function buildUnifiedNotesHistory(visits, coachingNotes){
   return html;
 }
 
+/* ---------- Commitments panel (client profile) ----------
+   Grouped by the visit that created them. The client's coach, leads and admins can check
+   items off, edit, remove (restorable), add, or clear a whole visit's worth at once. */
+function commitCanEdit(){
+  const u = D.user, cl = st.clientProfile && st.clientProfile.client;
+  if(u.role === 'admin' || u.role === 'lead') return true;
+  return u.role === 'coach' && cl && cl.assigned_coach_id && cl.assigned_coach_id === u.coach_id;
+}
+const commitDays = iso => iso ? Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000)) : 0;
+function commitPanelHtml(cm){
+  const can = commitCanEdit();
+  const oc = cm.open || [], dc = cm.done || [], xc = cm.dropped || [];
+  st.commitOpen = st.commitOpen || {};
+  let h = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0;flex:1">Commitments</h2>
+    <span class="small" style="color:var(--muted)">${oc.length} open · ${dc.length}${dc.length>=30?'+':''} done</span></div>
+    <p class="small" style="margin:6px 0 10px">What this client agreed to do. Open items carry into the next visit for follow-up${can ? ' — tick one when the dealer has done it' : ''}.</p>`;
+  if(can) h += `<div style="display:flex;gap:6px;margin-bottom:6px"><input id="commit-new" maxlength="300" placeholder="Add a commitment, e.g. Post walkaround videos daily" style="flex:1" onkeydown="if(event.key==='Enter')commitAdd()"><button class="btn tiny" onclick="commitAdd()">Add</button></div>`;
+  if(!oc.length) h += `<p class="small" style="color:var(--muted)">No open commitments.</p>`;
+  // Group open items by the visit they came from, newest visit first.
+  const groups = []; const byKey = {};
+  for(const c of oc){ const k = c.created_visit_id ? 'v'+c.created_visit_id : 'manual'; if(!byKey[k]){ byKey[k] = { key:k, visitId:c.created_visit_id, date:c.from_date, coach:c.from_coach, items:[] }; groups.push(byKey[k]); } byKey[k].items.push(c); }
+  groups.sort((x,y) => (y.date || y.items[0].created || '').localeCompare(x.date || x.items[0].created || ''));
+  for(const g of groups){
+    const n = g.items.length, looksPasted = n >= 9 || g.items.some(c => c.text.length > 200);
+    const expanded = st.commitOpen[g.key] || n <= 6;
+    const shown = expanded ? g.items : g.items.slice(0, 5);
+    h += `<div class="commitgrp"><div class="commitgrp-h"><b>${g.visitId ? 'From visit ' + (g.date ? fmt(g.date) : '') : 'Added by hand'}</b>${g.coach ? `<span style="color:var(--muted)">· ${esc(g.coach)}</span>` : ''}<span style="color:var(--muted)">· ${n} open</span><span style="flex:1"></span>
+      ${can ? `<button class="btn tiny" onclick="commitClearGroup(${g.visitId || 'null'}, ${n})">Clear all ${n}</button>` : ''}</div>`;
+    if(looksPasted) h += `<p class="small" style="background:#fdf4e3;border-left:3px solid var(--warn);padding:6px 8px;margin:0 0 8px">This looks like a visit report pasted into the commitments box — every line became a commitment. The full text is still on the visit's notes${can ? ', so it is safe to clear these' : ''}.</p>`;
+    h += `<ul class="commitlist">${shown.map(c => commitItemHtml(c, can)).join('')}</ul>`;
+    if(n > 6) h += `<button class="cbtn" style="margin-top:6px" onclick="commitToggleGroup('${g.key}')">${expanded ? 'Show fewer' : `Show all ${n}`}</button>`;
+    h += `</div>`;
+  }
+  if(dc.length) h += `<details style="margin-top:12px"><summary class="small" style="cursor:pointer">${dc.length} completed</summary>
+    <ul class="commitlist done" style="margin-top:8px">${dc.map(c=>`<li><span class="cdot done">✓</span><span class="ctext" onclick="this.classList.toggle('full')">${esc(c.text)} <span class="cfrom">${c.resolved_at ? 'done '+fmt(c.resolved_at.slice(0,10)) : ''}</span></span>${can ? `<span class="cact"><button class="cbtn" title="Not done after all — reopen" onclick="commitSet(${c.id},'open')">Reopen</button></span>` : ''}</li>`).join('')}</ul></details>`;
+  if(xc.length && can) h += `<details style="margin-top:8px"><summary class="small" style="cursor:pointer;color:var(--muted)">${xc.length}${xc.length>=100?'+':''} removed</summary>
+    <ul class="commitlist done" style="margin-top:8px">${xc.map(c=>`<li><span class="cdot" style="background:#ccc">–</span><span class="ctext" onclick="this.classList.toggle('full')">${esc(c.text)} <span class="cfrom">${c.resolved_at ? 'removed '+fmt(c.resolved_at.slice(0,10)) : ''}</span></span><span class="cact"><button class="cbtn" onclick="commitSet(${c.id},'open')">Restore</button></span></li>`).join('')}</ul></details>`;
+  return h;
+}
+function commitItemHtml(c, can){
+  const days = commitDays(c.created);
+  const age = `<span class="cfrom" style="${days > 60 ? 'color:var(--warn)' : ''}">open ${days} day${days===1?'':'s'}</span>`;
+  if(st.commitEditing === c.id) return `<li><textarea id="commit-edit-${c.id}" maxlength="300" style="flex:1;min-height:52px">${esc(c.text)}</textarea>
+    <span class="cact" style="opacity:1;flex-direction:column"><button class="btn tiny primary" onclick="commitSaveEdit(${c.id})">Save</button><button class="btn tiny" onclick="commitCancelEdit()">Cancel</button></span></li>`;
+  return `<li>${can ? `<input type="checkbox" title="Mark done" onchange="commitSet(${c.id},'done')">` : '<span class="cdot open"></span>'}
+    <span style="flex:1;min-width:0"><span class="ctext" title="${c.text.length > 180 ? 'Click to show all' : ''}" onclick="this.classList.toggle('full')">${esc(c.text)}</span> ${age}</span>
+    ${can ? `<span class="cact"><button class="cbtn" title="Edit" onclick="commitStartEdit(${c.id})">✎</button><button class="cbtn" title="Remove (can be restored)" onclick="commitSet(${c.id},'dropped')">✕</button></span>` : ''}</li>`;
+}
+function renderCommitPanel(){ const box = document.getElementById('commit-panel'); if(box && st.commitData) box.innerHTML = commitPanelHtml(st.commitData); }
+async function reloadCommitPanel(){
+  const id = st.clientId;
+  try{ const r = await api('GET', '/api/clients/'+id+'/commitments'); if(st.clientId !== id) return; st.commitData = r; renderCommitPanel(); }catch(e){ uiAlert(e.message || 'Could not reload commitments'); }
+}
+function commitToggleGroup(k){ st.commitOpen[k] = !st.commitOpen[k]; renderCommitPanel(); }
+function commitStartEdit(id){ st.commitEditing = id; renderCommitPanel(); const t = document.getElementById('commit-edit-'+id); if(t) t.focus(); }
+function commitCancelEdit(){ st.commitEditing = null; renderCommitPanel(); }
+async function commitSaveEdit(id){
+  const t = document.getElementById('commit-edit-'+id); if(!t) return;
+  try{ await api('PATCH', '/api/commitments/'+id, { text: t.value }); st.commitEditing = null; await reloadCommitPanel(); }catch(e){ uiAlert(e.message || 'Could not save'); }
+}
+async function commitSet(id, status){
+  try{ await api('PATCH', '/api/commitments/'+id, { status }); }catch(e){ return uiAlert(e.message || 'Could not update'); }
+  toast(status === 'done' ? 'Marked done' : status === 'dropped' ? 'Removed — restore it under "removed" if needed' : 'Reopened');
+  await reloadCommitPanel();
+}
+async function commitAdd(){
+  const el = document.getElementById('commit-new'); const t = el ? el.value.trim() : ''; if(!t) return;
+  try{ await api('POST', '/api/clients/'+st.clientId+'/commitments', { text: t }); }catch(e){ return uiAlert(e.message || 'Could not add'); }
+  await reloadCommitPanel();
+}
+async function commitClearGroup(visitId, n){
+  if(!(await uiConfirm(`Remove all ${n} open commitment${n>1?'s':''} from this ${visitId ? 'visit' : 'group'}? The visit notes are not touched, and removed items can be restored from the "removed" list.`, 'Remove '+n))) return;
+  try{ const r = await api('POST', '/api/clients/'+st.clientId+'/commitments/clear', { visit_id: visitId }); toast(`Removed ${r.cleared}`); }catch(e){ return uiAlert(e.message || 'Could not clear'); }
+  await reloadCommitPanel();
+}
 function clientProfileView(data, notes){
   const { client, assignedCoach, contracts, visits, visitProgress, health } = data;
   const pct = visitProgress.total ? Math.round(visitProgress.completed/visitProgress.total*100) : 0;
@@ -3225,16 +3331,8 @@ function clientProfileView(data, notes){
     <div class="bar" style="margin-top:10px;max-width:400px"><div style="width:${pct}%;background:var(--primary)"></div><div style="width:${100-pct}%;background:var(--open)"></div></div>
   </div>`;
 
-  const oc = data.openCommitments || [], dc = data.doneCommitments || [];
-  if(oc.length || dc.length){
-    html += `<div class="panel"><h2>Commitments</h2>
-      <p class="small" style="margin-bottom:10px">What this client agreed to, captured on their visits — the open ones carry into the next visit for follow-up.</p>
-      ${oc.length ? `<ul class="commitlist">${oc.map(c=>`<li><span class="cdot open"></span><span>${esc(c.text)}${c.from_due?` <span class="cfrom">since ${fmt(c.from_due)}</span>`:''}</span></li>`).join('')}</ul>`
-        : `<p class="small" style="color:var(--muted)">No open commitments.</p>`}
-      ${dc.length ? `<details style="margin-top:10px"><summary class="small" style="cursor:pointer">${dc.length} completed commitment${dc.length>1?'s':''}</summary>
-        <ul class="commitlist done" style="margin-top:8px">${dc.map(c=>`<li><span class="cdot done">✓</span><span>${esc(c.text)}${c.done_on?` <span class="cfrom">${fmt(c.done_on)}</span>`:''}</span></li>`).join('')}</ul></details>` : ''}
-    </div>`;
-  }
+  st.commitData = { open: data.openCommitments || [], done: data.doneCommitments || [], dropped: data.droppedCommitments || [] };
+  html += `<div class="panel" id="commit-panel">${commitPanelHtml(st.commitData)}</div>`;
 
   const archivedContracts = contracts.filter(c=>c.archived_at);
   const liveContracts = contracts.filter(c=>!c.archived_at);

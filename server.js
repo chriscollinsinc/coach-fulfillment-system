@@ -454,6 +454,10 @@ route('PATCH', /^\/api\/visits\/(\d+)$/, ['admin','lead','coach'], (req, res, m,
       .run(...Object.values(f), v.id);
     log(user.email, 'visit.edit', { id: v.id, ...f, unscheduled });
   }
+  // A completed visit's commitments already became action items when it was completed.
+  // Editing that text afterwards keeps them in step: lines removed are dropped, new lines
+  // are added. (Open visits make their items on Complete, so nothing to do for them.)
+  if(f.notes_commitments !== undefined && v.completed && v.client_id) syncVisitCommitments(v, f.notes_commitments, user.email);
   send(res, 200, { ok: true, unscheduled });
 });
 route('DELETE', /^\/api\/visits\/(\d+)$/, ['admin','lead'], (req, res, m, body, user) => {
@@ -670,6 +674,102 @@ route('GET', /^\/api\/visits\/(\d+)\/prep$/, ['admin','lead','sales','coach'], (
      FROM client_notes n WHERE n.client_id=? AND n.visit_id IS NOT NULL AND n.visit_id!=?
      ORDER BY n.note_date DESC, n.id DESC LIMIT 2`).all(v.client_id, v.id) : [];
   send(res, 200, { visitId: v.id, client: v.client, openCommitments, lastNotes });
+});
+/* ---------- Commitments (action items) — manage from the client profile ----------
+ * Open items carry into the next visit's Complete dialog. Coaches can also check off,
+ * edit, remove, restore or add them from the profile. "Remove" sets status='dropped'
+ * (never deleted) so anything removed by mistake can be restored. */
+const commitLine = s => String(s||'').replace(/^[-•*]\s*/, '').trim();
+function syncVisitCommitments(v, text, actor){
+  const want = String(text||'').split('\n').map(commitLine).filter(Boolean);
+  const have = db.prepare("SELECT id, text, status FROM action_items WHERE created_visit_id=? AND client_id=?").all(v.id, v.client_id);
+  const key = t => t.toLowerCase().replace(/\s+/g, ' ');
+  const wantKeys = new Set(want.map(key)), haveKeys = new Set(have.map(a => key(a.text)));
+  const now = new Date().toISOString();
+  let dropped = 0, added = 0;
+  for(const a of have) if(a.status === 'open' && !wantKeys.has(key(a.text))){ db.prepare("UPDATE action_items SET status='dropped', resolved_at=? WHERE id=?").run(now, a.id); dropped++; }
+  const ins = db.prepare("INSERT INTO action_items(client_id,contract_id,text,status,created_visit_id,created_by,created) VALUES(?,?,?,'open',?,?,?)");
+  for(const t of want) if(!haveKeys.has(key(t))){ ins.run(v.client_id, v.contract_id||null, t, v.id, actor, now); haveKeys.add(key(t)); added++; }
+  if(dropped || added) log(actor, 'commitments.sync', { visit: v.id, client: v.client, added, dropped });
+}
+function canTouchClientCommitments(user, clientId, visitId){
+  if(user.role === 'admin') return true;
+  const cl = db.prepare('SELECT id, assigned_coach_id FROM clients WHERE id=?').get(clientId);
+  if(!cl) return false;
+  const v = visitId ? getVisit(visitId) : null;
+  if(user.role === 'lead') return v ? canEditTeam(user, v.team) : true;
+  if(user.role === 'coach'){
+    if(cl.assigned_coach_id && cl.assigned_coach_id === user.coach_id) return true;
+    return !!(v && v.cal_coach && v.cal_coach === user.coach_id);
+  }
+  return false;
+}
+function clientCommitments(clientId){
+  const base = `SELECT a.id, a.text, a.status, a.created, a.created_by, a.created_visit_id, a.resolved_at,
+      cv.due AS from_due, cv.cal_week AS from_week, COALESCE(cv.completed_date, cv.scheduled_week, cv.cal_week, cv.due) AS from_date,
+      co.name AS from_coach, rv.scheduled_week AS done_on
+    FROM action_items a LEFT JOIN visits cv ON cv.id=a.created_visit_id LEFT JOIN coaches co ON co.id=cv.cal_coach
+    LEFT JOIN visits rv ON rv.id=a.resolved_visit_id WHERE a.client_id=? AND a.status=?`;
+  return {
+    open: db.prepare(base + ' ORDER BY a.created, a.id').all(clientId, 'open'),
+    done: db.prepare(base + ' ORDER BY a.resolved_at DESC LIMIT 30').all(clientId, 'done'),
+    dropped: db.prepare(base + ' ORDER BY a.resolved_at DESC LIMIT 100').all(clientId, 'dropped'),
+  };
+}
+route('GET', /^\/api\/clients\/(\d+)\/commitments$/, ['admin','lead','sales','coach'], (req, res, m) => {
+  send(res, 200, clientCommitments(+m[1]));
+});
+route('POST', /^\/api\/clients\/(\d+)\/commitments$/, ['admin','lead','coach'], (req, res, m, body, user) => {
+  const cl = db.prepare('SELECT id, name FROM clients WHERE id=? AND deleted_at IS NULL').get(+m[1]);
+  if(!cl) return err(res, 404, 'not found');
+  if(!canTouchClientCommitments(user, cl.id, null)) return err(res, 403, 'Only the assigned coach, a lead or an admin can add commitments');
+  const t = commitLine(body && body.text);
+  if(!t) return err(res, 400, 'Write the commitment first');
+  if(t.length > 300) return err(res, 400, 'Keep a commitment short (under 300 characters) — put longer write-ups in the visit notes');
+  db.prepare("INSERT INTO action_items(client_id,text,status,created_by,created) VALUES(?,?,'open',?,?)").run(cl.id, t, user.email, new Date().toISOString());
+  log(user.email, 'commitment.add', { client: cl.name, text: t });
+  send(res, 200, { ok: true });
+});
+route('PATCH', /^\/api\/commitments\/(\d+)$/, ['admin','lead','coach'], (req, res, m, body, user) => {
+  const a = db.prepare('SELECT * FROM action_items WHERE id=?').get(+m[1]);
+  if(!a) return err(res, 404, 'not found');
+  if(!canTouchClientCommitments(user, a.client_id, a.created_visit_id)) return err(res, 403, "Only the client's coach, a lead or an admin can change commitments");
+  const f = {};
+  if(body.text !== undefined){
+    const t = commitLine(body.text);
+    if(!t) return err(res, 400, 'A commitment cannot be empty — remove it instead');
+    if(t.length > 300) return err(res, 400, 'Keep a commitment short (under 300 characters)');
+    f.text = t;
+  }
+  if(body.status !== undefined){
+    if(!['open','done','dropped'].includes(body.status)) return err(res, 400, 'bad status');
+    f.status = body.status;
+    f.resolved_at = body.status === 'open' ? null : new Date().toISOString();
+    if(body.status === 'open') f.resolved_visit_id = null;
+  }
+  if(!Object.keys(f).length) return send(res, 200, { ok: true });
+  db.prepare(`UPDATE action_items SET ${Object.keys(f).map(k=>k+'=?').join(',')} WHERE id=?`).run(...Object.values(f), a.id);
+  log(user.email, 'commitment.edit', { id: a.id, client_id: a.client_id, from: a.status, ...f });
+  send(res, 200, { ok: true });
+});
+/* Remove every open commitment that came from one visit (or the hand-added ones when
+   visit_id is null) — the fix for a visit report pasted into the commitments box. */
+route('POST', /^\/api\/clients\/(\d+)\/commitments\/clear$/, ['admin','lead','coach'], (req, res, m, body, user) => {
+  const cid = +m[1], vid = body && body.visit_id ? +body.visit_id : null;
+  if(!canTouchClientCommitments(user, cid, vid)) return err(res, 403, "Only the client's coach, a lead or an admin can change commitments");
+  const r = vid
+    ? db.prepare("UPDATE action_items SET status='dropped', resolved_at=? WHERE client_id=? AND created_visit_id=? AND status='open'").run(new Date().toISOString(), cid, vid)
+    : db.prepare("UPDATE action_items SET status='dropped', resolved_at=? WHERE client_id=? AND created_visit_id IS NULL AND status='open'").run(new Date().toISOString(), cid);
+  log(user.email, 'commitments.clear', { client_id: cid, visit: vid, count: r.changes });
+  send(res, 200, { ok: true, cleared: r.changes });
+});
+/* Admin: visits whose commitments look like a pasted report (lots of lines or long lines). */
+route('GET', /^\/api\/admin\/commitment-review$/, ['admin'], (req, res) => {
+  const rows = db.prepare(`SELECT a.client_id, c.name AS client, a.created_visit_id AS visit_id, COUNT(*) AS n,
+      MAX(LENGTH(a.text)) AS longest, SUM(LENGTH(a.text) > 200) AS long_lines, MIN(a.created) AS created, MIN(a.text) AS sample
+    FROM action_items a JOIN clients c ON c.id=a.client_id
+    WHERE a.status='open' GROUP BY a.client_id, a.created_visit_id HAVING n >= 9 OR longest > 200 ORDER BY n DESC`).all();
+  send(res, 200, rows);
 });
 /* Single visit details */
 route('GET', /^\/api\/visits\/(\d+)$/, ['admin','lead','sales','coach'], (req, res, m) => {
@@ -3628,17 +3728,13 @@ route('GET', /^\/api\/clients\/(\d+)$/, ['admin','lead','sales','coach'], (req, 
     const assignedCoach = cl.assigned_coach_id ? getCoach(cl.assigned_coach_id) : null;
     const notes = db.prepare(`SELECT id, note_date, note_type, author_name, body, wins, issues, focus, visit_id, source, store
       FROM client_notes WHERE client_id=? ORDER BY note_date DESC, id DESC`).all(cl.id);
-    const openCommitments = db.prepare(`SELECT a.id, a.text, a.created, a.created_visit_id, cv.due AS from_due, cv.cal_week AS from_week
-      FROM action_items a LEFT JOIN visits cv ON cv.id=a.created_visit_id
-      WHERE a.client_id=? AND a.status='open' ORDER BY a.created`).all(cl.id);
-    const doneCommitments = db.prepare(`SELECT a.id, a.text, a.resolved_at, rv.scheduled_week AS done_on
-      FROM action_items a LEFT JOIN visits rv ON rv.id=a.resolved_visit_id
-      WHERE a.client_id=? AND a.status='done' ORDER BY a.resolved_at DESC LIMIT 20`).all(cl.id);
+    const cm = clientCommitments(cl.id);
+    const openCommitments = cm.open, doneCommitments = cm.done, droppedCommitments = cm.dropped;
     const lidStats = db.prepare(`SELECT ${LID_COLS} FROM lid_stats WHERE client_id=? ORDER BY COALESCE(visit_date,'') DESC, id DESC`).all(cl.id);
     send(res, 200, {
       client: cl,
       assignedCoach,
-      contracts, visits, notes, openCommitments, doneCommitments, lidStats,
+      contracts, visits, notes, openCommitments, doneCommitments, droppedCommitments, lidStats,
       visitProgress: { year, total: visitsThisYear.length, completed: completedThisYear },
       health: clientHealth(cl, contracts, visits, assignedCoach),
     });

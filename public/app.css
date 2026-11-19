@@ -524,3 +524,15 @@ details.guide[open]>summary{border-bottom:1px solid var(--line);background:#fafa
 .mhead:first-child{margin-top:0}
 .railseg{display:flex;width:100%;margin-bottom:10px}
 .railseg button{flex:1;justify-content:center;padding:7px 8px;font-size:11px}
+
+/* Commitments panel: grouped by visit, with check / edit / remove */
+.commitgrp{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px}
+.commitgrp-h{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12.5px;margin-bottom:8px}
+.commitlist li input[type=checkbox]{flex:none;margin-top:3px;cursor:pointer}
+.commitlist .ctext{overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer;white-space:pre-wrap}
+.commitlist .ctext.full{display:block}
+.commitlist .cact{flex:none;margin-left:auto;display:flex;gap:4px;opacity:.45}
+.commitlist li:hover .cact{opacity:1}
+.cbtn{border:none;background:none;cursor:pointer;color:var(--muted);font-size:12.5px;padding:0 4px}
+.cbtn:hover{color:var(--ink)}
+.vm-commit-row span{overflow-wrap:anywhere}
